@@ -214,6 +214,16 @@ def preview_document(
     filepath = doc["filepath"]
     ext      = doc["extension"]
 
+    if "::" in filepath:
+        # Document extrait d'une archive (.zip, .tar.*, .7z) — il n'existe
+        # que temporairement pendant l'indexation, aucun aperçu possible.
+        archive_path, member = filepath.split("::", 1)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Aperçu non disponible : document extrait de l'archive "
+                   f"'{Path(archive_path).name}' (membre : {member})"
+        )
+
     if not Path(filepath).exists():
         raise HTTPException(status_code=404, detail="Fichier introuvable")
 
