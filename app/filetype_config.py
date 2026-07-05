@@ -49,6 +49,20 @@ DEFAULT_CONFIG = {
     "xls":     {"enabled": True,  "max_size_mb": 30},
     "txt":     {"enabled": True,  "max_size_mb": 5},
     "pst":     {"enabled": True,  "max_size_mb": 2000},
+    # Archives — la clé correspond à archive_extractor.archive_kind(),
+    # PAS à path.suffix (qui donnerait ".gz" pour "x.tar.gz", pas
+    # "tar.gz"). max_size_mb ici limite la taille du FICHIER ARCHIVE
+    # lui-même avant extraction — distinct de archive_max_total_size_mb
+    # (runtime_config.py) qui limite la taille décompressée totale.
+    "zip":     {"enabled": True,  "max_size_mb": 500},
+    "tar":     {"enabled": True,  "max_size_mb": 500},
+    "tar.gz":  {"enabled": True,  "max_size_mb": 500},
+    "tgz":     {"enabled": True,  "max_size_mb": 500},
+    "tar.bz2": {"enabled": True,  "max_size_mb": 500},
+    "tbz2":    {"enabled": True,  "max_size_mb": 500},
+    "tar.xz":  {"enabled": True,  "max_size_mb": 500},
+    "txz":     {"enabled": True,  "max_size_mb": 500},
+    "7z":      {"enabled": True,  "max_size_mb": 500},
     "default": {"enabled": False, "max_size_mb": 10},
 }
 

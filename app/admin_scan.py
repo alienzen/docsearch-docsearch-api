@@ -40,13 +40,28 @@ KAFKA_TOPIC     = os.getenv("KAFKA_TOPIC", "documents-to-index")
 _es = Elasticsearch(ES_HOST, retry_on_timeout=True, max_retries=3, request_timeout=60)
 
 
-def _is_archive(path: Path) -> bool:
-    """Détection minimale — voir docsearch-ingestion/archive_extractor.py
-    pour la logique complète (extraction), non nécessaire ici."""
+def _archive_kind(path: Path) -> str | None:
+    """
+    Détection minimale — voir docsearch-ingestion/archive_extractor.py
+    (archive_kind) pour la logique de référence, dupliquée ici à
+    l'identique. Ne PAS utiliser path.suffix pour les extensions
+    composées : Path("x.tar.gz").suffix vaut ".gz", pas ".tar.gz".
+    """
     name = path.name.lower()
-    if name.endswith((".tar.gz", ".tar.bz2", ".tar.xz")):
-        return True
-    return path.suffix.lower() in {".zip", ".tar", ".tgz", ".tbz2", ".txz", ".7z"}
+    if name.endswith(".tar.gz"):  return "tar.gz"
+    if name.endswith(".tar.bz2"): return "tar.bz2"
+    if name.endswith(".tar.xz"):  return "tar.xz"
+    if name.endswith(".tgz"):     return "tgz"
+    if name.endswith(".tbz2"):    return "tbz2"
+    if name.endswith(".txz"):     return "txz"
+    if name.endswith(".tar"):     return "tar"
+    if name.endswith(".zip"):     return "zip"
+    if name.endswith(".7z"):      return "7z"
+    return None
+
+
+def _is_archive(path: Path) -> bool:
+    return _archive_kind(path) is not None
 
 
 def _is_excluded_name(filename: str) -> bool:
@@ -110,16 +125,17 @@ def trigger_scan(subfolder: str | None = None) -> dict:
                 extension = path.suffix.lower()
                 archive = _is_archive(path)
 
-                if not archive:
-                    try:
-                        size = path.stat().st_size
-                    except OSError:
-                        skipped += 1
-                        continue
-                    ok, _ = is_allowed(extension, size)
-                    if not ok:
-                        skipped += 1
-                        continue
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    skipped += 1
+                    continue
+
+                check_key = _archive_kind(path) if archive else extension
+                ok, _ = is_allowed(check_key, size)
+                if not ok:
+                    skipped += 1
+                    continue
 
                 message = {
                     "filepath":   str(path.resolve()),
