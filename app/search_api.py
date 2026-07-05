@@ -3,6 +3,7 @@
 
 import os
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
+ES_INDEX = os.getenv("ES_INDEX", "documents")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 DOCS_FOLDER = os.getenv("DOCS_FOLDER", "/documents")
 DEV_USER = os.getenv("DEV_USER", "")
@@ -136,7 +137,7 @@ def search(
     )
 
     res = es.search(
-        index="documents",
+        index=ES_INDEX,
         query={"bool": {"must": must, "filter": filters}},
         highlight={"fields": {
             "content": {"fragment_size": 200, "number_of_fragments": 2}
@@ -181,7 +182,7 @@ def get_document(
     username = resolve_user(x_user)
 
     try:
-        res = es.get(index="documents", id=doc_id)
+        res = es.get(index=ES_INDEX, id=doc_id)
     except Exception:
         raise HTTPException(status_code=404, detail="Document introuvable")
 
@@ -255,11 +256,11 @@ def _convert_to_pdf(filepath: str) -> StreamingResponse:
 # ── Métriques ─────────────────────────────────────────────────
 @app.get("/metrics")
 def get_metrics():
-    count   = es.count(index="documents")["count"]
-    stats   = es.indices.stats(index="documents")
+    count   = es.count(index=ES_INDEX)["count"]
+    stats   = es.indices.stats(index=ES_INDEX)
     size_gb = stats["_all"]["total"]["store"]["size_in_bytes"] / 1e9
     by_ext  = es.search(
-        index="documents", size=0,
+        index=ES_INDEX, size=0,
         aggs={"by_ext": {"terms": {"field": "extension", "size": 10}}}
     )
     return {
