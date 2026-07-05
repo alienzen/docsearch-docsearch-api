@@ -70,6 +70,18 @@ sur Kafka (les workers déjà actifs font le travail). Piloter le nombre
 de workers ou démarrer/arrêter des conteneurs reste réservé à
 `manage.sh` en CLI (`docsearch-infra`).
 
+### Tester sans authentification
+
+`ADMIN_AUTH_DISABLED=true` contourne tout contrôle d'accès sur
+`/admin/*` (y compris la vérification du header `X-User`) — utile pour
+tester le panneau localement sans SSO/LDAP configurés.
+
+⚠️ **Jamais en production** : n'importe qui peut alors modifier la
+configuration, purger l'index ou déclencher des scans sans la moindre
+vérification. Le contournement est volontairement bruyant (bannière
+au démarrage + log à chaque requête `/admin/*`) pour qu'un oubli soit
+impossible à manquer dans les logs.
+
 **Modules dupliqués depuis `docsearch-ingestion`** (architecture
 multi-dépôts : impossible d'importer le code d'un autre dépôt au
 build) — `filetype_config.py`, `runtime_config.py`, `path_filter.py`

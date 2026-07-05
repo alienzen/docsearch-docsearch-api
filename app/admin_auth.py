@@ -4,6 +4,13 @@
 # SSO) ne suffit pas à administrer DocSearch — seuls les membres du
 # groupe ADMIN_GROUP (résolu via LDAP/AD, voir ldap_resolver.py) ont
 # accès aux routes /admin/*.
+#
+# ⚠️  ADMIN_AUTH_DISABLED=true contourne TOUT ce contrôle (y compris
+# la vérification du header X-User) — réservé aux tests locaux sans
+# SSO/LDAP configurés. Ne JAMAIS l'activer en production : la
+# vérification est volontairement bruyante (log à chaque requête + un
+# avertissement bien visible au démarrage) pour qu'un oubli soit
+# impossible à manquer dans les logs.
 
 import os
 import logging
@@ -13,6 +20,20 @@ from ldap_resolver import get_user_groups, LDAP_ENABLED
 logger = logging.getLogger(__name__)
 
 ADMIN_GROUP = os.getenv("ADMIN_GROUP", "").strip().lower()
+ADMIN_AUTH_DISABLED = os.getenv("ADMIN_AUTH_DISABLED", "false").strip().lower() == "true"
+
+if ADMIN_AUTH_DISABLED:
+    logger.warning(
+        "\n"
+        "╔═══════════════════════════════════════════════════════════╗\n"
+        "║  ⚠️   ADMIN_AUTH_DISABLED=true                              ║\n"
+        "║  Le contrôle d'accès du panneau /admin est DÉSACTIVÉ.       ║\n"
+        "║  N'IMPORTE QUI peut modifier la configuration, purger      ║\n"
+        "║  l'index et déclencher des scans SANS AUTHENTIFICATION.    ║\n"
+        "║  Réservé aux tests locaux — retirer avant toute mise en     ║\n"
+        "║  production.                                                ║\n"
+        "╚═══════════════════════════════════════════════════════════╝"
+    )
 
 
 def require_admin(x_user: str | None = Header(default=None)) -> str:
@@ -26,7 +47,14 @@ def require_admin(x_user: str | None = Header(default=None)) -> str:
         sans résolution LDAP)
       - 403 si l'utilisateur n'appartient pas au groupe administrateur
     Retourne le login de l'utilisateur si l'accès est autorisé.
+
+    Si ADMIN_AUTH_DISABLED=true, retourne immédiatement sans aucune
+    vérification (voir avertissement ci-dessus).
     """
+    if ADMIN_AUTH_DISABLED:
+        logger.warning(f"[admin_auth] Accès /admin SANS authentification (ADMIN_AUTH_DISABLED=true) — utilisateur : {x_user or 'anonyme'}")
+        return x_user or "dev-admin"
+
     if not x_user:
         raise HTTPException(
             status_code=401,
