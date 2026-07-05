@@ -22,3 +22,8 @@ httpx==0.28.0
 # ldap3 est une implémentation pure Python — aucune dépendance
 # système (pas besoin de libldap-dev ni du paquet apt ldap-utils)
 ldap3==2.9.1
+
+# Panneau d'administration : lecture de l'état du groupe de consumers
+# Kafka (workers actifs, lag = progression de l'indexation) et
+# déclenchement d'un scan depuis l'API (publication sur Kafka)
+kafka-python-ng==2.2.3

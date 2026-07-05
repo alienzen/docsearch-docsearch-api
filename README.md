@@ -47,6 +47,35 @@ acl_filter = {
 }
 ```
 
+## Panneau d'administration (/admin)
+
+Routes protégées par appartenance à un groupe LDAP/AD (`ADMIN_GROUP`,
+nécessite `LDAP_ENABLED=true`) — voir `admin_auth.py`. Interface web
+correspondante : `docsearch-ui/public/admin.html`.
+
+| Route | Rôle |
+|---|---|
+| `GET /admin/status` | État de tous les composants (ES, Redis, Tika, Kafka, workers actifs, progression de l'indexation, battement du watcher) |
+| `GET/POST /admin/filetypes` | Types de fichiers indexés (activation, taille max) |
+| `GET/POST /admin/config` | Paramètres opérationnels (limites d'archives, cadences) |
+| `GET/POST /admin/path-filters` | Inclusion/exclusion de sous-dossiers |
+| `POST /admin/purge-path` | Purger l'index existant selon un motif (dry-run par défaut) |
+| `POST /admin/scan` | Déclencher un scan d'indexation (en arrière-plan) |
+
+**Aucune de ces routes n'a besoin d'un accès Docker** : l'état est
+vérifié via le réseau applicatif normal (HTTP, Redis, Kafka — comme
+un client classique), et le déclenchement de scan publie simplement
+sur Kafka (les workers déjà actifs font le travail). Piloter le nombre
+de workers ou démarrer/arrêter des conteneurs reste réservé à
+`manage.sh` en CLI (`docsearch-infra`).
+
+**Modules dupliqués depuis `docsearch-ingestion`** (architecture
+multi-dépôts : impossible d'importer le code d'un autre dépôt au
+build) — `filetype_config.py`, `runtime_config.py`, `path_filter.py`
+doivent rester identiques entre les deux dépôts. Redis reste la seule
+source de vérité partagée, donc pas de risque de désynchronisation des
+*données* — seul le *code* doit être maintenu en parallèle.
+
 ## Lancer en local (nécessite un ES déjà peuplé)
 
 ```bash

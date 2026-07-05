@@ -15,11 +15,17 @@ import logging
 from pathlib import Path
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from elasticsearch import Elasticsearch
 from ldap_resolver import get_user_groups
+from admin_auth import require_admin
+import cluster_status
+import admin_scan
+import filetype_config
+import runtime_config
+import path_filter
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +279,131 @@ def get_metrics():
         "tika_version": "3.3.1.0",
         "acl_enabled":  True,
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# PANNEAU D'ADMINISTRATION — /admin/*
+#
+# Toutes ces routes exigent Depends(require_admin) : l'utilisateur
+# doit être authentifié (X-User, injecté par Nginx après validation
+# SSO) ET membre du groupe ADMIN_GROUP (résolu via LDAP/AD).
+#
+# Aucune de ces routes n'a besoin d'un accès Docker — vérification
+# d'état via le réseau applicatif (HTTP/Redis/Kafka), déclenchement
+# de scan/purge via publication Kafka ou requêtes ES directes. Piloter
+# le nombre de workers ou démarrer/arrêter des conteneurs reste
+# réservé à `manage.sh` en CLI (voir docsearch-infra).
+# ═══════════════════════════════════════════════════════════════
+
+from fastapi import BackgroundTasks
+
+
+class FiletypeUpdate(BaseModel):
+    enabled: bool | None = None
+    max_size_mb: float | None = None
+
+
+class ConfigUpdate(BaseModel):
+    value: str
+
+
+class PathFilterPattern(BaseModel):
+    pattern: str
+
+
+class PurgeRequest(BaseModel):
+    pattern: str
+    dry_run: bool = True
+
+
+class ScanRequest(BaseModel):
+    subfolder: str | None = None
+
+
+@app.get("/admin/status")
+def admin_status(user: str = Depends(require_admin)):
+    """État de tous les composants : ES, Redis, Tika, Kafka, workers
+    actifs, progression de l'indexation (lag), battement du watcher."""
+    return cluster_status.get_full_status()
+
+
+@app.get("/admin/filetypes")
+def admin_get_filetypes(user: str = Depends(require_admin)):
+    return filetype_config.get_config()
+
+
+@app.post("/admin/filetypes/{extension}")
+def admin_set_filetype(extension: str, body: FiletypeUpdate, user: str = Depends(require_admin)):
+    return filetype_config.set_filetype(extension, enabled=body.enabled, max_size_mb=body.max_size_mb)
+
+
+@app.get("/admin/config")
+def admin_get_config(user: str = Depends(require_admin)):
+    return runtime_config.get_runtime_config()
+
+
+@app.post("/admin/config/{key}")
+def admin_set_config(key: str, body: ConfigUpdate, user: str = Depends(require_admin)):
+    try:
+        return runtime_config.set_param(key, body.value)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/admin/path-filters")
+def admin_get_path_filters(user: str = Depends(require_admin)):
+    return path_filter.get_config()
+
+
+@app.post("/admin/path-filters/exclude")
+def admin_exclude_path(body: PathFilterPattern, user: str = Depends(require_admin)):
+    return path_filter.add_excluded(body.pattern)
+
+
+@app.post("/admin/path-filters/include")
+def admin_include_path(body: PathFilterPattern, user: str = Depends(require_admin)):
+    return path_filter.add_included(body.pattern)
+
+
+@app.post("/admin/path-filters/remove")
+def admin_remove_path_filter(body: PathFilterPattern, user: str = Depends(require_admin)):
+    # POST plutôt que DELETE avec le motif dans l'URL : un motif comme
+    # "finance/confidentiel" contient des "/" qui casseraient un
+    # paramètre de chemin FastAPI.
+    return path_filter.remove_filter(body.pattern)
+
+
+@app.post("/admin/purge-path")
+def admin_purge_path(body: PurgeRequest, user: str = Depends(require_admin)):
+    """dry_run=True (défaut) : aperçu sans suppression. Toujours
+    appeler en dry-run d'abord depuis l'interface avant confirmation."""
+    try:
+        n = admin_scan.purge_path(body.pattern, dry_run=body.dry_run)
+        return {"pattern": body.pattern, "dry_run": body.dry_run, "matched": n}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/scan")
+def admin_trigger_scan(
+    body: ScanRequest,
+    background_tasks: BackgroundTasks,
+    user: str = Depends(require_admin),
+):
+    """
+    Déclenche un scan (publication Kafka) en arrière-plan — ne bloque
+    pas la requête HTTP le temps de parcourir tout DOCS_FOLDER. Suivre
+    la progression via GET /admin/status (workers.pending_documents).
+    """
+    def _run():
+        try:
+            result = admin_scan.trigger_scan(body.subfolder)
+            logger.info(f"[admin] Scan terminé par {user} : {result}")
+        except Exception as e:
+            logger.error(f"[admin] Scan déclenché par {user} a échoué : {e}")
+
+    background_tasks.add_task(_run)
+    return {"status": "démarré", "subfolder": body.subfolder or "(dossier complet)"}
 
 
 # ── Pages ──────────────────────────────────────────────────────
