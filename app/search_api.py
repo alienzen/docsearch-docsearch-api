@@ -262,21 +262,19 @@ def _convert_to_pdf(filepath: str) -> StreamingResponse:
 # ── Métriques ─────────────────────────────────────────────────
 @app.get("/metrics")
 def get_metrics():
+    info    = es.info()
     count   = es.count(index=ES_INDEX)["count"]
     stats   = es.indices.stats(index=ES_INDEX)
     size_gb = stats["_all"]["total"]["store"]["size_in_bytes"] / 1e9
     by_ext  = es.search(
         index=ES_INDEX, size=0,
-        aggs={"by_ext": {"terms": {"field": "extension", "size": 10}}}
+        aggs={"by_ext": {"terms": {"field": "extension", "size": 20}}}
     )
     return {
         "indexed":      count,
-        "total":        3_000_000,
-        "percent":      round(count / 3_000_000 * 100, 2),
         "size_gb":      round(size_gb, 2),
         "by_extension": by_ext["aggregations"]["by_ext"]["buckets"],
-        "es_version":   "9.4.2",
-        "tika_version": "3.3.1.0",
+        "es_version":   info["version"]["number"],
         "acl_enabled":  True,
     }
 

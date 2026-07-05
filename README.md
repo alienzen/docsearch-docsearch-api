@@ -56,6 +56,7 @@ correspondante : `docsearch-ui/public/admin.html`.
 | Route | Rôle |
 |---|---|
 | `GET /admin/status` | État de tous les composants (ES, Redis, Tika, Kafka, workers actifs, progression de l'indexation, battement du watcher) |
+| `GET /metrics` | Métriques d'indexation (documents indexés, taille de l'index, répartition par extension) — route publique existante, réutilisée par le panneau admin |
 | `GET/POST /admin/filetypes` | Types de fichiers indexés (activation, taille max) |
 | `GET/POST /admin/config` | Paramètres opérationnels (limites d'archives, cadences) |
 | `GET/POST /admin/path-filters` | Inclusion/exclusion de sous-dossiers |
