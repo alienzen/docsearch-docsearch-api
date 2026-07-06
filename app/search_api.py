@@ -165,9 +165,18 @@ def search(
     res = es.search(
         index=ES_INDEX,
         query={"bool": {"must": must, "filter": filters}},
-        highlight={"fields": {
-            "content": {"fragment_size": 200, "number_of_fragments": 2}
-        }},
+        highlight={
+            "fields": {
+                "content": {"fragment_size": 200, "number_of_fragments": 2}
+            },
+            # Sans ceci, ES utilise ses balises par défaut (<em>...</em>),
+            # qui ne correspondent à AUCUNE règle CSS du frontend — les
+            # termes trouvés n'étaient donc jamais visuellement surlignés,
+            # juste en italique. On lui fait directement émettre la classe
+            # CSS attendue.
+            "pre_tags":  ['<mark class="highlight">'],
+            "post_tags": ["</mark>"],
+        },
         sort=sort_clause,
         from_=req.from_,
         size=req.size,
