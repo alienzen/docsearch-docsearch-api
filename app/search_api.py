@@ -64,6 +64,8 @@ class SearchQuery(BaseModel):
     has_attachments: bool | None = None
     date_from:       str | None = None
     date_to:         str | None = None
+    author:          str | None = None
+    folder:          str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -135,6 +137,20 @@ def search(
         if req.date_from: r["gte"] = req.date_from
         if req.date_to:   r["lte"] = req.date_to
         filters.append({"range": {"date": r}})
+    if req.author:
+        filters.append({"term": {"author": req.author}})
+    if req.folder:
+        # Correspond au dossier exact OU à tout sous-dossier en dessous
+        # (ex: folder="Finance" matche "Finance" et "Finance/Rapports")
+        filters.append({
+            "bool": {
+                "should": [
+                    {"term":   {"folder": req.folder}},
+                    {"prefix": {"folder": req.folder.rstrip("/") + "/"}},
+                ],
+                "minimum_should_match": 1,
+            }
+        })
 
     sort_clause = (
         [{"_score": "desc"}]
@@ -152,11 +168,12 @@ def search(
         from_=req.from_,
         size=req.size,
         source=["filename", "filepath", "extension", "title", "author",
-                "size", "date", "indexed_at", "has_attachments",
+                "size", "date", "indexed_at", "has_attachments", "folder",
                 "acl.owner", "acl.groups", "acl.public"],
         aggs={
-            "by_extension": {"terms": {"field": "extension", "size": 10}},
-            "by_author":    {"terms": {"field": "author",    "size": 10}},
+            "by_extension": {"terms": {"field": "extension",  "size": 10}},
+            "by_author":    {"terms": {"field": "author",     "size": 10}},
+            "by_folder":    {"terms": {"field": "folder_top",  "size": 10}},
         }
     )
 
@@ -166,6 +183,7 @@ def search(
         "username": username,
         "results": [
             {
+                "id":        h["_id"],
                 **h["_source"],
                 "score":     round(h["_score"], 4),
                 "highlight": h.get("highlight", {}).get("content", []),
@@ -175,6 +193,7 @@ def search(
         "facets": {
             "extensions": res["aggregations"]["by_extension"]["buckets"],
             "authors":    res["aggregations"]["by_author"]["buckets"],
+            "folders":    res["aggregations"]["by_folder"]["buckets"],
         }
     }
 
