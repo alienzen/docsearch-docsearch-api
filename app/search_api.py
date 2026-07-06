@@ -109,12 +109,34 @@ def resolve_user(x_user: str | None) -> str:
     return "anonymous"
 
 
+def _ensure_index_exists():
+    """
+    Vérifie que l'index ES existe avant toute requête qui le suppose —
+    sans ça, une installation fraîche (avant le tout premier
+    ./manage.sh init) remonte une exception ES non gérée, traduite par
+    FastAPI en 500 générique ('Internal Server Error') sans aucune
+    indication utile. On préfère l'anticiper avec un message clair et
+    actionnable.
+    """
+    if not es.indices.exists(index=ES_INDEX):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"L'index Elasticsearch '{ES_INDEX}' n'existe pas encore — "
+                f"aucune indexation n'a été lancée. Exécutez "
+                f"'./manage.sh init' depuis docsearch-infra pour créer "
+                f"l'index et indexer les documents."
+            ),
+        )
+
+
 # ── Recherche ────────────────────────────────────────────────
 @app.post("/search")
 def search(
     req: SearchQuery,
     x_user: str | None = Header(default=None),
 ):
+    _ensure_index_exists()
     username   = resolve_user(x_user)
     acl_filter = build_acl_filter(username)
 
@@ -294,6 +316,7 @@ def _convert_to_pdf(filepath: str) -> StreamingResponse:
 # ── Métriques ─────────────────────────────────────────────────
 @app.get("/metrics")
 def get_metrics():
+    _ensure_index_exists()
     info    = es.info()
     count   = es.count(index=ES_INDEX)["count"]
     stats   = es.indices.stats(index=ES_INDEX)
