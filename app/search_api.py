@@ -62,8 +62,8 @@ class SearchQuery(BaseModel):
     sort:            str = "_score"
     extension:       str | None = None
     has_attachments: bool | None = None
-    date_from:       str | None = None
-    date_to:         str | None = None
+    date_from:       str | None = None   # filtre sur date_modified (voir build de la requête)
+    date_to:         str | None = None   # idem
     author:          str | None = None
     folder:          str | None = None
 
@@ -136,7 +136,7 @@ def search(
         r = {}
         if req.date_from: r["gte"] = req.date_from
         if req.date_to:   r["lte"] = req.date_to
-        filters.append({"range": {"date": r}})
+        filters.append({"range": {"date_modified": r}})
     if req.author:
         filters.append({"term": {"author": req.author}})
     if req.folder:
@@ -168,7 +168,7 @@ def search(
         from_=req.from_,
         size=req.size,
         source=["filename", "filepath", "extension", "title", "author",
-                "size", "date", "indexed_at", "has_attachments", "folder",
+                "size", "date_created", "date_modified", "indexed_at", "has_attachments", "folder",
                 "acl.owner", "acl.groups", "acl.public"],
         aggs={
             "by_extension": {"terms": {"field": "extension",  "size": 10}},
