@@ -181,36 +181,52 @@ def search(
     sort_clause = (
         [{"_score": "desc"}]
         if req.sort == "_score"
-        else [{req.sort: "desc"}, {"_score": "desc"}]
+        # "missing": "_last" explicite plutôt que de compter sur le
+        # comportement par défaut d'ES — utile ici car les emails PST
+        # n'ont pas de champ "size" (pst_extractor.py ne l'indexe pas),
+        # donc un tri par taille doit gérer ces valeurs absentes.
+        else [{req.sort: {"order": "desc", "missing": "_last"}}, {"_score": "desc"}]
     )
 
-    res = es.search(
-        index=ES_INDEX,
-        query={"bool": {"must": must, "filter": filters}},
-        highlight={
-            "fields": {
-                "content": {"fragment_size": 200, "number_of_fragments": 2}
+    try:
+        res = es.search(
+            index=ES_INDEX,
+            query={"bool": {"must": must, "filter": filters}},
+            highlight={
+                "fields": {
+                    "content": {"fragment_size": 200, "number_of_fragments": 2}
+                },
+                # Sans ceci, ES utilise ses balises par défaut (<em>...</em>),
+                # qui ne correspondent à AUCUNE règle CSS du frontend — les
+                # termes trouvés n'étaient donc jamais visuellement surlignés,
+                # juste en italique. On lui fait directement émettre la classe
+                # CSS attendue.
+                "pre_tags":  ['<mark class="highlight">'],
+                "post_tags": ["</mark>"],
             },
-            # Sans ceci, ES utilise ses balises par défaut (<em>...</em>),
-            # qui ne correspondent à AUCUNE règle CSS du frontend — les
-            # termes trouvés n'étaient donc jamais visuellement surlignés,
-            # juste en italique. On lui fait directement émettre la classe
-            # CSS attendue.
-            "pre_tags":  ['<mark class="highlight">'],
-            "post_tags": ["</mark>"],
-        },
-        sort=sort_clause,
-        from_=req.from_,
-        size=req.size,
-        source=["filename", "filepath", "extension", "title", "author",
-                "size", "date_created", "date_modified", "indexed_at", "has_attachments", "folder",
-                "acl.owner", "acl.groups", "acl.public"],
-        aggs={
-            "by_extension": {"terms": {"field": "extension",  "size": 10}},
-            "by_author":    {"terms": {"field": "author",     "size": 10}},
-            "by_folder":    {"terms": {"field": "folder_top",  "size": 10}},
-        }
-    )
+            sort=sort_clause,
+            # Nécessaire pour que le tri secondaire par _score (utilisé
+            # comme départage quand le tri principal n'est pas _score)
+            # soit réellement calculé — sans ça, ES ne calcule pas les
+            # scores du tout en dehors d'un tri _score primaire.
+            track_scores=True,
+            from_=req.from_,
+            size=req.size,
+            source=["filename", "filepath", "extension", "title", "author",
+                    "size", "date_created", "date_modified", "indexed_at", "has_attachments", "folder",
+                    "acl.owner", "acl.groups", "acl.public"],
+            aggs={
+                "by_extension": {"terms": {"field": "extension",  "size": 10}},
+                "by_author":    {"terms": {"field": "author",     "size": 10}},
+                "by_folder":    {"terms": {"field": "folder_top",  "size": 10}},
+            }
+        )
+    except Exception as e:
+        # Remonte le vrai message ES plutôt qu'un 500 générique opaque
+        # ("Internal Server Error") — indispensable pour diagnostiquer
+        # un problème de tri/requête sans avoir à fouiller les logs.
+        logger.error(f"[search] Erreur ES pour la requête '{req.query}' (sort={req.sort}) : {e}")
+        raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}")
 
     hits = res["hits"]["hits"]
     return {
