@@ -60,7 +60,7 @@ class SearchQuery(BaseModel):
     size:            int = 10
     from_:           int = Field(0, alias="from")
     sort:            str = "_score"
-    extension:       str | None = None
+    extension:       str | list[str] | None = None
     has_attachments: bool | None = None
     date_from:       str | None = None   # filtre sur date_modified (voir build de la requête)
     date_to:         str | None = None   # idem
@@ -129,7 +129,11 @@ def search(
     filters = [acl_filter]   # ACL en premier — mis en cache par ES
 
     if req.extension:
-        filters.append({"term": {"extension": f".{req.extension}"}})
+        # Accepte une extension unique ("pdf") ou une famille de formats
+        # (["docx", "doc"]) — utile pour un filtre "Word" qui doit couvrir
+        # à la fois le format moderne et l'ancien format binaire 97-2003.
+        exts = req.extension if isinstance(req.extension, list) else [req.extension]
+        filters.append({"terms": {"extension": [f".{e}" for e in exts]}})
     if req.has_attachments:
         filters.append({"term": {"has_attachments": True}})
     if req.date_from or req.date_to:
