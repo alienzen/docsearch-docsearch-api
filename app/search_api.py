@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, Request, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from elasticsearch import Elasticsearch
@@ -26,6 +26,7 @@ import admin_scan
 import filetype_config
 import runtime_config
 import path_filter
+import search_log
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,23 @@ def resolve_user(x_user: str | None) -> str:
     return "anonymous"
 
 
+def get_client_ip(request: Request) -> str | None:
+    """
+    Résout l'IP réelle du client. En production, Nginx est devant l'API
+    (voir nginx.conf) et transmet X-Forwarded-For / X-Real-IP — sans ça,
+    request.client.host ne serait que l'IP interne de Nginx, pas celle
+    de l'utilisateur. X-Forwarded-For peut contenir une chaîne de proxies
+    ("client, proxy1, proxy2") : le premier maillon est le client d'origine.
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip
+    return request.client.host if request.client else None
+
+
 def _ensure_index_exists():
     """
     Vérifie que l'index ES existe avant toute requête qui le suppose —
@@ -135,6 +153,7 @@ def _ensure_index_exists():
 @app.post("/search")
 def search(
     req: SearchQuery,
+    request: Request,
     x_user: str | None = Header(default=None),
 ):
     _ensure_index_exists()
@@ -260,9 +279,21 @@ def search(
         logger.error(f"[search] Erreur ES pour la requête '{req.query}' (sort={req.sort}) : {e}")
         raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}")
 
-    hits = res["hits"]["hits"]
+    hits  = res["hits"]["hits"]
+    total = res["hits"]["total"]["value"]
+
+    search_log.log_search(
+        es,
+        username=username,
+        ip=get_client_ip(request),
+        query=req.query,
+        search_in=req.search_in,
+        total_results=total,
+        result_files=[h["_source"].get("filename", "") for h in hits],
+    )
+
     return {
-        "total":    res["hits"]["total"]["value"],
+        "total":    total,
         "username": username,
         "results": [
             {
@@ -521,6 +552,75 @@ def admin_trigger_scan(
 
     background_tasks.add_task(_run)
     return {"status": "démarré", "subfolder": body.subfolder or "(dossier complet)"}
+
+
+# ── Statistiques de recherche ───────────────────────────────────
+@app.get("/admin/search-logs/summary")
+def admin_search_logs_summary(user: str = Depends(require_admin)):
+    """Compteurs agrégés + répartition par jour (14 derniers jours) pour
+    les cartes de résumé de la page /stats.html."""
+    try:
+        res = es.search(
+            index=search_log.SEARCH_LOG_INDEX,
+            size=0,
+            aggs={
+                "unique_users": {"cardinality": {"field": "username"}},
+                "unique_ips":   {"cardinality": {"field": "ip"}},
+                "by_day": {
+                    "date_histogram": {"field": "timestamp", "calendar_interval": "day"},
+                },
+            },
+        )
+    except Exception as e:
+        if "index_not_found" in str(e).lower():
+            return {"total_searches": 0, "unique_users": 0, "unique_ips": 0, "by_day": []}
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "total_searches": res["hits"]["total"]["value"],
+        "unique_users":    res["aggregations"]["unique_users"]["value"],
+        "unique_ips":      res["aggregations"]["unique_ips"]["value"],
+        "by_day": [
+            {"date": b["key_as_string"][:10], "count": b["doc_count"]}
+            for b in res["aggregations"]["by_day"]["buckets"][-14:]
+        ],
+    }
+
+
+@app.get("/admin/search-logs")
+def admin_search_logs(
+    user:     str = Depends(require_admin),
+    q:        str | None = None,
+    username: str | None = None,
+    size:     int = 50,
+    from_:    int = Query(0, alias="from"),
+):
+    """Liste paginée des recherches effectuées, plus récentes d'abord —
+    qui, quand, depuis quelle IP, quelle requête, combien de résultats."""
+    must = []
+    if q:
+        must.append({"match": {"query": q}})
+    if username:
+        must.append({"term": {"username": username.lower()}})
+    query = {"bool": {"must": must}} if must else {"match_all": {}}
+
+    try:
+        res = es.search(
+            index=search_log.SEARCH_LOG_INDEX,
+            query=query,
+            sort=[{"timestamp": {"order": "desc"}}],
+            size=size,
+            from_=from_,
+        )
+    except Exception as e:
+        if "index_not_found" in str(e).lower():
+            return {"total": 0, "results": []}
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "total":   res["hits"]["total"]["value"],
+        "results": [{"id": h["_id"], **h["_source"]} for h in res["hits"]["hits"]],
+    }
 
 
 # ── Pages ──────────────────────────────────────────────────────
