@@ -147,9 +147,10 @@ def search(
     # une recherche en texte libre dessus ne matcherait jamais un nom
     # partiel comme "Dupont" contre "Martin Dupont").
     FIELD_SETS = {
-        "all":    ["content", "title^2", "filename^3", "author.text"],
-        "title":  ["title"],
-        "author": ["author.text"],
+        "all":      ["content", "title^2", "filename^3", "author.text"],
+        "title":    ["title"],
+        "author":   ["author.text"],
+        "filepath": ["filepath.text"],
     }
     fields = FIELD_SETS.get(req.search_in, FIELD_SETS["all"])
 
