@@ -31,6 +31,16 @@ respectés, sans tolérance aux fautes de frappe), au lieu de la
 recherche floue par défaut (`fuzziness: "AUTO"`, qui tolère les
 variantes et fautes de frappe).
 
+**Recherche restreinte à un champ** : `search_in` (`"all"` par défaut,
+`"title"` ou `"author"`) limite la recherche en texte libre à un seul
+champ plutôt que tous. `author` interroge le sous-champ analysé
+`author.text` (le champ `author` racine est en `keyword`, non
+tokenisé — nécessaire pour le filtre exact des facettes, mais
+incompatible avec une recherche partielle en texte libre). ⚠️ Le
+sous-champ `author.text` n'est peuplé que pour les documents indexés
+après l'ajout de ce mapping — une réindexation est nécessaire pour
+que les documents déjà présents deviennent cherchables par ce biais.
+
 ## Authentification / ACL
 
 L'identité de l'utilisateur est lue depuis le header `X-User`, injecté par

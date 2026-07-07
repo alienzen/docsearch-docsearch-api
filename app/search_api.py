@@ -66,6 +66,7 @@ class SearchQuery(BaseModel):
     date_to:         str | None = None   # idem
     author:          str | None = None
     folder:          str | None = None
+    search_in:       str = "all"   # "all" | "title" | "author" — restreint le champ interrogé
 
     model_config = {"populate_by_name": True}
 
@@ -140,6 +141,18 @@ def search(
     username   = resolve_user(x_user)
     acl_filter = build_acl_filter(username)
 
+    # search_in restreint la recherche à un seul champ plutôt que tous
+    # ("Tout" par défaut). "author" utilise le sous-champ analysé
+    # author.text (pas le "author" brut, en keyword — non tokenisé,
+    # une recherche en texte libre dessus ne matcherait jamais un nom
+    # partiel comme "Dupont" contre "Martin Dupont").
+    FIELD_SETS = {
+        "all":    ["content", "title^2", "filename^3", "author.text"],
+        "title":  ["title"],
+        "author": ["author.text"],
+    }
+    fields = FIELD_SETS.get(req.search_in, FIELD_SETS["all"])
+
     # Convention habituelle des moteurs de recherche : entourer les
     # termes de guillemets ("terme exact") force une correspondance
     # exacte (type "phrase" — ordre et adjacence des mots respectés,
@@ -153,7 +166,7 @@ def search(
         must = [{
             "multi_match": {
                 "query":  phrase,
-                "fields": ["content", "title^2", "filename^3", "author"],
+                "fields": fields,
                 "type":   "phrase",
             }
         }]
@@ -161,7 +174,7 @@ def search(
         must = [{
             "multi_match": {
                 "query":     query_text,
-                "fields":    ["content", "title^2", "filename^3", "author"],
+                "fields":    fields,
                 "fuzziness": "AUTO",
             }
         }]
