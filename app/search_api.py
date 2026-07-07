@@ -438,6 +438,14 @@ def admin_set_filetype(extension: str, body: FiletypeUpdate, user: str = Depends
     return filetype_config.set_filetype(extension, enabled=body.enabled, max_size_mb=body.max_size_mb)
 
 
+@app.delete("/admin/filetypes/{extension}")
+def admin_remove_filetype(extension: str, user: str = Depends(require_admin)):
+    try:
+        return filetype_config.remove_filetype(extension)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/admin/config")
 def admin_get_config(user: str = Depends(require_admin)):
     return runtime_config.get_runtime_config()

@@ -158,6 +158,37 @@ def set_filetype(extension: str, enabled: bool | None = None, max_size_mb: float
     return config
 
 
+def remove_filetype(extension: str) -> dict:
+    """
+    Retire complètement une extension de la configuration — contrairement
+    à set_filetype(enabled=False) qui la garde désactivée dans la liste,
+    ceci fait disparaître l'entrée (utile pour annuler l'ajout d'une
+    extension custom). "default" ne peut pas être supprimée : c'est la
+    règle de repli pour toute extension non listée.
+    """
+    extension = extension.lower().lstrip(".")
+    if extension == "default":
+        raise ValueError("l'entrée 'default' ne peut pas être supprimée")
+
+    client = _get_redis_client()
+    if client is None:
+        raise RuntimeError(
+            "Redis injoignable — impossible d'enregistrer la configuration. "
+            "Vérifiez que le service redis tourne (docker compose ps redis)."
+        )
+
+    raw = client.get(CONFIG_KEY)
+    config = json.loads(raw) if raw else dict(DEFAULT_CONFIG)
+    config.pop(extension, None)
+    client.set(CONFIG_KEY, json.dumps(config))
+
+    global _cache, _cache_time
+    _cache = config
+    _cache_time = time.time()
+
+    return config
+
+
 def is_allowed(extension: str, size_bytes: int) -> tuple[bool, str]:
     """
     Vérifie si un fichier de cette extension et cette taille doit être
