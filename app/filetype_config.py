@@ -158,6 +158,30 @@ def set_filetype(extension: str, enabled: bool | None = None, max_size_mb: float
     return config
 
 
+def reset_to_default() -> dict:
+    """
+    Réinitialise toute la configuration à DEFAULT_CONFIG, écrasant les
+    extensions custom ajoutées ainsi que toute activation/taille modifiée
+    sur les extensions par défaut. Utile pour revenir d'un coup à un état
+    connu plutôt que de supprimer/réajuster chaque entrée une par une.
+    """
+    client = _get_redis_client()
+    if client is None:
+        raise RuntimeError(
+            "Redis injoignable — impossible d'enregistrer la configuration. "
+            "Vérifiez que le service redis tourne (docker compose ps redis)."
+        )
+
+    config = dict(DEFAULT_CONFIG)
+    client.set(CONFIG_KEY, json.dumps(config))
+
+    global _cache, _cache_time
+    _cache = config
+    _cache_time = time.time()
+
+    return config
+
+
 def remove_filetype(extension: str) -> dict:
     """
     Retire complètement une extension de la configuration — contrairement

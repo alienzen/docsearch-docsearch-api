@@ -433,6 +433,14 @@ def admin_get_filetypes(user: str = Depends(require_admin)):
     return filetype_config.get_config()
 
 
+@app.post("/admin/filetypes/reset")
+def admin_reset_filetypes(user: str = Depends(require_admin)):
+    # Route déclarée AVANT /admin/filetypes/{extension} — sinon FastAPI
+    # matcherait "reset" comme une extension et cette route ne serait
+    # jamais atteinte.
+    return filetype_config.reset_to_default()
+
+
 @app.post("/admin/filetypes/{extension}")
 def admin_set_filetype(extension: str, body: FiletypeUpdate, user: str = Depends(require_admin)):
     return filetype_config.set_filetype(extension, enabled=body.enabled, max_size_mb=body.max_size_mb)
