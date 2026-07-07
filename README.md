@@ -25,6 +25,12 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | GET  | `/api/preview/{id}` | Aperçu PDF (conversion LibreOffice si besoin) |
 | GET  | `/metrics` | Statistiques d'indexation |
 
+**Recherche exacte** : entourer la requête de guillemets (`"terme exact"`)
+force une correspondance de phrase exacte (ordre et adjacence des mots
+respectés, sans tolérance aux fautes de frappe), au lieu de la
+recherche floue par défaut (`fuzziness: "AUTO"`, qui tolère les
+variantes et fautes de frappe).
+
 ## Authentification / ACL
 
 L'identité de l'utilisateur est lue depuis le header `X-User`, injecté par

@@ -140,13 +140,31 @@ def search(
     username   = resolve_user(x_user)
     acl_filter = build_acl_filter(username)
 
-    must = [{
-        "multi_match": {
-            "query":     req.query,
-            "fields":    ["content", "title^2", "filename^3", "author"],
-            "fuzziness": "AUTO",
-        }
-    }]
+    # Convention habituelle des moteurs de recherche : entourer les
+    # termes de guillemets ("terme exact") force une correspondance
+    # exacte (type "phrase" — ordre et adjacence des mots respectés,
+    # sans tolérance aux fautes de frappe), plutôt que la recherche
+    # floue par défaut (fuzziness "AUTO", qui tolère les variantes).
+    query_text = req.query.strip()
+    is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
+
+    if is_exact_phrase:
+        phrase = query_text[1:-1].strip()
+        must = [{
+            "multi_match": {
+                "query":  phrase,
+                "fields": ["content", "title^2", "filename^3", "author"],
+                "type":   "phrase",
+            }
+        }]
+    else:
+        must = [{
+            "multi_match": {
+                "query":     query_text,
+                "fields":    ["content", "title^2", "filename^3", "author"],
+                "fuzziness": "AUTO",
+            }
+        }]
 
     filters = [acl_filter]   # ACL en premier — mis en cache par ES
 
