@@ -490,6 +490,14 @@ def admin_get_config(user: str = Depends(require_admin)):
     return runtime_config.get_runtime_config()
 
 
+@app.post("/admin/config/reset")
+def admin_reset_config(user: str = Depends(require_admin)):
+    # Route déclarée AVANT /admin/config/{key} — sinon FastAPI matcherait
+    # "reset" comme une clé de paramètre et cette route ne serait jamais
+    # atteinte.
+    return runtime_config.reset_to_default()
+
+
 @app.post("/admin/config/{key}")
 def admin_set_config(key: str, body: ConfigUpdate, user: str = Depends(require_admin)):
     try:
