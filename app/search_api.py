@@ -274,11 +274,12 @@ def search(
     # aggregations : https://www.elastic.co/guide/en/elasticsearch/reference/current/search-aggregations-bucket-terms-aggregation.html
     extension_filter = None
     if req.extension:
-        # Accepte une extension unique ("pdf") ou une famille de formats
-        # (["docx", "doc"]) — utile pour un filtre "Word" qui doit couvrir
-        # à la fois le format moderne et l'ancien format binaire 97-2003.
+        # Valeur(s) brutes du champ ES, point compris (".pdf", ".docx"...)
+        # — même format que les clés retournées par facets.extensions,
+        # pas de transformation ici (même principe que author/source :
+        # le client envoie exactement ce que la facette lui a donné).
         exts = req.extension if isinstance(req.extension, list) else [req.extension]
-        extension_filter = {"terms": {"extension": [f".{e}" for e in exts]}}
+        extension_filter = {"terms": {"extension": exts}}
 
     author_filter = None
     if req.author:
