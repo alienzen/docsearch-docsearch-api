@@ -171,22 +171,22 @@ def _ensure_index_exists():
         )
 
 
-def _resolve_search_index(source_names: str | list[str] | None) -> str:
+def _validate_source_names(source_names: str | list[str] | None) -> list[str]:
     """
-    Détermine l'index (ou l'alias fédéré) à interroger pour /search.
-    `source_names` absent/vide -> alias fédéré (recherche sur toutes les
-    sources) ; une source -> son index précis ; plusieurs sources -> une
-    liste d'index séparés par des virgules (ES interroge nativement
-    plusieurs index de cette façon), pour permettre une sélection
-    cumulative sans repasser par l'alias complet.
+    Vérifie que chaque nom de source demandé existe bien dans le
+    registre (sources_config.py) — évite qu'un nom mal orthographié
+    matche silencieusement zéro document plutôt que de signaler
+    l'erreur. Retourne la liste normalisée (vide si rien demandé).
     """
     if not source_names:
-        return ES_SEARCH_ALIAS
+        return []
     names = source_names if isinstance(source_names, list) else [source_names]
     try:
-        return ",".join(sources_config.get_source(name).es_index for name in names)
+        for name in names:
+            sources_config.get_source(name)
     except KeyError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    return names
 
 
 def _resolve_doc_index(doc_id: str) -> str:
@@ -210,7 +210,6 @@ def search(
     x_user: str | None = Header(default=None),
 ):
     _ensure_index_exists()
-    search_index = _resolve_search_index(req.source)
     username   = resolve_user(x_user)
     acl_filter = build_acl_filter(username)
 
@@ -253,28 +252,44 @@ def search(
             }
         }]
 
-    filters = [acl_filter]   # ACL en premier — mis en cache par ES
+    # Filtres "de base" : toujours appliqués, jamais concernés par
+    # l'exclusion décrite ci-dessous (ACL, pièces jointes, période).
+    base_filters = [acl_filter]   # ACL en premier — mis en cache par ES
+    if req.has_attachments:
+        base_filters.append({"term": {"has_attachments": True}})
+    if req.date_from or req.date_to:
+        r = {}
+        if req.date_from: r["gte"] = req.date_from
+        if req.date_to:   r["lte"] = req.date_to
+        base_filters.append({"range": {"date_modified": r}})
 
+    # Filtres "de facette" : chacun correspond à une agrégation affichée
+    # dans la barre latérale (extension/auteur/dossier/source), à
+    # sélection cumulative. Construits à part des base_filters pour
+    # pouvoir, plus bas, calculer le compte de chaque facette en
+    # EXCLUANT le filtre de cette facette elle-même — sinon, sélectionner
+    # un premier auteur ferait disparaître tous les autres de la liste
+    # (impossible d'en cocher un second), pareil pour source/dossier.
+    # Motif standard de "faceted navigation" avec post_filter + filter
+    # aggregations : https://www.elastic.co/guide/en/elasticsearch/reference/current/search-aggregations-bucket-terms-aggregation.html
+    extension_filter = None
     if req.extension:
         # Accepte une extension unique ("pdf") ou une famille de formats
         # (["docx", "doc"]) — utile pour un filtre "Word" qui doit couvrir
         # à la fois le format moderne et l'ancien format binaire 97-2003.
         exts = req.extension if isinstance(req.extension, list) else [req.extension]
-        filters.append({"terms": {"extension": [f".{e}" for e in exts]}})
-    if req.has_attachments:
-        filters.append({"term": {"has_attachments": True}})
-    if req.date_from or req.date_to:
-        r = {}
-        if req.date_from: r["gte"] = req.date_from
-        if req.date_to:   r["lte"] = req.date_to
-        filters.append({"range": {"date_modified": r}})
+        extension_filter = {"terms": {"extension": [f".{e}" for e in exts]}}
+
+    author_filter = None
     if req.author:
         authors = req.author if isinstance(req.author, list) else [req.author]
-        filters.append({"terms": {"author": authors}})
+        author_filter = {"terms": {"author": authors}}
+
+    folder_filter = None
     if req.folder:
         # Correspond au dossier exact OU à tout sous-dossier en dessous
         # (ex: folder="Finance" matche "Finance" et "Finance/Rapports")
-        filters.append({
+        folder_filter = {
             "bool": {
                 "should": [
                     {"term":   {"folder": req.folder}},
@@ -282,7 +297,29 @@ def search(
                 ],
                 "minimum_should_match": 1,
             }
-        })
+        }
+
+    source_names  = _validate_source_names(req.source)
+    source_filter = {"terms": {"source": source_names}} if source_names else None
+
+    facet_filters = {
+        "extension": extension_filter,
+        "author":    author_filter,
+        "folder":    folder_filter,
+        "source":    source_filter,
+    }
+    active_facet_filters = [f for f in facet_filters.values() if f]
+
+    def facet_agg(field: str, size: int, exclude: str) -> dict:
+        """Agrégation de facette qui exclut son propre filtre (voir plus
+        haut) mais applique tous les AUTRES filtres de facette actifs —
+        cocher un auteur ne doit réduire que les dossiers/sources/
+        extensions affichés, jamais la liste des autres auteurs."""
+        others = [f for name, f in facet_filters.items() if f and name != exclude]
+        return {
+            "filter": {"bool": {"filter": others}} if others else {"match_all": {}},
+            "aggs":   {"values": {"terms": {"field": field, "size": size}}},
+        }
 
     sort_clause = (
         [{"_score": "desc"}]
@@ -296,8 +333,14 @@ def search(
 
     try:
         res = es.search(
-            index=search_index,
-            query={"bool": {"must": must, "filter": filters}},
+            index=ES_SEARCH_ALIAS,
+            query={"bool": {"must": must, "filter": base_filters}},
+            # Les filtres de facette s'appliquent aux résultats ICI (via
+            # post_filter, évalué après les agrégations) plutôt que dans
+            # `query` — c'est ce qui permet à chaque facet_agg() ci-dessus
+            # de les exclure sélectivement sans que les résultats
+            # eux-mêmes cessent de respecter TOUS les filtres actifs.
+            post_filter={"bool": {"filter": active_facet_filters}},
             highlight={
                 "fields": {
                     "content": {"fragment_size": 200, "number_of_fragments": 2}
@@ -322,10 +365,10 @@ def search(
                     "size", "date_created", "date_modified", "indexed_at", "has_attachments", "folder",
                     "source", "acl.owner", "acl.groups", "acl.public"],
             aggs={
-                "by_extension": {"terms": {"field": "extension",  "size": 10}},
-                "by_author":    {"terms": {"field": "author",     "size": 10}},
-                "by_folder":    {"terms": {"field": "folder_top",  "size": 10}},
-                "by_source":    {"terms": {"field": "source",     "size": 20}},
+                "by_extension": facet_agg("extension",  10, "extension"),
+                "by_author":    facet_agg("author",     10, "author"),
+                "by_folder":    facet_agg("folder_top", 10, "folder"),
+                "by_source":    facet_agg("source",     20, "source"),
             }
         )
     except Exception as e:
@@ -362,10 +405,10 @@ def search(
             for h in hits
         ],
         "facets": {
-            "extensions": res["aggregations"]["by_extension"]["buckets"],
-            "authors":    res["aggregations"]["by_author"]["buckets"],
-            "folders":    res["aggregations"]["by_folder"]["buckets"],
-            "sources":    res["aggregations"]["by_source"]["buckets"],
+            "extensions": res["aggregations"]["by_extension"]["values"]["buckets"],
+            "authors":    res["aggregations"]["by_author"]["values"]["buckets"],
+            "folders":    res["aggregations"]["by_folder"]["values"]["buckets"],
+            "sources":    res["aggregations"]["by_source"]["values"]["buckets"],
         }
     }
 
