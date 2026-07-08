@@ -27,6 +27,7 @@ import filetype_config
 import runtime_config
 import path_filter
 import search_log
+import saved_searches
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,24 @@ class SearchQuery(BaseModel):
     search_in:       str = "all"   # "all" | "title" | "author" — restreint le champ interrogé
 
     model_config = {"populate_by_name": True}
+
+
+class SavedSearchCreate(BaseModel):
+    # Reflète directement l'état de l'UI (voir `state` dans index.html),
+    # pas les valeurs résolues envoyées à /search (ex: "ext" est la clé
+    # du chip sélectionné — "word" — pas la liste d'extensions qu'il
+    # recouvre — [docx, doc]) : ça permet de restaurer l'interface
+    # (chip actif, champs) directement depuis l'enregistrement, sans
+    # avoir à inverser une résolution.
+    name:      str
+    query:     str
+    search_in: str = "all"
+    ext:       str = "all"
+    author:    str | None = None
+    folder:    str | None = None
+    date_from: str | None = None
+    date_to:   str | None = None
+    sort:      str = "_score"
 
 
 # ── Filtre ACL ───────────────────────────────────────────────
@@ -310,6 +329,33 @@ def search(
             "folders":    res["aggregations"]["by_folder"]["buckets"],
         }
     }
+
+
+# ── Recherches sauvegardées ─────────────────────────────────────
+@app.get("/saved-searches")
+def list_saved_searches(x_user: str | None = Header(default=None)):
+    username = resolve_user(x_user)
+    return saved_searches.list_saved(username)
+
+
+@app.post("/saved-searches")
+def create_saved_search(body: SavedSearchCreate, x_user: str | None = Header(default=None)):
+    username = resolve_user(x_user)
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="Le nom de la recherche ne peut pas être vide")
+    try:
+        return saved_searches.save_search(username, body.name, body.model_dump(exclude={"name"}))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.delete("/saved-searches/{search_id}")
+def remove_saved_search(search_id: str, x_user: str | None = Header(default=None)):
+    username = resolve_user(x_user)
+    try:
+        return saved_searches.delete_saved(username, search_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 # ── Détail document ──────────────────────────────────────────
