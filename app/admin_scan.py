@@ -137,7 +137,7 @@ def trigger_scan(source_name: str = DEFAULT_SOURCE_NAME, subfolder: str | None =
                     continue
 
                 check_key = _archive_kind(path) if archive else extension
-                ok, _ = is_allowed(check_key, size)
+                ok, _ = is_allowed(check_key, size, source.name)
                 if not ok:
                     skipped += 1
                     continue

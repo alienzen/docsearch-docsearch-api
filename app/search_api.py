@@ -516,6 +516,7 @@ from fastapi import BackgroundTasks
 class FiletypeUpdate(BaseModel):
     enabled: bool | None = None
     max_size_mb: float | None = None
+    source: str = DEFAULT_SOURCE_NAME
 
 
 class ConfigUpdate(BaseModel):
@@ -608,27 +609,27 @@ def admin_remove_source(name: str, user: str = Depends(require_admin)):
 
 
 @app.get("/admin/filetypes")
-def admin_get_filetypes(user: str = Depends(require_admin)):
-    return filetype_config.get_config()
+def admin_get_filetypes(source: str = Query(DEFAULT_SOURCE_NAME), user: str = Depends(require_admin)):
+    return filetype_config.get_config(source)
 
 
 @app.post("/admin/filetypes/reset")
-def admin_reset_filetypes(user: str = Depends(require_admin)):
+def admin_reset_filetypes(source: str = Query(DEFAULT_SOURCE_NAME), user: str = Depends(require_admin)):
     # Route déclarée AVANT /admin/filetypes/{extension} — sinon FastAPI
     # matcherait "reset" comme une extension et cette route ne serait
     # jamais atteinte.
-    return filetype_config.reset_to_default()
+    return filetype_config.reset_to_default(source)
 
 
 @app.post("/admin/filetypes/{extension}")
 def admin_set_filetype(extension: str, body: FiletypeUpdate, user: str = Depends(require_admin)):
-    return filetype_config.set_filetype(extension, enabled=body.enabled, max_size_mb=body.max_size_mb)
+    return filetype_config.set_filetype(extension, enabled=body.enabled, max_size_mb=body.max_size_mb, source=body.source)
 
 
 @app.delete("/admin/filetypes/{extension}")
-def admin_remove_filetype(extension: str, user: str = Depends(require_admin)):
+def admin_remove_filetype(extension: str, source: str = Query(DEFAULT_SOURCE_NAME), user: str = Depends(require_admin)):
     try:
-        return filetype_config.remove_filetype(extension)
+        return filetype_config.remove_filetype(extension, source)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
