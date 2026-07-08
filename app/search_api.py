@@ -66,9 +66,9 @@ class SearchQuery(BaseModel):
     has_attachments: bool | None = None
     date_from:       str | None = None   # filtre sur date_modified (voir build de la requête)
     date_to:         str | None = None   # idem
-    author:          str | None = None
+    author:          str | list[str] | None = None
     folder:          str | None = None
-    source:          str | None = None   # nom de source (sources_config.py) — absent = recherche fédérée sur toutes
+    source:          str | list[str] | None = None   # nom(s) de source (sources_config.py) — absent = recherche fédérée sur toutes
     search_in:       str = "all"   # "all" | "title" | "author" — restreint le champ interrogé
 
     model_config = {"populate_by_name": True}
@@ -85,9 +85,9 @@ class SavedSearchCreate(BaseModel):
     query:     str
     search_in: str = "all"
     ext:       str = "all"
-    author:    str | None = None
+    author:    str | list[str] | None = None
     folder:    str | None = None
-    source:    str | None = None
+    source:    str | list[str] | None = None
     date_from: str | None = None
     date_to:   str | None = None
     sort:      str = "_score"
@@ -171,16 +171,20 @@ def _ensure_index_exists():
         )
 
 
-def _resolve_search_index(source_name: str | None) -> str:
+def _resolve_search_index(source_names: str | list[str] | None) -> str:
     """
     Détermine l'index (ou l'alias fédéré) à interroger pour /search.
-    `source_name` absent -> alias fédéré (recherche sur toutes les
-    sources) ; sinon l'index précis de la source demandée.
+    `source_names` absent/vide -> alias fédéré (recherche sur toutes les
+    sources) ; une source -> son index précis ; plusieurs sources -> une
+    liste d'index séparés par des virgules (ES interroge nativement
+    plusieurs index de cette façon), pour permettre une sélection
+    cumulative sans repasser par l'alias complet.
     """
-    if not source_name:
+    if not source_names:
         return ES_SEARCH_ALIAS
+    names = source_names if isinstance(source_names, list) else [source_names]
     try:
-        return sources_config.get_source(source_name).es_index
+        return ",".join(sources_config.get_source(name).es_index for name in names)
     except KeyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -265,7 +269,8 @@ def search(
         if req.date_to:   r["lte"] = req.date_to
         filters.append({"range": {"date_modified": r}})
     if req.author:
-        filters.append({"term": {"author": req.author}})
+        authors = req.author if isinstance(req.author, list) else [req.author]
+        filters.append({"terms": {"author": authors}})
     if req.folder:
         # Correspond au dossier exact OU à tout sous-dossier en dessous
         # (ex: folder="Finance" matche "Finance" et "Finance/Rapports")

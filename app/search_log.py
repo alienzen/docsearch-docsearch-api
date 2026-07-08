@@ -49,7 +49,7 @@ def log_search(
     ip: str | None,
     query: str,
     search_in: str,
-    source: str | None,
+    source: str | list[str] | None,
     total_results: int,
     result_files: list[str],
 ) -> None:
@@ -58,9 +58,12 @@ def log_search(
     une recherche doit réussir même si la journalisation échoue (ES
     temporairement indisponible, IP non parsable par le mapping "ip", etc).
 
-    `source` : nom de la source (sources_config.py) sur laquelle la
-    recherche a été restreinte, ou None pour une recherche fédérée
-    (toutes sources) — voir search_api.py:search().
+    `source` : nom(s) de la/des source(s) (sources_config.py) sur
+    lesquelles la recherche a été restreinte (sélection cumulative
+    possible), ou None/liste vide pour une recherche fédérée (toutes
+    sources) — voir search_api.py:search(). Le champ ES "source" est un
+    keyword, nativement multi-valué : aucun changement de mapping requis
+    pour stocker une liste.
     """
     try:
         _ensure_index(es)
