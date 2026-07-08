@@ -339,6 +339,7 @@ def search(
         ip=get_client_ip(request),
         query=req.query,
         search_in=req.search_in,
+        source=req.source,
         total_results=total,
         result_files=[h["_source"].get("filename", "") for h in hits],
     )

@@ -32,6 +32,7 @@ def _ensure_index(es: Elasticsearch) -> None:
                     "ip":            {"type": "ip"},
                     "query":         {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
                     "search_in":     {"type": "keyword"},
+                    "source":        {"type": "keyword"},
                     "total_results": {"type": "integer"},
                     "result_files":  {"type": "keyword"},
                 }
@@ -48,6 +49,7 @@ def log_search(
     ip: str | None,
     query: str,
     search_in: str,
+    source: str | None,
     total_results: int,
     result_files: list[str],
 ) -> None:
@@ -55,6 +57,10 @@ def log_search(
     Enregistre un événement de recherche. Ne lève jamais d'exception —
     une recherche doit réussir même si la journalisation échoue (ES
     temporairement indisponible, IP non parsable par le mapping "ip", etc).
+
+    `source` : nom de la source (sources_config.py) sur laquelle la
+    recherche a été restreinte, ou None pour une recherche fédérée
+    (toutes sources) — voir search_api.py:search().
     """
     try:
         _ensure_index(es)
@@ -68,6 +74,8 @@ def log_search(
         }
         if ip:
             doc["ip"] = ip
+        if source:
+            doc["source"] = source
         es.index(index=SEARCH_LOG_INDEX, document=doc)
     except Exception as e:
         logger.warning(f"[search_log] Échec d'écriture du log de recherche : {e}")
