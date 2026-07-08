@@ -76,15 +76,15 @@ class SearchQuery(BaseModel):
 
 class SavedSearchCreate(BaseModel):
     # Reflète directement l'état de l'UI (voir `state` dans index.html),
-    # pas les valeurs résolues envoyées à /search (ex: "ext" est la clé
-    # du chip sélectionné — "word" — pas la liste d'extensions qu'il
-    # recouvre — [docx, doc]) : ça permet de restaurer l'interface
-    # (chip actif, champs) directement depuis l'enregistrement, sans
-    # avoir à inverser une résolution.
+    # pas les valeurs résolues envoyées à /search (ex: "ext" est la ou
+    # les clés de chip sélectionnées — "word" — pas la liste
+    # d'extensions qu'elles recouvrent — [docx, doc]) : ça permet de
+    # restaurer l'interface (chips actifs, champs) directement depuis
+    # l'enregistrement, sans avoir à inverser une résolution.
     name:      str
     query:     str
     search_in: str = "all"
-    ext:       str = "all"
+    ext:       str | list[str] = "all"
     author:    str | list[str] | None = None
     folder:    str | None = None
     source:    str | list[str] | None = None
