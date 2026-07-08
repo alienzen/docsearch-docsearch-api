@@ -1,11 +1,9 @@
 # search_api.py — API de recherche avec filtrage ACL
-# Mis à jour le 29/06/2026 — ES 9.4.2 · Tika 3.3.1.0 · ACL
+# Mis à jour le 08/07/2026 — ES 9.4.2 · Tika 3.3.1.0 · ACL · multi-source
 
 import os
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
-ES_INDEX = os.getenv("ES_INDEX", "documents")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-DOCS_FOLDER = os.getenv("DOCS_FOLDER", "/documents")
 DEV_USER = os.getenv("DEV_USER", "")
 LDAP_ENABLED = os.getenv("LDAP_ENABLED", "false").lower() == "true"
 
@@ -28,6 +26,8 @@ import runtime_config
 import path_filter
 import search_log
 import saved_searches
+import sources_config
+from sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,7 @@ class SearchQuery(BaseModel):
     date_to:         str | None = None   # idem
     author:          str | None = None
     folder:          str | None = None
+    source:          str | None = None   # nom de source (sources_config.py) — absent = recherche fédérée sur toutes
     search_in:       str = "all"   # "all" | "title" | "author" — restreint le champ interrogé
 
     model_config = {"populate_by_name": True}
@@ -86,6 +87,7 @@ class SavedSearchCreate(BaseModel):
     ext:       str = "all"
     author:    str | None = None
     folder:    str | None = None
+    source:    str | None = None
     date_from: str | None = None
     date_to:   str | None = None
     sort:      str = "_score"
@@ -149,23 +151,51 @@ def get_client_ip(request: Request) -> str | None:
 
 def _ensure_index_exists():
     """
-    Vérifie que l'index ES existe avant toute requête qui le suppose —
-    sans ça, une installation fraîche (avant le tout premier
-    ./manage.sh init) remonte une exception ES non gérée, traduite par
-    FastAPI en 500 générique ('Internal Server Error') sans aucune
-    indication utile. On préfère l'anticiper avec un message clair et
-    actionnable.
+    Vérifie que l'alias fédéré (ES_SEARCH_ALIAS) existe avant toute
+    requête qui le suppose — sans ça, une installation fraîche (avant le
+    tout premier ./manage.sh init) remonte une exception ES non gérée,
+    traduite par FastAPI en 500 générique ('Internal Server Error') sans
+    aucune indication utile. L'alias est créé par create_index() (voir
+    docsearch-ingestion/indexer.py) dès la première source indexée —
+    toutes les sources y contribuent, jamais un index nommé en dur.
     """
-    if not es.indices.exists(index=ES_INDEX):
+    if not es.indices.exists_alias(name=ES_SEARCH_ALIAS):
         raise HTTPException(
             status_code=503,
             detail=(
-                f"L'index Elasticsearch '{ES_INDEX}' n'existe pas encore — "
-                f"aucune indexation n'a été lancée. Exécutez "
-                f"'./manage.sh init' depuis docsearch-infra pour créer "
-                f"l'index et indexer les documents."
+                f"Aucune source n'a encore été indexée (alias "
+                f"'{ES_SEARCH_ALIAS}' introuvable). Exécutez "
+                f"'./manage.sh init' depuis docsearch-infra pour indexer "
+                f"la source par défaut."
             ),
         )
+
+
+def _resolve_search_index(source_name: str | None) -> str:
+    """
+    Détermine l'index (ou l'alias fédéré) à interroger pour /search.
+    `source_name` absent -> alias fédéré (recherche sur toutes les
+    sources) ; sinon l'index précis de la source demandée.
+    """
+    if not source_name:
+        return ES_SEARCH_ALIAS
+    try:
+        return sources_config.get_source(source_name).es_index
+    except KeyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _resolve_doc_index(doc_id: str) -> str:
+    """
+    Un doc_id seul ne dit pas dans quel index il vit (recherche
+    fédérée) — on le retrouve via une requête `ids` sur l'alias, dont le
+    hit renvoie `_index`. Lève 404 si absent de toutes les sources.
+    """
+    res = es.search(index=ES_SEARCH_ALIAS, query={"ids": {"values": [doc_id]}}, size=1)
+    hits = res["hits"]["hits"]
+    if not hits:
+        raise HTTPException(status_code=404, detail="Document introuvable")
+    return hits[0]["_index"]
 
 
 # ── Recherche ────────────────────────────────────────────────
@@ -176,6 +206,7 @@ def search(
     x_user: str | None = Header(default=None),
 ):
     _ensure_index_exists()
+    search_index = _resolve_search_index(req.source)
     username   = resolve_user(x_user)
     acl_filter = build_acl_filter(username)
 
@@ -260,7 +291,7 @@ def search(
 
     try:
         res = es.search(
-            index=ES_INDEX,
+            index=search_index,
             query={"bool": {"must": must, "filter": filters}},
             highlight={
                 "fields": {
@@ -284,11 +315,12 @@ def search(
             size=req.size,
             source=["filename", "filepath", "extension", "title", "author",
                     "size", "date_created", "date_modified", "indexed_at", "has_attachments", "folder",
-                    "acl.owner", "acl.groups", "acl.public"],
+                    "source", "acl.owner", "acl.groups", "acl.public"],
             aggs={
                 "by_extension": {"terms": {"field": "extension",  "size": 10}},
                 "by_author":    {"terms": {"field": "author",     "size": 10}},
                 "by_folder":    {"terms": {"field": "folder_top",  "size": 10}},
+                "by_source":    {"terms": {"field": "source",     "size": 20}},
             }
         )
     except Exception as e:
@@ -327,6 +359,7 @@ def search(
             "extensions": res["aggregations"]["by_extension"]["buckets"],
             "authors":    res["aggregations"]["by_author"]["buckets"],
             "folders":    res["aggregations"]["by_folder"]["buckets"],
+            "sources":    res["aggregations"]["by_source"]["buckets"],
         }
     }
 
@@ -366,8 +399,9 @@ def get_document(
 ):
     username = resolve_user(x_user)
 
+    doc_index = _resolve_doc_index(doc_id)
     try:
-        res = es.get(index=ES_INDEX, id=doc_id)
+        res = es.get(index=doc_index, id=doc_id)
     except Exception:
         raise HTTPException(status_code=404, detail="Document introuvable")
 
@@ -441,13 +475,15 @@ def _convert_to_pdf(filepath: str) -> StreamingResponse:
 # ── Métriques ─────────────────────────────────────────────────
 @app.get("/metrics")
 def get_metrics():
+    """Métriques agrégées sur TOUTES les sources (via l'alias fédéré) —
+    voir /admin/status pour une ventilation par source individuelle."""
     _ensure_index_exists()
     info    = es.info()
-    count   = es.count(index=ES_INDEX)["count"]
-    stats   = es.indices.stats(index=ES_INDEX)
+    count   = es.count(index=ES_SEARCH_ALIAS)["count"]
+    stats   = es.indices.stats(index=ES_SEARCH_ALIAS)
     size_gb = stats["_all"]["total"]["store"]["size_in_bytes"] / 1e9
     by_ext  = es.search(
-        index=ES_INDEX, size=0,
+        index=ES_SEARCH_ALIAS, size=0,
         aggs={"by_ext": {"terms": {"field": "extension", "size": 20}}}
     )
     return {
@@ -487,22 +523,87 @@ class ConfigUpdate(BaseModel):
 
 class PathFilterPattern(BaseModel):
     pattern: str
+    source: str = DEFAULT_SOURCE_NAME
 
 
 class PurgeRequest(BaseModel):
     pattern: str
+    source: str = DEFAULT_SOURCE_NAME
     dry_run: bool = True
 
 
 class ScanRequest(BaseModel):
+    source: str = DEFAULT_SOURCE_NAME
     subfolder: str | None = None
+
+
+class SourceCreate(BaseModel):
+    name: str
+    es_index: str
+    subfolder: str | None = None
+    label: str | None = None
+
+
+def _sources_status() -> dict:
+    """Nombre de documents par source enregistrée — un index manquant
+    (source enregistrée mais jamais indexée) compte pour 0 plutôt que de
+    faire échouer tout /admin/status."""
+    result = {}
+    for name, source in sources_config.get_sources().items():
+        try:
+            result[name] = {
+                "es_index": source.es_index,
+                "label":    source.label,
+                "folder":   source.folder,
+                "indexed":  es.count(index=source.es_index)["count"],
+            }
+        except Exception:
+            result[name] = {
+                "es_index": source.es_index,
+                "label":    source.label,
+                "folder":   source.folder,
+                "indexed":  0,
+            }
+    return result
 
 
 @app.get("/admin/status")
 def admin_status(user: str = Depends(require_admin)):
     """État de tous les composants : ES, Redis, Tika, Kafka, workers
-    actifs, progression de l'indexation (lag), battement du watcher."""
-    return cluster_status.get_full_status()
+    actifs, progression de l'indexation (lag), battement du watcher —
+    plus une ventilation du nombre de documents par source."""
+    status = cluster_status.get_full_status()
+    status["sources"] = _sources_status()
+    return status
+
+
+@app.get("/admin/sources")
+def admin_get_sources(user: str = Depends(require_admin)):
+    return {
+        name: {"es_index": s.es_index, "folder": s.folder, "label": s.label}
+        for name, s in sources_config.get_sources().items()
+    }
+
+
+@app.post("/admin/sources")
+def admin_add_source(body: SourceCreate, user: str = Depends(require_admin)):
+    try:
+        return sources_config.add_source(
+            body.name, body.es_index, subfolder=body.subfolder, label=body.label
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/admin/sources/{name}")
+def admin_remove_source(name: str, user: str = Depends(require_admin)):
+    """Retire la source du registre (le watcher arrête de l'observer) —
+    NE supprime PAS l'index Elasticsearch ni les documents déjà
+    indexés : utiliser /admin/purge-path pour nettoyer l'existant."""
+    try:
+        return sources_config.remove_source(name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/admin/filetypes")
@@ -553,18 +654,18 @@ def admin_set_config(key: str, body: ConfigUpdate, user: str = Depends(require_a
 
 
 @app.get("/admin/path-filters")
-def admin_get_path_filters(user: str = Depends(require_admin)):
-    return path_filter.get_config()
+def admin_get_path_filters(source: str = Query(DEFAULT_SOURCE_NAME), user: str = Depends(require_admin)):
+    return path_filter.get_config(source)
 
 
 @app.post("/admin/path-filters/exclude")
 def admin_exclude_path(body: PathFilterPattern, user: str = Depends(require_admin)):
-    return path_filter.add_excluded(body.pattern)
+    return path_filter.add_excluded(body.pattern, body.source)
 
 
 @app.post("/admin/path-filters/include")
 def admin_include_path(body: PathFilterPattern, user: str = Depends(require_admin)):
-    return path_filter.add_included(body.pattern)
+    return path_filter.add_included(body.pattern, body.source)
 
 
 @app.post("/admin/path-filters/remove")
@@ -572,16 +673,20 @@ def admin_remove_path_filter(body: PathFilterPattern, user: str = Depends(requir
     # POST plutôt que DELETE avec le motif dans l'URL : un motif comme
     # "finance/confidentiel" contient des "/" qui casseraient un
     # paramètre de chemin FastAPI.
-    return path_filter.remove_filter(body.pattern)
+    return path_filter.remove_filter(body.pattern, body.source)
 
 
 @app.post("/admin/purge-path")
 def admin_purge_path(body: PurgeRequest, user: str = Depends(require_admin)):
     """dry_run=True (défaut) : aperçu sans suppression. Toujours
-    appeler en dry-run d'abord depuis l'interface avant confirmation."""
+    appeler en dry-run d'abord depuis l'interface avant confirmation.
+    Opère sur l'index de `body.source` uniquement (défaut : source
+    par défaut, rétrocompatible avec un client qui n'envoie pas ce champ)."""
     try:
-        n = admin_scan.purge_path(body.pattern, dry_run=body.dry_run)
-        return {"pattern": body.pattern, "dry_run": body.dry_run, "matched": n}
+        n = admin_scan.purge_path(body.pattern, source_name=body.source, dry_run=body.dry_run)
+        return {"pattern": body.pattern, "source": body.source, "dry_run": body.dry_run, "matched": n}
+    except KeyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -593,19 +698,20 @@ def admin_trigger_scan(
     user: str = Depends(require_admin),
 ):
     """
-    Déclenche un scan (publication Kafka) en arrière-plan — ne bloque
-    pas la requête HTTP le temps de parcourir tout DOCS_FOLDER. Suivre
-    la progression via GET /admin/status (workers.pending_documents).
+    Déclenche un scan (publication Kafka) en arrière-plan pour UNE
+    source — ne bloque pas la requête HTTP le temps de parcourir tout
+    son dossier. Suivre la progression via GET /admin/status
+    (workers.pending_documents).
     """
     def _run():
         try:
-            result = admin_scan.trigger_scan(body.subfolder)
+            result = admin_scan.trigger_scan(body.source, body.subfolder)
             logger.info(f"[admin] Scan terminé par {user} : {result}")
         except Exception as e:
             logger.error(f"[admin] Scan déclenché par {user} a échoué : {e}")
 
     background_tasks.add_task(_run)
-    return {"status": "démarré", "subfolder": body.subfolder or "(dossier complet)"}
+    return {"status": "démarré", "source": body.source, "subfolder": body.subfolder or "(dossier complet)"}
 
 
 # ── Statistiques de recherche ───────────────────────────────────

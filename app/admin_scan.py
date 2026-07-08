@@ -12,6 +12,11 @@
 # qui reste faite par les workers) : l'API n'a pas besoin de connaître
 # le contenu d'une archive, seulement de savoir qu'il s'agit d'une
 # archive pour la publier telle quelle sur Kafka.
+#
+# Multi-source : chaque appel cible une source précise (sources_config.py,
+# lui aussi dupliqué depuis docsearch-ingestion) — scan et purge opèrent
+# toujours sur le dossier et l'index d'UNE SEULE source à la fois, jamais
+# sur toutes en une passe (cohérent avec producer.py côté ingestion).
 
 import os
 import json
@@ -25,12 +30,11 @@ from kafka.errors import KafkaError
 
 from filetype_config import is_allowed
 from path_filter import is_path_allowed, is_dir_excluded, matches_pattern
+from sources_config import Source, get_source, DEFAULT_SOURCE_NAME
 
 logger = logging.getLogger(__name__)
 
 ES_HOST         = os.getenv("ES_HOST", "http://localhost:9200")
-ES_INDEX        = os.getenv("ES_INDEX", "documents")
-DOCS_FOLDER     = os.getenv("DOCS_FOLDER", "/documents")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
 KAFKA_TOPIC     = os.getenv("KAFKA_TOPIC", "documents-to-index")
 
@@ -69,21 +73,22 @@ def _is_excluded_name(filename: str) -> bool:
     return filename.startswith("~") or filename.startswith(".~")
 
 
-def trigger_scan(subfolder: str | None = None) -> dict:
+def trigger_scan(source_name: str = DEFAULT_SOURCE_NAME, subfolder: str | None = None) -> dict:
     """
-    Publie sur Kafka les fichiers d'un sous-dossier de DOCS_FOLDER (ou
-    de DOCS_FOLDER entier si `subfolder` est None) — équivalent de
-    producer.py, déclenchable depuis le panneau d'administration.
-    Le travail réel (extraction Tika, indexation ES) est fait par les
-    workers déjà actifs, pas par l'API elle-même.
+    Publie sur Kafka les fichiers d'un sous-dossier de la source
+    `source_name` (ou de son dossier entier si `subfolder` est None) —
+    équivalent de producer.py, déclenchable depuis le panneau
+    d'administration. Le travail réel (extraction Tika, indexation ES)
+    est fait par les workers déjà actifs, pas par l'API elle-même.
     """
-    docs_root = Path(DOCS_FOLDER).resolve()
+    source = get_source(source_name)
+    docs_root = Path(source.folder).resolve()
 
     if subfolder:
         candidate = Path(subfolder) if os.path.isabs(subfolder) else docs_root / subfolder
         candidate = candidate.resolve()
         if docs_root != candidate and docs_root not in candidate.parents:
-            raise ValueError(f"'{candidate}' est en dehors de DOCS_FOLDER ({docs_root})")
+            raise ValueError(f"'{candidate}' est en dehors du dossier de la source '{source.name}' ({docs_root})")
         if not candidate.is_dir():
             raise ValueError(f"Dossier introuvable : {candidate}")
         target = candidate
@@ -105,7 +110,7 @@ def trigger_scan(subfolder: str | None = None) -> dict:
 
             dirs[:] = [
                 d for d in dirs
-                if not is_dir_excluded(f"{rel_root}/{d}" if rel_root else d)
+                if not is_dir_excluded(f"{rel_root}/{d}" if rel_root else d, source.name)
             ]
 
             for filename in files:
@@ -117,7 +122,7 @@ def trigger_scan(subfolder: str | None = None) -> dict:
                     skipped += 1
                     continue
 
-                allowed, _ = is_path_allowed(rel_file)
+                allowed, _ = is_path_allowed(rel_file, source.name)
                 if not allowed:
                     skipped += 1
                     continue
@@ -141,6 +146,7 @@ def trigger_scan(subfolder: str | None = None) -> dict:
                     "filepath":   str(path.resolve()),
                     "extension":  extension,
                     "is_archive": archive,
+                    "source":     source.name,
                 }
                 try:
                     producer.send(KAFKA_TOPIC, value=message)
@@ -151,13 +157,13 @@ def trigger_scan(subfolder: str | None = None) -> dict:
         producer.flush(timeout=30)
         producer.close()
 
-    return {"published": published, "skipped": skipped, "target": str(target)}
+    return {"published": published, "skipped": skipped, "target": str(target), "source": source.name}
 
 
-def _relative_candidate(filepath: str) -> str:
+def _relative_candidate(filepath: str, source: Source) -> str:
     """Voir docsearch-ingestion/indexer.py:_relative_candidates
     (version à une seule valeur, cohérente avec le comportement archive)."""
-    docs_root = str(Path(DOCS_FOLDER).resolve())
+    docs_root = str(Path(source.folder).resolve())
     archive_part = filepath.split("::", 1)[0]
     try:
         return str(Path(archive_part).resolve().relative_to(docs_root))
@@ -165,31 +171,33 @@ def _relative_candidate(filepath: str) -> str:
         return archive_part
 
 
-def purge_path(pattern: str, dry_run: bool = True) -> int:
+def purge_path(pattern: str, source_name: str = DEFAULT_SOURCE_NAME, dry_run: bool = True) -> int:
     """
     Équivalent de docsearch-ingestion/indexer.py:purge_path(), dupliqué
     ici pour permettre le déclenchement depuis le panneau
     d'administration. Voir ce fichier pour la documentation complète
     du comportement (scan/scroll ES, gestion des membres d'archive).
+    Opère sur l'index de la source `source_name` uniquement.
     """
+    source = get_source(source_name)
     to_delete = []
     matched = 0
 
     for hit in es_scan(
-        _es, index=ES_INDEX,
+        _es, index=source.es_index,
         query={"query": {"match_all": {}}},
         _source=["filepath"],
     ):
         filepath = hit["_source"].get("filepath", "")
         if not filepath:
             continue
-        rel = _relative_candidate(filepath)
+        rel = _relative_candidate(filepath, source)
         if matches_pattern(rel, pattern):
             matched += 1
             if not dry_run:
                 to_delete.append({
                     "_op_type": "delete",
-                    "_index":   ES_INDEX,
+                    "_index":   source.es_index,
                     "_id":      hit["_id"],
                 })
 
@@ -197,6 +205,6 @@ def purge_path(pattern: str, dry_run: bool = True) -> int:
         ok, errors = es_bulk(_es, to_delete, raise_on_error=False)
         if errors:
             logger.error(f"[purge_path] {len(errors)} erreur(s) de suppression")
-        _es.indices.refresh(index=ES_INDEX)
+        _es.indices.refresh(index=source.es_index)
 
     return matched

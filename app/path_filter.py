@@ -1,5 +1,5 @@
 # ⚠️  COPIE SYNCHRONISÉE depuis docsearch-ingestion/app/path_filter.py — ces
-# deux fichiers doivent rester identiques (même clé Redis, même
+# deux fichiers doivent rester identiques (même clés Redis, même
 # logique). Toute modification doit être répercutée dans les DEUX
 # dépôts. Dupliqué ici (plutôt qu'importé) car docsearch-api ne peut
 # pas dépendre du code de docsearch-ingestion dans l'architecture
@@ -8,14 +8,17 @@
 # path_filter.py — Inclusion / exclusion de sous-dossiers par motifs glob
 #
 # Permet d'exclure ou de restreindre l'indexation à certains sous-dossiers
-# de DOCS_FOLDER, modifiable à chaud (Redis), sans redémarrage. Même
-# principe que filetype_config.py et runtime_config.py.
+# d'une SOURCE (voir sources_config.py), modifiable à chaud (Redis), sans
+# redémarrage. Même principe que filetype_config.py et runtime_config.py.
 #
-# Structure stockée (clé Redis "docsearch:config:pathfilters") :
+# Structure stockée (clé Redis "docsearch:config:pathfilters" pour la
+# source par défaut, "docsearch:config:pathfilters:<source>" pour les
+# autres — voir _redis_key) :
 #   {"excluded": ["motif1", "motif2", ...], "included": [...]}
 #
 # Règles :
-#   - Les chemins sont TOUJOURS relatifs à DOCS_FOLDER (jamais absolus)
+#   - Les chemins sont TOUJOURS relatifs au dossier de LA SOURCE concernée
+#     (jamais absolus) — chaque source a ses propres filtres, indépendants
 #   - "excluded" est prioritaire sur "included" : un chemin exclu reste
 #     exclu même s'il correspond aussi à un motif inclus
 #   - Si "included" est vide -> tout est autorisé (sous réserve de ne pas
@@ -34,19 +37,33 @@ import time
 import fnmatch
 import logging
 
+from sources_config import DEFAULT_SOURCE_NAME
+
 logger = logging.getLogger(__name__)
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-PATHFILTER_KEY = "docsearch:config:pathfilters"
+PATHFILTER_KEY_BASE = "docsearch:config:pathfilters"
 PATHFILTER_CACHE_TTL = int(os.getenv("PATHFILTER_CACHE_TTL", "10"))
 
 DEFAULT_CONFIG = {"excluded": [], "included": []}
 
-_cache: dict = {}
-_cache_time: float = 0.0
+# Cache et client par process — clé Redis en fonction de la source, donc
+# le cache local est lui aussi indexé par source plutôt qu'une valeur
+# unique (chaque source a ses propres filtres indépendants).
+_cache: dict[str, dict] = {}
+_cache_time: dict[str, float] = {}
 _redis_client = None
 _redis_unavailable_logged = False
+
+
+def _redis_key(source: str) -> str:
+    # La source par défaut garde la clé historique (sans suffixe) pour
+    # ne pas perdre la configuration déjà en place sur une installation
+    # existante lors de la mise à jour vers le multi-source.
+    if source == DEFAULT_SOURCE_NAME:
+        return PATHFILTER_KEY_BASE
+    return f"{PATHFILTER_KEY_BASE}:{source}"
 
 
 def _get_redis_client():
@@ -73,31 +90,29 @@ def _get_redis_client():
         return None
 
 
-def get_config() -> dict:
-    """Retourne {"excluded": [...], "included": [...]} — cache local,
-    sinon Redis, sinon aucun filtre (tout est autorisé)."""
-    global _cache, _cache_time
-
+def get_config(source: str = DEFAULT_SOURCE_NAME) -> dict:
+    """Retourne {"excluded": [...], "included": [...]} pour `source` —
+    cache local, sinon Redis, sinon aucun filtre (tout est autorisé)."""
     now = time.time()
-    if _cache and (now - _cache_time) < PATHFILTER_CACHE_TTL:
-        return _cache
+    if source in _cache and (now - _cache_time.get(source, 0)) < PATHFILTER_CACHE_TTL:
+        return _cache[source]
 
     client = _get_redis_client()
     if client is not None:
         try:
-            raw = client.get(PATHFILTER_KEY)
+            raw = client.get(_redis_key(source))
             if raw:
                 merged = dict(DEFAULT_CONFIG)
                 merged.update(json.loads(raw))
-                _cache = merged
-                _cache_time = now
-                return _cache
+                _cache[source] = merged
+                _cache_time[source] = now
+                return _cache[source]
         except Exception as e:
             logger.warning(f"[path_filter] Erreur lecture Redis : {e} — repli sur défaut")
 
-    _cache = dict(DEFAULT_CONFIG)
-    _cache_time = now
-    return _cache
+    _cache[source] = dict(DEFAULT_CONFIG)
+    _cache_time[source] = now
+    return _cache[source]
 
 
 def _normalize(rel_path: str) -> list[str]:
@@ -132,12 +147,12 @@ def _matches_any(rel_path: str, patterns: list[str]) -> bool:
     return False
 
 
-def is_path_allowed(rel_path: str) -> tuple[bool, str]:
+def is_path_allowed(rel_path: str, source: str = DEFAULT_SOURCE_NAME) -> tuple[bool, str]:
     """
-    Vérifie si un chemin (relatif à DOCS_FOLDER) doit être indexé.
-    Retourne (autorisé: bool, raison: str).
+    Vérifie si un chemin (relatif au dossier de `source`) doit être
+    indexé. Retourne (autorisé: bool, raison: str).
     """
-    config = get_config()
+    config = get_config(source)
     excluded = config.get("excluded", [])
     included = config.get("included", [])
 
@@ -150,7 +165,7 @@ def is_path_allowed(rel_path: str) -> tuple[bool, str]:
     return True, "autorisé"
 
 
-def is_dir_excluded(rel_dir: str) -> bool:
+def is_dir_excluded(rel_dir: str, source: str = DEFAULT_SOURCE_NAME) -> bool:
     """
     Vérifie seulement l'exclusion (pas la liste blanche) — utilisé pour
     élaguer un parcours de dossier (os.walk) avant d'y descendre. La
@@ -161,18 +176,19 @@ def is_dir_excluded(rel_dir: str) -> bool:
     contre la liste blanche (voir is_path_allowed), pas les dossiers
     parcourus.
     """
-    config = get_config()
+    config = get_config(source)
     return _matches_any(rel_dir, config.get("excluded", []))
 
 
-def _read_write(mutate) -> dict:
+def _read_write(source: str, mutate) -> dict:
     client = _get_redis_client()
     if client is None:
         raise RuntimeError(
             "Redis injoignable — impossible d'enregistrer la configuration. "
             "Vérifiez que le service redis tourne (docker compose ps redis)."
         )
-    raw = client.get(PATHFILTER_KEY)
+    key = _redis_key(source)
+    raw = client.get(key)
     config = dict(DEFAULT_CONFIG)
     if raw:
         config.update(json.loads(raw))
@@ -181,33 +197,32 @@ def _read_write(mutate) -> dict:
 
     mutate(config)
 
-    client.set(PATHFILTER_KEY, json.dumps(config))
-    global _cache, _cache_time
-    _cache = config
-    _cache_time = time.time()
+    client.set(key, json.dumps(config))
+    _cache[source] = config
+    _cache_time[source] = time.time()
     return config
 
 
-def add_excluded(pattern: str) -> dict:
+def add_excluded(pattern: str, source: str = DEFAULT_SOURCE_NAME) -> dict:
     def mutate(config):
         if pattern not in config["excluded"]:
             config["excluded"].append(pattern)
-    return _read_write(mutate)
+    return _read_write(source, mutate)
 
 
-def add_included(pattern: str) -> dict:
+def add_included(pattern: str, source: str = DEFAULT_SOURCE_NAME) -> dict:
     def mutate(config):
         if pattern not in config["included"]:
             config["included"].append(pattern)
-    return _read_write(mutate)
+    return _read_write(source, mutate)
 
 
-def remove_filter(pattern: str) -> dict:
+def remove_filter(pattern: str, source: str = DEFAULT_SOURCE_NAME) -> dict:
     """Retire un motif des deux listes (excluded et included) s'il y est."""
     def mutate(config):
         config["excluded"] = [p for p in config["excluded"] if p != pattern]
         config["included"] = [p for p in config["included"] if p != pattern]
-    return _read_write(mutate)
+    return _read_write(source, mutate)
 
 
 def matches_pattern(rel_path: str, pattern: str) -> bool:
@@ -216,5 +231,6 @@ def matches_pattern(rel_path: str, pattern: str) -> bool:
     par la commande de purge (indexer.py: purge_path) pour retrouver,
     parmi les documents déjà indexés, ceux qui correspondraient à un
     motif d'exclusion donné (même syntaxe glob que exclude-path).
+    Ne dépend d'aucune source (comparaison glob pure).
     """
     return _matches_any(rel_path, [pattern])
