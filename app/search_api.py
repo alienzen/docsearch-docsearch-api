@@ -28,6 +28,7 @@ import search_log
 import saved_searches
 import sources_config
 from sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
+import sql_sources_config
 
 logger = logging.getLogger(__name__)
 
@@ -595,6 +596,24 @@ class SourceCreate(BaseModel):
     label: str | None = None
 
 
+class SqlFieldMapping(BaseModel):
+    column: str
+    es_field: str
+    es_type: str
+    analyzer: str | None = None
+
+
+class SqlSourceCreate(BaseModel):
+    name: str
+    db_type: str
+    connection_ref: str
+    query: str
+    id_column: str
+    es_index: str
+    fields: list[SqlFieldMapping]
+    poll_interval_seconds: int = sql_sources_config.DEFAULT_POLL_INTERVAL_SECONDS
+
+
 def _sources_status() -> dict:
     """Nombre de documents par source enregistrée — un index manquant
     (source enregistrée mais jamais indexée) compte pour 0 plutôt que de
@@ -655,6 +674,60 @@ def admin_remove_source(name: str, user: str = Depends(require_admin)):
         return sources_config.remove_source(name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/admin/sql-sources")
+def admin_get_sql_sources(user: str = Depends(require_admin)):
+    return {
+        name: {
+            "db_type":               s.db_type,
+            "connection_ref":        s.connection_ref,
+            "query":                 s.query,
+            "id_column":             s.id_column,
+            "es_index":              s.es_index,
+            "poll_interval_seconds": s.poll_interval_seconds,
+            "fields": [
+                {"column": f.column, "es_field": f.es_field, "es_type": f.es_type, "analyzer": f.analyzer}
+                for f in s.fields
+            ],
+        }
+        for name, s in sql_sources_config.get_sources().items()
+    }
+
+
+@app.post("/admin/sql-sources")
+def admin_add_sql_source(body: SqlSourceCreate, user: str = Depends(require_admin)):
+    """
+    Enregistre (ou met à jour) une source SQL. `connection_ref` est le
+    NOM d'une variable d'environnement contenant le DSN complet — jamais
+    le DSN lui-même, qui ne transite donc jamais par cette route ni par
+    Redis. sql-worker (docsearch-ingestion) prend en compte la nouvelle
+    source sous ~5s, sans redémarrage.
+    """
+    try:
+        return sql_sources_config.add_source(
+            name=body.name,
+            db_type=body.db_type,
+            connection_ref=body.connection_ref,
+            query=body.query,
+            id_column=body.id_column,
+            es_index=body.es_index,
+            fields=[f.model_dump() for f in body.fields],
+            poll_interval_seconds=body.poll_interval_seconds,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/admin/sql-sources/{name}")
+def admin_remove_sql_source(name: str, user: str = Depends(require_admin)):
+    """Retire la source SQL du registre (sql-worker arrête de
+    l'interroger) — NE supprime PAS l'index Elasticsearch ni les
+    documents déjà indexés."""
+    try:
+        return sql_sources_config.remove_source(name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/admin/filetypes")
