@@ -29,6 +29,7 @@ import saved_searches
 import sources_config
 from sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
 import sql_sources_config
+import web_sources_config
 
 logger = logging.getLogger(__name__)
 
@@ -174,19 +175,34 @@ def _ensure_index_exists():
 
 def _validate_source_names(source_names: str | list[str] | None) -> list[str]:
     """
-    Vérifie que chaque nom de source demandé existe bien dans le
-    registre (sources_config.py) — évite qu'un nom mal orthographié
-    matche silencieusement zéro document plutôt que de signaler
-    l'erreur. Retourne la liste normalisée (vide si rien demandé).
+    Vérifie que chaque nom de source demandé existe bien dans l'UN des
+    trois registres (fichiers, SQL, web) — évite qu'un nom mal
+    orthographié matche silencieusement zéro document plutôt que de
+    signaler l'erreur. Retourne la liste normalisée (vide si rien demandé).
     """
     if not source_names:
         return []
     names = source_names if isinstance(source_names, list) else [source_names]
-    try:
-        for name in names:
+    for name in names:
+        try:
             sources_config.get_source(name)
-    except KeyError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+            continue
+        except KeyError:
+            pass
+        try:
+            sql_sources_config.get_source(name)
+            continue
+        except KeyError:
+            pass
+        try:
+            web_sources_config.get_source(name)
+            continue
+        except KeyError:
+            pass
+        raise HTTPException(
+            status_code=400,
+            detail=f"Source inconnue : '{name}' (fichier, SQL et web confondus).",
+        )
     return names
 
 
@@ -614,6 +630,14 @@ class SqlSourceCreate(BaseModel):
     poll_interval_seconds: int = sql_sources_config.DEFAULT_POLL_INTERVAL_SECONDS
 
 
+class WebSourceCreate(BaseModel):
+    name: str
+    crawl_index: str
+    es_index: str
+    acl_public: bool = True
+    poll_interval_seconds: int = web_sources_config.DEFAULT_POLL_INTERVAL_SECONDS
+
+
 def _sources_status() -> dict:
     """Nombre de documents par source enregistrée — un index manquant
     (source enregistrée mais jamais indexée) compte pour 0 plutôt que de
@@ -726,6 +750,51 @@ def admin_remove_sql_source(name: str, user: str = Depends(require_admin)):
     documents déjà indexés."""
     try:
         return sql_sources_config.remove_source(name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/admin/web-sources")
+def admin_get_web_sources(user: str = Depends(require_admin)):
+    return {
+        name: {
+            "crawl_index":           s.crawl_index,
+            "es_index":              s.es_index,
+            "acl_public":            s.acl_public,
+            "poll_interval_seconds": s.poll_interval_seconds,
+        }
+        for name, s in web_sources_config.get_sources().items()
+    }
+
+
+@app.post("/admin/web-sources")
+def admin_add_web_source(body: WebSourceCreate, user: str = Depends(require_admin)):
+    """
+    Enregistre (ou met à jour) une source web. `crawl_index` est l'index
+    ES intermédiaire écrit par Elastic Open Web Crawler (son
+    `output_index`, schéma brut du crawler) — DIFFÉRENT de `es_index`
+    (schéma DocSearch final). web-worker (docsearch-ingestion) prend en
+    compte la nouvelle source sous ~5s, sans redémarrage.
+    """
+    try:
+        return web_sources_config.add_source(
+            name=body.name,
+            crawl_index=body.crawl_index,
+            es_index=body.es_index,
+            acl_public=body.acl_public,
+            poll_interval_seconds=body.poll_interval_seconds,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/admin/web-sources/{name}")
+def admin_remove_web_source(name: str, user: str = Depends(require_admin)):
+    """Retire la source web du registre (web-worker arrête de la
+    synchroniser) — NE supprime PAS les index Elasticsearch (crawl_index
+    ni es_index) ni les documents déjà indexés."""
+    try:
+        return web_sources_config.remove_source(name)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
