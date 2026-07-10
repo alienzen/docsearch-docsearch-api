@@ -701,6 +701,33 @@ def admin_status(user: str = Depends(require_admin)):
     return status
 
 
+class RenameUpdate(BaseModel):
+    new_name: str
+
+
+def _rename_source_documents(es_index: str, old_name: str, new_name: str) -> int:
+    """
+    Répercute un renommage de registre sur les documents déjà indexés :
+    sans ça, leur champ "source" garde l'ancien nom et devient invisible
+    pour tout filtre par le nouveau nom, jusqu'au prochain passage complet
+    (scan/watcher/sql-worker/web-worker). Best-effort : un index absent
+    (source jamais indexée) n'est pas une erreur, juste 0 document.
+    """
+    if not es.indices.exists(index=es_index):
+        return 0
+    result = es.update_by_query(
+        index=es_index,
+        query={"term": {"source": old_name}},
+        script={
+            "source": "ctx._source.source = params.new_name",
+            "params": {"new_name": new_name},
+        },
+        conflicts="proceed",
+        refresh=True,
+    )
+    return result.get("updated", 0)
+
+
 @app.get("/admin/sources")
 def admin_get_sources(user: str = Depends(require_admin)):
     return {
@@ -728,6 +755,20 @@ def admin_remove_source(name: str, user: str = Depends(require_admin)):
         return sources_config.remove_source(name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/admin/sources/{name}/rename")
+def admin_rename_source(name: str, body: RenameUpdate, user: str = Depends(require_admin)):
+    """Renomme une source fichier (registre + champ "source" des
+    documents déjà indexés) — subfolder/es_index inchangés."""
+    try:
+        result = sources_config.rename_source(name, body.new_name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    updated = _rename_source_documents(result[body.new_name]["es_index"], name, body.new_name)
+    return {"sources": result, "documents_updated": updated}
 
 
 @app.get("/admin/sql-sources")
@@ -784,6 +825,20 @@ def admin_remove_sql_source(name: str, user: str = Depends(require_admin)):
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@app.post("/admin/sql-sources/{name}/rename")
+def admin_rename_sql_source(name: str, body: RenameUpdate, user: str = Depends(require_admin)):
+    """Renomme une source SQL (registre + champ "source" des documents
+    déjà indexés) — connexion/requête/mapping/es_index inchangés."""
+    try:
+        result = sql_sources_config.rename_source(name, body.new_name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    updated = _rename_source_documents(result[body.new_name]["es_index"], name, body.new_name)
+    return {"sources": result, "documents_updated": updated}
+
+
 @app.get("/admin/web-sources")
 def admin_get_web_sources(user: str = Depends(require_admin)):
     return {
@@ -828,6 +883,20 @@ def admin_remove_web_source(name: str, user: str = Depends(require_admin)):
         return web_sources_config.remove_source(name)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/admin/web-sources/{name}/rename")
+def admin_rename_web_source(name: str, body: RenameUpdate, user: str = Depends(require_admin)):
+    """Renomme une source web (registre + champ "source" des documents
+    déjà indexés) — crawl_index/es_index inchangés."""
+    try:
+        result = web_sources_config.rename_source(name, body.new_name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    updated = _rename_source_documents(result[body.new_name]["es_index"], name, body.new_name)
+    return {"sources": result, "documents_updated": updated}
 
 
 class PauseUpdate(BaseModel):

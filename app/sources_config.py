@@ -285,3 +285,34 @@ def remove_source(name: str) -> dict:
         sources.pop(name, None)
 
     return _read_write(mutate)
+
+
+def rename_source(old_name: str, new_name: str) -> dict:
+    """
+    Renomme une source dans le REGISTRE (clé Redis) — subfolder/es_index
+    inchangés, watcher/producer/scan ciblent la source par son nouveau nom
+    dès le prochain rechargement (~5-10s). Si le libellé n'avait jamais été
+    personnalisé (label == old_name, cas par défaut de add_source), il
+    suit le renommage ; un libellé explicite est conservé tel quel.
+
+    NE MET PAS À JOUR le champ "source" des documents déjà indexés — cette
+    étape (update_by_query sur l'index ES) est à la charge de l'appelant
+    (voir search_api.py, seul endroit qui a accès à Elasticsearch). Tant
+    qu'elle n'a pas été faite, filtrer par le nouveau nom ne retrouve pas
+    les documents indexés avant le renommage.
+    """
+    if old_name == DEFAULT_SOURCE_NAME:
+        raise ValueError(f"Impossible de renommer la source par défaut ('{DEFAULT_SOURCE_NAME}').")
+    _validate_name(new_name, "Nouveau nom de source")
+
+    def mutate(sources):
+        if old_name not in sources:
+            raise KeyError(f"Source inconnue : '{old_name}'")
+        if new_name in sources:
+            raise ValueError(f"Une source nommée '{new_name}' existe déjà.")
+        entry = sources.pop(old_name)
+        if entry.get("label") == old_name:
+            entry["label"] = new_name
+        sources[new_name] = entry
+
+    return _read_write(mutate)

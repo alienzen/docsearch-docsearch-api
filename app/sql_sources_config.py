@@ -329,3 +329,27 @@ def remove_source(name: str) -> dict:
         sources.pop(name, None)
 
     return _read_write(mutate)
+
+
+def rename_source(old_name: str, new_name: str) -> dict:
+    """
+    Renomme une source SQL dans le REGISTRE (clé Redis) — connexion,
+    requête, mapping et es_index inchangés, sql_worker.py cible la
+    source par son nouveau nom dès le prochain rechargement (~5-10s).
+
+    NE MET PAS À JOUR le champ "source" des documents déjà indexés —
+    à la charge de l'appelant (update_by_query sur l'index ES, voir
+    search_api.py, ce module est Redis-only). Tant que ce n'est pas
+    fait, filtrer par le nouveau nom ne retrouve pas les documents
+    indexés avant le renommage.
+    """
+    _validate_name(new_name, "Nouveau nom de source SQL")
+
+    def mutate(sources):
+        if old_name not in sources:
+            raise KeyError(f"Source SQL inconnue : '{old_name}'")
+        if new_name in sources:
+            raise ValueError(f"Une source SQL nommée '{new_name}' existe déjà.")
+        sources[new_name] = sources.pop(old_name)
+
+    return _read_write(mutate)
