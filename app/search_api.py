@@ -1229,16 +1229,16 @@ def submit_nps(body: NpsCreate, x_user: str | None = Header(default=None)):
 
 
 @app.post("/suggestions")
-def submit_suggestion(body: SuggestionCreate, x_user: str | None = Header(default=None)):
-    """Enregistre une suggestion libre, indépendamment de toute
-    recherche précise — voir suggestion_log.py."""
+def submit_suggestion(body: SuggestionCreate):
+    """Enregistre une suggestion libre, anonyme, indépendamment de toute
+    recherche précise — voir suggestion_log.py. Pas de X-User ici : à la
+    différence du pouce/NPS, aucune identité n'est capturée."""
     if not engagement_config.get_config()["suggestions_enabled"]:
         raise HTTPException(status_code=403, detail="Le recueil de suggestions est désactivé.")
     text = body.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="La suggestion ne peut pas être vide.")
-    username = resolve_user(x_user)
-    suggestion_log.log_suggestion(es, username=username, text=text, category=body.category)
+    suggestion_log.log_suggestion(es, text=text, category=body.category)
     return {"status": "ok"}
 
 

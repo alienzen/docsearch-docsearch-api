@@ -4,6 +4,11 @@
 # c'est un point d'entrée permanent ("💡 Suggérer une idée" dans l'en-tête,
 # voir index.html), indépendant de toute recherche. Index ES dédié pour
 # la même raison que nps_log.py/search_log.py.
+#
+# ANONYME PAR CONCEPTION : contrairement au pouce/NPS/clics (rattachés à
+# username), aucune identité n'est capturée ni stockée ici — l'UI
+# annonce explicitement l'anonymat (voir index.html), ce serait trompeur
+# de logguer discrètement l'utilisateur en arrière-plan malgré tout.
 
 import os
 import logging
@@ -27,7 +32,6 @@ def _ensure_index(es: Elasticsearch) -> None:
             "mappings": {
                 "properties": {
                     "timestamp": {"type": "date"},
-                    "username":  {"type": "keyword"},
                     "category":  {"type": "keyword"},
                     "text":      {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
                 }
@@ -37,15 +41,16 @@ def _ensure_index(es: Elasticsearch) -> None:
     _index_ready = True
 
 
-def log_suggestion(es: Elasticsearch, *, username: str, text: str, category: str | None) -> None:
-    """Enregistre une suggestion libre. Ne lève jamais d'exception — un
-    échec d'écriture ne doit jamais remonter comme erreur visible à
-    l'utilisateur qui vient de soumettre son idée."""
+def log_suggestion(es: Elasticsearch, *, text: str, category: str | None) -> None:
+    """Enregistre une suggestion libre, SANS identité (voir docstring de
+    module — l'anonymat est annoncé à l'utilisateur, il doit être réel).
+    Ne lève jamais d'exception — un échec d'écriture ne doit jamais
+    remonter comme erreur visible à l'utilisateur qui vient de soumettre
+    son idée."""
     try:
         _ensure_index(es)
         doc = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "username":  username,
             "text":      text,
         }
         if category:
