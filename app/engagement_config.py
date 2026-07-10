@@ -1,5 +1,6 @@
 # engagement_config.py — Suspension des fonctionnalités de mesure de
-# satisfaction (pouce haut/bas par recherche, popup NPS périodique)
+# satisfaction (pouce haut/bas par recherche, popup NPS périodique,
+# recueil de suggestions libres)
 #
 # Propre à docsearch-api (pas de copie dans docsearch-ingestion) : ces
 # réglages ne concernent que l'interface de recherche et l'API qui la
@@ -28,8 +29,9 @@ ENGAGEMENT_CONFIG_KEY = "docsearch:config:engagement"
 ENGAGEMENT_CACHE_TTL  = int(os.getenv("ENGAGEMENT_CONFIG_CACHE_TTL", "10"))
 
 DEFAULT_ENGAGEMENT = {
-    "feedback_enabled": True,   # pouce haut/bas après chaque recherche
-    "nps_enabled":      True,   # popup "recommanderiez-vous...", périodique
+    "feedback_enabled":    True,   # pouce haut/bas après chaque recherche
+    "nps_enabled":         True,   # popup "recommanderiez-vous...", périodique
+    "suggestions_enabled": True,   # lien "Suggérer une idée" dans l'en-tête
 }
 
 _cache: dict = {}

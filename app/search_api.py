@@ -26,6 +26,7 @@ import runtime_config
 import path_filter
 import search_log
 import nps_log
+import suggestion_log
 import engagement_config
 import saved_searches
 import sources_config
@@ -1108,15 +1109,17 @@ def admin_trigger_scan(
     return {"status": "démarré", "source": body.source, "subfolder": body.subfolder or "(dossier complet)"}
 
 
-# ── Mesure de satisfaction (pouce, NPS, clics) ──────────────────
-# Trois signaux distincts, volontairement pas fusionnés :
+# ── Mesure de satisfaction (pouce, NPS, clics, suggestions) ─────
+# Quatre signaux distincts, volontairement pas fusionnés :
 #   - feedback (pouce haut/bas) : explicite, par recherche (search_id).
 #   - NPS : explicite, sur l'outil en général, PAS rattaché à une
 #     recherche précise — occasionnel (cadence gérée côté client).
 #   - clics : implicite, toujours actif (aucun flag), par recherche.
-# feedback/NPS sont individuellement suspendables (engagement_config.py)
-# sans redémarrage ; le tracking de clic n'a pas cette option (signal
-# passif, aucune UI ni friction ajoutée pour l'utilisateur).
+#   - suggestions : explicite, texte libre, PAS rattaché à une recherche
+#     précise — point d'entrée permanent dans l'en-tête (index.html).
+# feedback/NPS/suggestions sont individuellement suspendables
+# (engagement_config.py) sans redémarrage ; le tracking de clic n'a pas
+# cette option (signal passif, aucune UI ni friction ajoutée).
 
 class FeedbackCreate(BaseModel):
     search_id: str
@@ -1133,9 +1136,15 @@ class NpsCreate(BaseModel):
     score: int = Field(ge=0, le=10)
 
 
+class SuggestionCreate(BaseModel):
+    text: str
+    category: str | None = None   # "bug" | "idea" | "other", libre (pas de contrainte serveur)
+
+
 class EngagementConfigUpdate(BaseModel):
-    feedback_enabled: bool | None = None
-    nps_enabled:      bool | None = None
+    feedback_enabled:    bool | None = None
+    nps_enabled:         bool | None = None
+    suggestions_enabled: bool | None = None
 
 
 @app.get("/engagement-config")
@@ -1219,17 +1228,34 @@ def submit_nps(body: NpsCreate, x_user: str | None = Header(default=None)):
     return {"status": "ok"}
 
 
+@app.post("/suggestions")
+def submit_suggestion(body: SuggestionCreate, x_user: str | None = Header(default=None)):
+    """Enregistre une suggestion libre, indépendamment de toute
+    recherche précise — voir suggestion_log.py."""
+    if not engagement_config.get_config()["suggestions_enabled"]:
+        raise HTTPException(status_code=403, detail="Le recueil de suggestions est désactivé.")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="La suggestion ne peut pas être vide.")
+    username = resolve_user(x_user)
+    suggestion_log.log_suggestion(es, username=username, text=text, category=body.category)
+    return {"status": "ok"}
+
+
 @app.post("/admin/engagement-config")
 def admin_set_engagement_config(body: EngagementConfigUpdate, user: str = Depends(require_admin)):
-    """Active/désactive le pouce et/ou le NPS — effectif immédiatement
-    pour toute nouvelle page chargée (l'UI relit /engagement-config à
-    chaque chargement, pas de cache long côté client)."""
+    """Active/désactive le pouce, le NPS et/ou les suggestions —
+    effectif immédiatement pour toute nouvelle page chargée (l'UI relit
+    /engagement-config à chaque chargement, pas de cache long côté
+    client)."""
     try:
         config = engagement_config.get_config()
         if body.feedback_enabled is not None:
             config = engagement_config.set_param("feedback_enabled", body.feedback_enabled)
         if body.nps_enabled is not None:
             config = engagement_config.set_param("nps_enabled", body.nps_enabled)
+        if body.suggestions_enabled is not None:
+            config = engagement_config.set_param("suggestions_enabled", body.suggestions_enabled)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1240,6 +1266,17 @@ def admin_nps_summary(user: str = Depends(require_admin)):
     """Score NPS agrégé + répartition détracteurs/passifs/promoteurs,
     pour la page /stats.html."""
     return nps_log.summary(es)
+
+
+@app.get("/admin/suggestions")
+def admin_list_suggestions(
+    user:  str = Depends(require_admin),
+    size:  int = 50,
+    from_: int = Query(0, alias="from"),
+):
+    """Liste paginée des suggestions, plus récentes d'abord — pour la
+    page /stats.html."""
+    return suggestion_log.list_suggestions(es, size=size, from_=from_)
 
 
 # ── Statistiques de recherche ───────────────────────────────────
