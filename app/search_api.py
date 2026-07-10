@@ -943,9 +943,9 @@ _SOURCE_REGISTRIES = {
 
 def _all_sources_status() -> dict:
     """Fusionne les trois registres de sources en une seule liste, avec
-    le nombre de documents indexés par source — un index manquant
-    (source enregistrée mais jamais indexée, ou vidée) compte pour 0
-    plutôt que de faire échouer tout l'appel."""
+    le nombre de documents et la taille sur disque de chaque index — un
+    index manquant (source enregistrée mais jamais indexée, ou vidée)
+    compte pour 0 plutôt que de faire échouer tout l'appel."""
     result = {}
     for type_, registry in _SOURCE_REGISTRIES.items():
         for name, s in registry.get_sources().items():
@@ -953,12 +953,22 @@ def _all_sources_status() -> dict:
                 indexed = es.count(index=s.es_index)["count"]
             except Exception:
                 indexed = 0
+            try:
+                # size_in_bytes de l'index PRIMAIRE (pas x nombre de
+                # replicas) — c'est l'espace occupé par les données elles-
+                # mêmes, l'unité pertinente ici plutôt que l'empreinte
+                # disque totale du cluster (voir /metrics pour celle-ci,
+                # calculée sur l'alias fédéré ES_SEARCH_ALIAS en entier).
+                size_bytes = es.indices.stats(index=s.es_index)["_all"]["primaries"]["store"]["size_in_bytes"]
+            except Exception:
+                size_bytes = 0
             result[name] = {
                 "type":       type_,
                 "es_index":   s.es_index,
                 "label":      getattr(s, "label", None) or name,
                 "searchable": s.searchable,
                 "indexed":    indexed,
+                "size_bytes": size_bytes,
             }
     return result
 
