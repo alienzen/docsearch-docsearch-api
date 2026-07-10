@@ -27,3 +27,6 @@ ldap3==2.9.1
 # Kafka (workers actifs, lag = progression de l'indexation) et
 # déclenchement d'un scan depuis l'API (publication sur Kafka)
 kafka-python-ng==2.2.3
+
+# Export XLSX de l'historique des recherches (/admin/search-logs/export)
+openpyxl==3.1.5

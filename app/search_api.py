@@ -10,6 +10,7 @@ LDAP_ENABLED = os.getenv("LDAP_ENABLED", "false").lower() == "true"
 import subprocess
 import tempfile
 import logging
+import io
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -17,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Header, Depends, Request, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from elasticsearch import Elasticsearch
+from elasticsearch.helpers import scan as es_scan
 from ldap_resolver import get_user_groups
 from admin_auth import require_admin
 import cluster_status
@@ -1322,6 +1324,17 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
     }
 
 
+def _search_logs_query(q: str | None, username: str | None) -> dict:
+    """Filtre partagé entre /admin/search-logs (paginé) et
+    /admin/search-logs/export (export complet) — mêmes critères."""
+    must = []
+    if q:
+        must.append({"match": {"query": q}})
+    if username:
+        must.append({"term": {"username": username.lower()}})
+    return {"bool": {"must": must}} if must else {"match_all": {}}
+
+
 @app.get("/admin/search-logs")
 def admin_search_logs(
     user:     str = Depends(require_admin),
@@ -1332,12 +1345,7 @@ def admin_search_logs(
 ):
     """Liste paginée des recherches effectuées, plus récentes d'abord —
     qui, quand, depuis quelle IP, quelle requête, combien de résultats."""
-    must = []
-    if q:
-        must.append({"match": {"query": q}})
-    if username:
-        must.append({"term": {"username": username.lower()}})
-    query = {"bool": {"must": must}} if must else {"match_all": {}}
+    query = _search_logs_query(q, username)
 
     try:
         res = es.search(
@@ -1356,6 +1364,94 @@ def admin_search_logs(
         "total":   res["hits"]["total"]["value"],
         "results": [{"id": h["_id"], **h["_source"]} for h in res["hits"]["hits"]],
     }
+
+
+# Plafond de lignes exportées : au-delà, l'export reste utilisable (les
+# N premières lignes, plus récentes d'abord) plutôt que de saturer la
+# mémoire de l'API ou du navigateur sur un historique de plusieurs
+# centaines de milliers de recherches.
+SEARCH_LOGS_EXPORT_MAX_ROWS = 20_000
+
+
+def _join(value) -> str:
+    """Aplati une valeur potentiellement multi-valuée (extension, author,
+    source...) en texte lisible dans une cellule de tableur."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    return str(value)
+
+
+@app.get("/admin/search-logs/export")
+def admin_export_search_logs(
+    user:     str = Depends(require_admin),
+    q:        str | None = None,
+    username: str | None = None,
+):
+    """
+    Export XLSX de l'historique des recherches — mêmes filtres que
+    GET /admin/search-logs (q, username), mais TOUTES les lignes
+    correspondantes (jusqu'à SEARCH_LOGS_EXPORT_MAX_ROWS) plutôt qu'une
+    seule page, pour analyse hors-ligne dans un tableur.
+    """
+    from openpyxl import Workbook
+
+    query = _search_logs_query(q, username)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Historique des recherches"
+    ws.append([
+        "Date / heure", "Utilisateur", "Requête", "Champ recherché", "Source(s)",
+        "Extension(s)", "Auteur(s)", "Dossier", "Période début", "Période fin",
+        "Résultats", "Documents retournés", "Avis", "Clics",
+    ])
+
+    try:
+        hits = es_scan(
+            es,
+            index=search_log.SEARCH_LOG_INDEX,
+            query={"query": query, "sort": [{"timestamp": {"order": "desc"}}]},
+            preserve_order=True,
+        )
+        for i, hit in enumerate(hits):
+            if i >= SEARCH_LOGS_EXPORT_MAX_ROWS:
+                break
+            s = hit["_source"]
+            ws.append([
+                s.get("timestamp", ""),
+                s.get("username", ""),
+                s.get("query", ""),
+                s.get("search_in", ""),
+                _join(s.get("source")),
+                _join(s.get("extension")),
+                _join(s.get("author")),
+                s.get("folder", ""),
+                s.get("date_from", ""),
+                s.get("date_to", ""),
+                s.get("total_results", 0),
+                _join(s.get("result_files")),
+                s.get("feedback", ""),
+                len(s.get("clicks") or []),
+            ])
+    except Exception as e:
+        if "index_not_found" not in str(e).lower():
+            raise HTTPException(status_code=500, detail=str(e))
+
+    for col_idx, width in enumerate([19, 14, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8], start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    filename = f"historique-recherches-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── Pages ──────────────────────────────────────────────────────
