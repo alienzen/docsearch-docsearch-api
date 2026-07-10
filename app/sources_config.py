@@ -22,8 +22,13 @@
 # unique DOCS_PATH -> SOURCES_ROOT à faire avant la première utilisation).
 #
 # Stockage (clé Redis "docsearch:config:sources") :
-#   {"documents": {"subfolder": "documents", "es_index": "documents", "label": "Documents"},
-#    "finance":   {"subfolder": "finance",   "es_index": "finance_docs", "label": "Finance"}}
+#   {"documents": {"subfolder": "documents", "es_index": "documents", "label": "Documents", "searchable": true},
+#    "finance":   {"subfolder": "finance",   "es_index": "finance_docs", "label": "Finance", "searchable": true}}
+#
+# "searchable" (défaut true) n'affecte QUE la visibilité dans /search
+# (docsearch-api) — une source non cherchable continue d'être surveillée
+# et indexée normalement par watcher/worker/producer, elle disparaît
+# seulement des résultats de recherche. Voir set_searchable().
 #
 # Repli par défaut (Redis injoignable ou clé absente) : une seule source
 # "documents", dérivée des variables d'environnement ES_INDEX/DEFAULT_SOURCE_SUBFOLDER
@@ -69,9 +74,10 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 DEFAULT_SOURCES = {
     DEFAULT_SOURCE_NAME: {
-        "subfolder": _DEFAULT_SUBFOLDER,
-        "es_index":  _DEFAULT_ES_INDEX,
-        "label":     "Documents",
+        "subfolder":  _DEFAULT_SUBFOLDER,
+        "es_index":   _DEFAULT_ES_INDEX,
+        "label":      "Documents",
+        "searchable": True,
     }
 }
 
@@ -82,6 +88,7 @@ class Source:
     es_index: str
     folder: str    # chemin absolu résolu (SOURCES_MOUNT/subfolder)
     label: str
+    searchable: bool
 
 
 _cache: dict = {}
@@ -152,6 +159,7 @@ def _to_source(name: str, entry: dict) -> Source:
         es_index=entry["es_index"],
         folder=folder,
         label=entry.get("label") or name,
+        searchable=entry.get("searchable", True),
     )
 
 
@@ -212,7 +220,10 @@ def _read_write(mutate) -> dict:
     return sources
 
 
-def add_source(name: str, es_index: str, subfolder: str | None = None, label: str | None = None) -> dict:
+def add_source(
+    name: str, es_index: str, subfolder: str | None = None, label: str | None = None,
+    searchable: bool = True,
+) -> dict:
     """
     Enregistre une nouvelle source (ou met à jour une source existante du
     même nom). `subfolder` défaut au nom de la source elle-même — créer
@@ -231,10 +242,30 @@ def add_source(name: str, es_index: str, subfolder: str | None = None, label: st
                     f"L'index '{es_index}' est déjà utilisé par la source '{other_name}'."
                 )
         sources[name] = {
-            "subfolder": subfolder,
-            "es_index":  es_index,
-            "label":     label or name,
+            "subfolder":  subfolder,
+            "es_index":   es_index,
+            "label":      label or name,
+            "searchable": searchable,
         }
+
+    return _read_write(mutate)
+
+
+def set_searchable(name: str, searchable: bool) -> dict:
+    """
+    Active/désactive la RECHERCHE pour une source, sans toucher à
+    l'ingestion : watcher/worker/producer continuent de surveiller et
+    d'indexer cette source normalement, seuls ses documents cessent
+    d'apparaître dans /search (docsearch-api). Utile pour mettre une
+    source en pause côté recherche (ex: données en cours de validation)
+    sans interrompre l'indexation en arrière-plan.
+    """
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(
+                f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
+            )
+        sources[name]["searchable"] = searchable
 
     return _read_write(mutate)
 

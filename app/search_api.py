@@ -206,6 +206,29 @@ def _validate_source_names(source_names: str | list[str] | None) -> list[str]:
     return names
 
 
+def _searchable_source_names() -> list[str]:
+    """
+    Noms de TOUTES les sources actuellement cherchables, tous types
+    confondus (fichier/SQL/web) — une source peut continuer d'être
+    indexée normalement (watcher/sql-worker/web-worker) tout en étant
+    exclue de /search via son flag "searchable" (voir set_searchable()
+    dans chaque registre). Utilisé pour restreindre CHAQUE recherche,
+    fédérée ou non : une source désactivée reste invisible même si elle
+    est explicitement demandée via `source`.
+    """
+    names = []
+    for name, s in sources_config.get_sources().items():
+        if s.searchable:
+            names.append(name)
+    for name, s in sql_sources_config.get_sources().items():
+        if s.searchable:
+            names.append(name)
+    for name, s in web_sources_config.get_sources().items():
+        if s.searchable:
+            names.append(name)
+    return names
+
+
 def _resolve_doc_index(doc_id: str) -> str:
     """
     Un doc_id seul ne dit pas dans quel index il vit (recherche
@@ -270,8 +293,15 @@ def search(
         }]
 
     # Filtres "de base" : toujours appliqués, jamais concernés par
-    # l'exclusion décrite ci-dessous (ACL, pièces jointes, période).
-    base_filters = [acl_filter]   # ACL en premier — mis en cache par ES
+    # l'exclusion décrite ci-dessous (ACL, pièces jointes, période,
+    # sources désactivées pour la recherche). Une source "searchable:
+    # false" (voir set_searchable()) est retirée ICI, en amont de tout —
+    # donc invisible même si explicitement demandée via `source` : la
+    # désactivation est absolue, pas seulement "absente par défaut".
+    base_filters = [
+        acl_filter,   # ACL en premier — mis en cache par ES
+        {"terms": {"source": _searchable_source_names()}},
+    ]
     if req.has_attachments:
         base_filters.append({"term": {"has_attachments": True}})
     if req.date_from or req.date_to:
@@ -797,6 +827,73 @@ def admin_remove_web_source(name: str, user: str = Depends(require_admin)):
         return web_sources_config.remove_source(name)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# ── Vue d'ensemble unifiée (les 3 types de sources confondus) ─────
+# Les panneaux /admin/sources, /admin/sql-sources, /admin/web-sources
+# ci-dessus restent le CRUD dédié à chaque type (champs spécifiques :
+# dossier pour un fichier, requête pour du SQL, crawl_index pour du
+# web). Cette route sert un usage différent et transverse : une seule
+# liste avec le compte de documents et la bascule "recherche activée",
+# indépendamment du type — pour ça, la source doit être identifiable
+# sans ambiguïté par (type, name), d'où le paramètre `type` explicite
+# plutôt que de chercher le nom dans les trois registres.
+
+class SearchableUpdate(BaseModel):
+    searchable: bool
+
+
+_SOURCE_REGISTRIES = {
+    "file": sources_config,
+    "sql":  sql_sources_config,
+    "web":  web_sources_config,
+}
+
+
+def _all_sources_status() -> dict:
+    """Fusionne les trois registres de sources en une seule liste, avec
+    le nombre de documents indexés par source — un index manquant
+    (source enregistrée mais jamais indexée, ou vidée) compte pour 0
+    plutôt que de faire échouer tout l'appel."""
+    result = {}
+    for type_, registry in _SOURCE_REGISTRIES.items():
+        for name, s in registry.get_sources().items():
+            try:
+                indexed = es.count(index=s.es_index)["count"]
+            except Exception:
+                indexed = 0
+            result[name] = {
+                "type":       type_,
+                "es_index":   s.es_index,
+                "label":      getattr(s, "label", None) or name,
+                "searchable": s.searchable,
+                "indexed":    indexed,
+            }
+    return result
+
+
+@app.get("/admin/all-sources")
+def admin_get_all_sources(user: str = Depends(require_admin)):
+    return _all_sources_status()
+
+
+@app.post("/admin/all-sources/{name}/searchable")
+def admin_set_source_searchable(
+    name: str, body: SearchableUpdate,
+    type: str = Query(..., description="file, sql ou web"),
+    user: str = Depends(require_admin),
+):
+    """Active/désactive la RECHERCHE pour une source, quel que soit son
+    type — n'affecte jamais l'ingestion (watcher/sql-worker/web-worker
+    continuent normalement), seulement la visibilité dans /search."""
+    registry = _SOURCE_REGISTRIES.get(type)
+    if registry is None:
+        raise HTTPException(status_code=400, detail=f"Type de source invalide : '{type}' (attendu file, sql ou web)")
+    try:
+        registry.set_searchable(name, body.searchable)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _all_sources_status()
 
 
 @app.get("/admin/filetypes")

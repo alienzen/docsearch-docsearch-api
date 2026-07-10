@@ -63,6 +63,7 @@ class WebSource:
     es_index: str         # index ES final DocSearch (rejoint ES_SEARCH_ALIAS)
     acl_public: bool
     poll_interval_seconds: int
+    searchable: bool = True
 
 
 _cache: dict = {}
@@ -126,6 +127,7 @@ def _to_source(name: str, entry: dict) -> WebSource:
         es_index=entry["es_index"],
         acl_public=bool(entry.get("acl_public", True)),
         poll_interval_seconds=int(entry.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
+        searchable=entry.get("searchable", True),
     )
 
 
@@ -174,6 +176,7 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, crawl_index: str, es_index: str,
     acl_public: bool = True, poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
+    searchable: bool = True,
 ) -> dict:
     """
     Enregistre une nouvelle source web (ou met à jour une source existante
@@ -219,7 +222,23 @@ def add_source(
             "es_index":               es_index,
             "acl_public":             acl_public,
             "poll_interval_seconds":  poll_interval_seconds,
+            "searchable":             searchable,
         }
+
+    return _read_write(mutate)
+
+
+def set_searchable(name: str, searchable: bool) -> dict:
+    """
+    Active/désactive la RECHERCHE pour une source web, sans toucher à
+    l'ingestion : web_worker.py continue de synchroniser crawl_index vers
+    es_index normalement, seuls ses documents cessent d'apparaître dans
+    /search (docsearch-api).
+    """
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source web inconnue : '{name}'")
+        sources[name]["searchable"] = searchable
 
     return _read_write(mutate)
 
