@@ -441,6 +441,11 @@ def search(
         source=req.source,
         total_results=total,
         result_files=[h["_source"].get("filename", "") for h in hits],
+        extension=req.extension,
+        author=req.author,
+        folder=req.folder,
+        date_from=req.date_from,
+        date_to=req.date_to,
     )
 
     return {

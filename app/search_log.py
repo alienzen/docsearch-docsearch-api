@@ -34,6 +34,17 @@ _ENGAGEMENT_PROPERTIES = {
     },
 }
 
+# Idem, ajoutés après coup : critères de filtrage actifs au moment de la
+# recherche (facettes cumulatives, période) — purement informatif pour
+# /stats.html, aucune recherche n'est jamais rejouée à partir de ces champs.
+_CRITERIA_PROPERTIES = {
+    "extension": {"type": "keyword"},
+    "author":    {"type": "keyword"},
+    "folder":    {"type": "keyword"},
+    "date_from": {"type": "keyword"},
+    "date_to":   {"type": "keyword"},
+}
+
 
 def _ensure_index(es: Elasticsearch) -> None:
     global _index_ready
@@ -52,15 +63,16 @@ def _ensure_index(es: Elasticsearch) -> None:
                     "total_results": {"type": "integer"},
                     "result_files":  {"type": "keyword"},
                     **_ENGAGEMENT_PROPERTIES,
+                    **_CRITERIA_PROPERTIES,
                 }
             }
         })
         logger.info(f"Index '{SEARCH_LOG_INDEX}' créé.")
     else:
         # Index déjà créé par une version antérieure (avant l'ajout du
-        # feedback/tracking de clic) — complète son mapping sans y
-        # toucher autrement. Idempotent, appelable à chaque démarrage.
-        es.indices.put_mapping(index=SEARCH_LOG_INDEX, properties=_ENGAGEMENT_PROPERTIES)
+        # feedback/tracking de clic/critères) — complète son mapping sans
+        # y toucher autrement. Idempotent, appelable à chaque démarrage.
+        es.indices.put_mapping(index=SEARCH_LOG_INDEX, properties={**_ENGAGEMENT_PROPERTIES, **_CRITERIA_PROPERTIES})
     _index_ready = True
 
 
@@ -74,6 +86,11 @@ def log_search(
     source: str | list[str] | None,
     total_results: int,
     result_files: list[str],
+    extension: str | list[str] | None = None,
+    author: str | list[str] | None = None,
+    folder: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> str | None:
     """
     Enregistre un événement de recherche. Ne lève jamais d'exception —
@@ -89,6 +106,11 @@ def log_search(
     sources) — voir search_api.py:search(). Le champ ES "source" est un
     keyword, nativement multi-valué : aucun changement de mapping requis
     pour stocker une liste.
+
+    extension/author/folder/date_from/date_to : critères de filtrage
+    actifs au moment de la recherche (facettes cumulatives, période) —
+    purement informatif pour /stats.html ("Historique des recherches"),
+    jamais réutilisés pour rejouer la recherche.
     """
     try:
         _ensure_index(es)
@@ -102,6 +124,16 @@ def log_search(
         }
         if ip:
             doc["ip"] = ip
+        if extension:
+            doc["extension"] = extension
+        if author:
+            doc["author"] = author
+        if folder:
+            doc["folder"] = folder
+        if date_from:
+            doc["date_from"] = date_from
+        if date_to:
+            doc["date_to"] = date_to
         if source:
             doc["source"] = source
         res = es.index(index=SEARCH_LOG_INDEX, document=doc)
