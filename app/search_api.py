@@ -234,6 +234,30 @@ def _searchable_source_names() -> list[str]:
     return names
 
 
+@app.get("/searchable-sources")
+def get_searchable_sources():
+    """
+    Public (pas d'auth) — liste des sources actuellement cherchables,
+    pour la présélection de sources AVANT de lancer une recherche (voir
+    index.html) — complète la facette "Source" existante, qui n'apparaît
+    qu'APRÈS une recherche (dérivée des résultats, avec leur compte).
+    Contrairement à /admin/all-sources, pas de nombre de documents ni de
+    taille d'index (réservé à l'admin) : juste de quoi peupler une liste
+    de cases à cocher.
+    """
+    result = []
+    for name, s in sources_config.get_sources().items():
+        if s.searchable:
+            result.append({"name": name, "label": s.label or name, "type": "file"})
+    for name, s in sql_sources_config.get_sources().items():
+        if s.searchable:
+            result.append({"name": name, "label": name, "type": "sql"})
+    for name, s in web_sources_config.get_sources().items():
+        if s.searchable:
+            result.append({"name": name, "label": name, "type": "web"})
+    return sorted(result, key=lambda s: s["label"].lower())
+
+
 def _resolve_doc_index(doc_id: str) -> str:
     """
     Un doc_id seul ne dit pas dans quel index il vit (recherche
