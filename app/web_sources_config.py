@@ -64,6 +64,7 @@ class WebSource:
     acl_public: bool
     poll_interval_seconds: int
     searchable: bool = True
+    paused: bool = False  # web_worker.py saute cette source tant que True (voir set_paused)
 
 
 _cache: dict = {}
@@ -128,6 +129,7 @@ def _to_source(name: str, entry: dict) -> WebSource:
         acl_public=bool(entry.get("acl_public", True)),
         poll_interval_seconds=int(entry.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
         searchable=entry.get("searchable", True),
+        paused=entry.get("paused", False),
     )
 
 
@@ -239,6 +241,25 @@ def set_searchable(name: str, searchable: bool) -> dict:
         if name not in sources:
             raise KeyError(f"Source web inconnue : '{name}'")
         sources[name]["searchable"] = searchable
+
+    return _read_write(mutate)
+
+
+def set_paused(name: str, paused: bool) -> dict:
+    """
+    Suspend/reprend le CRAWL pour une source web — tant que True,
+    web_worker.py saute cette source à chaque tick (voir web_worker.py),
+    donc crawl_index n'est plus relu ni transformé vers es_index. Ne
+    pilote PAS le conteneur Elastic Open Web Crawler lui-même (ce module
+    n'a aucune visibilité Docker) : si ce conteneur tourne en mode
+    "schedule" en continu, il continue d'écrire dans crawl_index — seule
+    la RÉPERCUSSION vers DocSearch est mise en pause. Les documents déjà
+    dans es_index restent cherchables (contrairement à searchable=False).
+    """
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source web inconnue : '{name}'")
+        sources[name]["paused"] = paused
 
     return _read_write(mutate)
 

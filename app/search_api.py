@@ -792,6 +792,7 @@ def admin_get_web_sources(user: str = Depends(require_admin)):
             "es_index":              s.es_index,
             "acl_public":            s.acl_public,
             "poll_interval_seconds": s.poll_interval_seconds,
+            "paused":                s.paused,
         }
         for name, s in web_sources_config.get_sources().items()
     }
@@ -825,6 +826,27 @@ def admin_remove_web_source(name: str, user: str = Depends(require_admin)):
     ni es_index) ni les documents déjà indexés."""
     try:
         return web_sources_config.remove_source(name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+class PauseUpdate(BaseModel):
+    paused: bool
+
+
+@app.post("/admin/web-sources/{name}/pause")
+def admin_set_web_source_paused(name: str, body: PauseUpdate, user: str = Depends(require_admin)):
+    """
+    Suspend/reprend la synchronisation crawl_index -> es_index pour une
+    source web (web-worker saute cette source à chaque tick tant que
+    paused=true). Ne pilote PAS le conteneur Elastic Open Web Crawler
+    lui-même (aucun accès Docker depuis cette API) : si ce conteneur
+    tourne en continu (mode "schedule"), il continue d'écrire dans
+    crawl_index — seule la répercussion vers DocSearch s'arrête. Les
+    documents déjà indexés dans es_index restent cherchables.
+    """
+    try:
+        return web_sources_config.set_paused(name, body.paused)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
