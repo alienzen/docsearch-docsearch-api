@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Header, Depends, Request, Query
 from fastapi.responses import FileResponse, StreamingResponse
@@ -25,6 +25,8 @@ import filetype_config
 import runtime_config
 import path_filter
 import search_log
+import nps_log
+import engagement_config
 import saved_searches
 import sources_config
 from sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
@@ -429,7 +431,7 @@ def search(
     hits  = res["hits"]["hits"]
     total = res["hits"]["total"]["value"]
 
-    search_log.log_search(
+    search_id = search_log.log_search(
         es,
         username=username,
         ip=get_client_ip(request),
@@ -441,8 +443,9 @@ def search(
     )
 
     return {
-        "total":    total,
-        "username": username,
+        "total":     total,
+        "username":  username,
+        "search_id": search_id,
         "results": [
             {
                 "id":        h["_id"],
@@ -1105,6 +1108,140 @@ def admin_trigger_scan(
     return {"status": "démarré", "source": body.source, "subfolder": body.subfolder or "(dossier complet)"}
 
 
+# ── Mesure de satisfaction (pouce, NPS, clics) ──────────────────
+# Trois signaux distincts, volontairement pas fusionnés :
+#   - feedback (pouce haut/bas) : explicite, par recherche (search_id).
+#   - NPS : explicite, sur l'outil en général, PAS rattaché à une
+#     recherche précise — occasionnel (cadence gérée côté client).
+#   - clics : implicite, toujours actif (aucun flag), par recherche.
+# feedback/NPS sont individuellement suspendables (engagement_config.py)
+# sans redémarrage ; le tracking de clic n'a pas cette option (signal
+# passif, aucune UI ni friction ajoutée pour l'utilisateur).
+
+class FeedbackCreate(BaseModel):
+    search_id: str
+    rating: str  # "up" | "down"
+
+
+class ClickCreate(BaseModel):
+    search_id: str
+    doc_id: str
+    position: int
+
+
+class NpsCreate(BaseModel):
+    score: int = Field(ge=0, le=10)
+
+
+class EngagementConfigUpdate(BaseModel):
+    feedback_enabled: bool | None = None
+    nps_enabled:      bool | None = None
+
+
+@app.get("/engagement-config")
+def get_engagement_config():
+    """
+    Public (pas d'auth) — l'interface de recherche l'appelle pour savoir
+    si le pouce et le NPS doivent être affichés. Ne PAS confondre avec
+    /admin/engagement-config (même donnée, réservé à l'admin pour
+    modification) : cette route-ci n'expose rien de sensible.
+    """
+    return engagement_config.get_config()
+
+
+@app.post("/feedback")
+def submit_feedback(body: FeedbackCreate, request: Request, x_user: str | None = Header(default=None)):
+    """
+    Enregistre un pouce haut/bas pour une recherche précise (search_id
+    renvoyé par POST /search). Simple mise à jour partielle du document
+    search_logs déjà existant — écrase un avis précédent sur la même
+    recherche plutôt que d'en accumuler plusieurs (un seul avis a du sens
+    par recherche).
+    """
+    if not engagement_config.get_config()["feedback_enabled"]:
+        raise HTTPException(status_code=403, detail="Le recueil d'avis est désactivé.")
+    if body.rating not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="rating doit être 'up' ou 'down'.")
+    try:
+        es.update(index=search_log.SEARCH_LOG_INDEX, id=body.search_id, doc={"feedback": body.rating})
+    except Exception as e:
+        if "not_found" in str(e).lower():
+            raise HTTPException(status_code=404, detail="search_id introuvable.")
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "ok"}
+
+
+@app.post("/click")
+def submit_click(body: ClickCreate):
+    """
+    Enregistre le clic sur UN résultat d'une recherche précise (position
+    dans la liste, 0-indexée) — signal toujours actif, pas de flag
+    d'activation (voir docstring de section). Append via script Painless
+    plutôt qu'une mise à jour de champ simple : "clicks" est une LISTE,
+    un même search_id peut recevoir plusieurs clics (résultats consultés
+    un par un avant de trouver le bon).
+    """
+    try:
+        es.update(
+            index=search_log.SEARCH_LOG_INDEX,
+            id=body.search_id,
+            script={
+                "source": (
+                    "if (ctx._source.clicks == null) { ctx._source.clicks = [] } "
+                    "ctx._source.clicks.add(params.click)"
+                ),
+                "params": {
+                    "click": {
+                        "doc_id":    body.doc_id,
+                        "position":  body.position,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                },
+            },
+        )
+    except Exception as e:
+        # Best-effort : un clic non enregistré (search_id déjà expiré,
+        # ES momentanément indisponible...) ne doit jamais remonter comme
+        # erreur visible — l'utilisateur est en train de consulter un
+        # document, pas d'interagir avec le tracking.
+        logger.warning(f"[click] Échec d'enregistrement pour search_id={body.search_id} : {e}")
+    return {"status": "ok"}
+
+
+@app.post("/nps")
+def submit_nps(body: NpsCreate, x_user: str | None = Header(default=None)):
+    """Enregistre une réponse NPS (0-10), indépendamment de toute
+    recherche précise — voir nps_log.py."""
+    if not engagement_config.get_config()["nps_enabled"]:
+        raise HTTPException(status_code=403, detail="Le NPS est désactivé.")
+    username = resolve_user(x_user)
+    nps_log.log_nps(es, username=username, score=body.score)
+    return {"status": "ok"}
+
+
+@app.post("/admin/engagement-config")
+def admin_set_engagement_config(body: EngagementConfigUpdate, user: str = Depends(require_admin)):
+    """Active/désactive le pouce et/ou le NPS — effectif immédiatement
+    pour toute nouvelle page chargée (l'UI relit /engagement-config à
+    chaque chargement, pas de cache long côté client)."""
+    try:
+        config = engagement_config.get_config()
+        if body.feedback_enabled is not None:
+            config = engagement_config.set_param("feedback_enabled", body.feedback_enabled)
+        if body.nps_enabled is not None:
+            config = engagement_config.set_param("nps_enabled", body.nps_enabled)
+        return config
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/admin/nps-summary")
+def admin_nps_summary(user: str = Depends(require_admin)):
+    """Score NPS agrégé + répartition détracteurs/passifs/promoteurs,
+    pour la page /stats.html."""
+    return nps_log.summary(es)
+
+
 # ── Statistiques de recherche ───────────────────────────────────
 @app.get("/admin/search-logs/summary")
 def admin_search_logs_summary(user: str = Depends(require_admin)):
@@ -1120,11 +1257,14 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
                 "by_day": {
                     "date_histogram": {"field": "timestamp", "calendar_interval": "day"},
                 },
+                "feedback_up":   {"filter": {"term": {"feedback": "up"}}},
+                "feedback_down": {"filter": {"term": {"feedback": "down"}}},
             },
         )
     except Exception as e:
         if "index_not_found" in str(e).lower():
-            return {"total_searches": 0, "unique_users": 0, "unique_ips": 0, "by_day": []}
+            return {"total_searches": 0, "unique_users": 0, "unique_ips": 0, "by_day": [],
+                     "feedback_up": 0, "feedback_down": 0}
         raise HTTPException(status_code=500, detail=str(e))
 
     return {
@@ -1135,6 +1275,8 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
             {"date": b["key_as_string"][:10], "count": b["doc_count"]}
             for b in res["aggregations"]["by_day"]["buckets"][-14:]
         ],
+        "feedback_up":   res["aggregations"]["feedback_up"]["doc_count"],
+        "feedback_down": res["aggregations"]["feedback_down"]["doc_count"],
     }
 
 
