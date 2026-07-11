@@ -90,6 +90,7 @@ class SqlSource:
     poll_interval_seconds: int
     label: str = ""
     searchable: bool = True
+    description: str = ""
     fields: tuple[FieldMapping, ...] = field(default_factory=tuple)
 
 
@@ -166,6 +167,7 @@ def _to_source(name: str, entry: dict) -> SqlSource:
         poll_interval_seconds=int(entry.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
         label=entry.get("label") or name,
         searchable=entry.get("searchable", True),
+        description=entry.get("description") or "",
         fields=fields,
     )
 
@@ -252,7 +254,7 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, db_type: str, connection_ref: str, query: str, id_column: str,
     es_index: str, fields: list[dict], poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
-    label: str | None = None, searchable: bool = True,
+    label: str | None = None, searchable: bool = True, description: str | None = None,
 ) -> dict:
     """
     Enregistre une nouvelle source SQL (ou met à jour une source
@@ -299,6 +301,7 @@ def add_source(
             "poll_interval_seconds": poll_interval_seconds,
             "label":                 label or name,
             "searchable":            searchable,
+            "description":           description or "",
             "fields":                fields,
         }
 
@@ -334,32 +337,33 @@ def remove_source(name: str) -> dict:
     return _read_write(mutate)
 
 
-def rename_source(old_name: str, new_name: str) -> dict:
+def set_label(name: str, label: str) -> dict:
     """
-    Renomme une source SQL dans le REGISTRE (clé Redis) — connexion,
-    requête, mapping et es_index inchangés, sql_worker.py cible la
-    source par son nouveau nom dès le prochain rechargement (~5-10s).
-
-    NE MET PAS À JOUR le champ "source" des documents déjà indexés —
-    à la charge de l'appelant (update_by_query sur l'index ES, voir
-    search_api.py, ce module est Redis-only). Tant que ce n'est pas
-    fait, filtrer par le nouveau nom ne retrouve pas les documents
-    indexés avant le renommage.
-
-    Si le libellé n'avait jamais été personnalisé (label == old_name,
-    cas par défaut de add_source), il suit le renommage ; un libellé
-    explicite est conservé tel quel.
+    Modifie le LIBELLÉ d'affichage d'une source SQL, sans toucher à son
+    nom (clé de registre), sa connexion, sa requête ni son es_index —
+    contrairement à l'ancien rename_source(), le nom qui identifie la
+    source dans le registre et dans le champ "source" des documents déjà
+    indexés ne change jamais, donc aucune répercussion sur l'index ES
+    n'est nécessaire ici.
     """
-    _validate_name(new_name, "Nouveau nom de source SQL")
+    if not label.strip():
+        raise ValueError("Le libellé ne peut pas être vide.")
 
     def mutate(sources):
-        if old_name not in sources:
-            raise KeyError(f"Source SQL inconnue : '{old_name}'")
-        if new_name in sources:
-            raise ValueError(f"Une source SQL nommée '{new_name}' existe déjà.")
-        entry = sources.pop(old_name)
-        if entry.get("label") == old_name:
-            entry["label"] = new_name
-        sources[new_name] = entry
+        if name not in sources:
+            raise KeyError(f"Source SQL inconnue : '{name}'")
+        sources[name]["label"] = label.strip()
+
+    return _read_write(mutate)
+
+
+def set_description(name: str, description: str) -> dict:
+    """Modifie la description d'une source SQL (texte libre, affiché
+    dans l'admin — n'affecte ni l'ingestion ni la recherche)."""
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source SQL inconnue : '{name}'")
+        sources[name]["description"] = description.strip()
 
     return _read_write(mutate)

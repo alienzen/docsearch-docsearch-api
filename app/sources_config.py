@@ -78,6 +78,7 @@ DEFAULT_SOURCES = {
         "es_index":   _DEFAULT_ES_INDEX,
         "label":      "Documents",
         "searchable": True,
+        "description": "",
     }
 }
 
@@ -89,6 +90,7 @@ class Source:
     folder: str    # chemin absolu résolu (SOURCES_MOUNT/subfolder)
     label: str
     searchable: bool
+    description: str = ""
 
 
 _cache: dict = {}
@@ -160,6 +162,7 @@ def _to_source(name: str, entry: dict) -> Source:
         folder=folder,
         label=entry.get("label") or name,
         searchable=entry.get("searchable", True),
+        description=entry.get("description") or "",
     )
 
 
@@ -222,7 +225,7 @@ def _read_write(mutate) -> dict:
 
 def add_source(
     name: str, es_index: str, subfolder: str | None = None, label: str | None = None,
-    searchable: bool = True,
+    searchable: bool = True, description: str | None = None,
 ) -> dict:
     """
     Enregistre une nouvelle source (ou met à jour une source existante du
@@ -242,10 +245,11 @@ def add_source(
                     f"L'index '{es_index}' est déjà utilisé par la source '{other_name}'."
                 )
         sources[name] = {
-            "subfolder":  subfolder,
-            "es_index":   es_index,
-            "label":      label or name,
-            "searchable": searchable,
+            "subfolder":   subfolder,
+            "es_index":    es_index,
+            "label":       label or name,
+            "searchable":  searchable,
+            "description": description or "",
         }
 
     return _read_write(mutate)
@@ -287,32 +291,33 @@ def remove_source(name: str) -> dict:
     return _read_write(mutate)
 
 
-def rename_source(old_name: str, new_name: str) -> dict:
+def set_label(name: str, label: str) -> dict:
     """
-    Renomme une source dans le REGISTRE (clé Redis) — subfolder/es_index
-    inchangés, watcher/producer/scan ciblent la source par son nouveau nom
-    dès le prochain rechargement (~5-10s). Si le libellé n'avait jamais été
-    personnalisé (label == old_name, cas par défaut de add_source), il
-    suit le renommage ; un libellé explicite est conservé tel quel.
-
-    NE MET PAS À JOUR le champ "source" des documents déjà indexés — cette
-    étape (update_by_query sur l'index ES) est à la charge de l'appelant
-    (voir search_api.py, seul endroit qui a accès à Elasticsearch). Tant
-    qu'elle n'a pas été faite, filtrer par le nouveau nom ne retrouve pas
-    les documents indexés avant le renommage.
+    Modifie le LIBELLÉ d'affichage d'une source, sans toucher à son nom
+    (clé de registre), son index ES ni son dossier — contrairement à
+    l'ancien rename_source(), le nom qui identifie la source dans le
+    registre et dans le champ "source" des documents déjà indexés ne
+    change jamais, donc aucune répercussion sur l'index ES n'est
+    nécessaire ici.
     """
-    if old_name == DEFAULT_SOURCE_NAME:
-        raise ValueError(f"Impossible de renommer la source par défaut ('{DEFAULT_SOURCE_NAME}').")
-    _validate_name(new_name, "Nouveau nom de source")
+    if not label.strip():
+        raise ValueError("Le libellé ne peut pas être vide.")
 
     def mutate(sources):
-        if old_name not in sources:
-            raise KeyError(f"Source inconnue : '{old_name}'")
-        if new_name in sources:
-            raise ValueError(f"Une source nommée '{new_name}' existe déjà.")
-        entry = sources.pop(old_name)
-        if entry.get("label") == old_name:
-            entry["label"] = new_name
-        sources[new_name] = entry
+        if name not in sources:
+            raise KeyError(f"Source inconnue : '{name}'")
+        sources[name]["label"] = label.strip()
+
+    return _read_write(mutate)
+
+
+def set_description(name: str, description: str) -> dict:
+    """Modifie la description d'une source (texte libre, affiché dans
+    l'admin — n'affecte ni l'ingestion ni la recherche)."""
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source inconnue : '{name}'")
+        sources[name]["description"] = description.strip()
 
     return _read_write(mutate)

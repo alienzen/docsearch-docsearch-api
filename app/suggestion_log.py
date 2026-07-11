@@ -5,10 +5,11 @@
 # voir index.html), indépendant de toute recherche. Index ES dédié pour
 # la même raison que nps_log.py/search_log.py.
 #
-# ANONYME PAR CONCEPTION : contrairement au pouce/NPS/clics (rattachés à
-# username), aucune identité n'est capturée ni stockée ici — l'UI
-# annonce explicitement l'anonymat (voir index.html), ce serait trompeur
-# de logguer discrètement l'utilisateur en arrière-plan malgré tout.
+# ANONYME PAR DÉFAUT : contrairement au pouce/NPS/clics (toujours
+# rattachés à username), l'identité n'est capturée ici QUE si
+# l'utilisateur a explicitement décoché "rester anonyme" dans l'UI (voir
+# index.html) — le paramètre `username` est donc optionnel, et son
+# absence ne doit jamais être comblée discrètement en arrière-plan.
 
 import os
 import logging
@@ -34,6 +35,7 @@ def _ensure_index(es: Elasticsearch) -> None:
                     "timestamp": {"type": "date"},
                     "category":  {"type": "keyword"},
                     "text":      {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                    "username":  {"type": "keyword"},
                 }
             }
         })
@@ -41,12 +43,12 @@ def _ensure_index(es: Elasticsearch) -> None:
     _index_ready = True
 
 
-def log_suggestion(es: Elasticsearch, *, text: str, category: str | None) -> None:
-    """Enregistre une suggestion libre, SANS identité (voir docstring de
-    module — l'anonymat est annoncé à l'utilisateur, il doit être réel).
-    Ne lève jamais d'exception — un échec d'écriture ne doit jamais
-    remonter comme erreur visible à l'utilisateur qui vient de soumettre
-    son idée."""
+def log_suggestion(es: Elasticsearch, *, text: str, category: str | None, username: str | None = None) -> None:
+    """Enregistre une suggestion libre. `username` n'est renseigné que si
+    l'utilisateur a choisi de ne pas rester anonyme (voir docstring de
+    module) — absent sinon, jamais comblé silencieusement. Ne lève jamais
+    d'exception — un échec d'écriture ne doit jamais remonter comme
+    erreur visible à l'utilisateur qui vient de soumettre son idée."""
     try:
         _ensure_index(es)
         doc = {
@@ -55,6 +57,8 @@ def log_suggestion(es: Elasticsearch, *, text: str, category: str | None) -> Non
         }
         if category:
             doc["category"] = category
+        if username:
+            doc["username"] = username
         es.index(index=SUGGESTION_LOG_INDEX, document=doc)
     except Exception as e:
         logger.warning(f"[suggestion_log] Échec d'écriture de la suggestion : {e}")

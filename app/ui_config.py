@@ -32,6 +32,9 @@ DEFAULT_UI_CONFIG = {
     "export_enabled":      True,   # boutons "Exporter en XLSX/DOCX" des résultats de recherche —
                                     # ne bloque que l'affichage côté index.html ; POST /search/export
                                     # reste refusé côté API si ce flag est désactivé (voir search_api.py).
+    "help_enabled":        True,   # lien "❓ Aide" dans l'en-tête de recherche + raccourci clavier "?" —
+                                    # ne bloque pas l'accès direct à /help.html (page statique sans
+                                    # donnée sensible), seulement sa mise en avant dans l'UI.
 }
 
 _cache: dict = {}

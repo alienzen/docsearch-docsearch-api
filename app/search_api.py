@@ -886,6 +886,7 @@ class SourceCreate(BaseModel):
     es_index: str
     subfolder: str | None = None
     label: str | None = None
+    description: str | None = None
 
 
 class SqlFieldMapping(BaseModel):
@@ -905,6 +906,7 @@ class SqlSourceCreate(BaseModel):
     fields: list[SqlFieldMapping]
     poll_interval_seconds: int = sql_sources_config.DEFAULT_POLL_INTERVAL_SECONDS
     label: str | None = None
+    description: str | None = None
 
 
 class WebSourceCreate(BaseModel):
@@ -914,6 +916,7 @@ class WebSourceCreate(BaseModel):
     acl_public: bool = True
     poll_interval_seconds: int = web_sources_config.DEFAULT_POLL_INTERVAL_SECONDS
     label: str | None = None
+    description: str | None = None
 
 
 def _sources_status() -> dict:
@@ -949,37 +952,18 @@ def admin_status(user: str = Depends(require_admin)):
     return status
 
 
-class RenameUpdate(BaseModel):
-    new_name: str
+class LabelUpdate(BaseModel):
+    label: str
 
 
-def _rename_source_documents(es_index: str, old_name: str, new_name: str) -> int:
-    """
-    Répercute un renommage de registre sur les documents déjà indexés :
-    sans ça, leur champ "source" garde l'ancien nom et devient invisible
-    pour tout filtre par le nouveau nom, jusqu'au prochain passage complet
-    (scan/watcher/sql-worker/web-worker). Best-effort : un index absent
-    (source jamais indexée) n'est pas une erreur, juste 0 document.
-    """
-    if not es.indices.exists(index=es_index):
-        return 0
-    result = es.update_by_query(
-        index=es_index,
-        query={"term": {"source": old_name}},
-        script={
-            "source": "ctx._source.source = params.new_name",
-            "params": {"new_name": new_name},
-        },
-        conflicts="proceed",
-        refresh=True,
-    )
-    return result.get("updated", 0)
+class DescriptionUpdate(BaseModel):
+    description: str
 
 
 @app.get("/admin/sources")
 def admin_get_sources(user: str = Depends(require_admin)):
     return {
-        name: {"es_index": s.es_index, "folder": s.folder, "label": s.label}
+        name: {"es_index": s.es_index, "folder": s.folder, "label": s.label, "description": s.description}
         for name, s in sources_config.get_sources().items()
     }
 
@@ -988,7 +972,8 @@ def admin_get_sources(user: str = Depends(require_admin)):
 def admin_add_source(body: SourceCreate, user: str = Depends(require_admin)):
     try:
         return sources_config.add_source(
-            body.name, body.es_index, subfolder=body.subfolder, label=body.label
+            body.name, body.es_index, subfolder=body.subfolder, label=body.label,
+            description=body.description,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1005,18 +990,24 @@ def admin_remove_source(name: str, user: str = Depends(require_admin)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/admin/sources/{name}/rename")
-def admin_rename_source(name: str, body: RenameUpdate, user: str = Depends(require_admin)):
-    """Renomme une source fichier (registre + champ "source" des
-    documents déjà indexés) — subfolder/es_index inchangés."""
+@app.post("/admin/sources/{name}/label")
+def admin_set_source_label(name: str, body: LabelUpdate, user: str = Depends(require_admin)):
+    """Modifie le libellé d'affichage d'une source fichier — son nom
+    (registre + champ "source" des documents déjà indexés) ne change pas."""
     try:
-        result = sources_config.rename_source(name, body.new_name)
+        return sources_config.set_label(name, body.label)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    updated = _rename_source_documents(result[body.new_name]["es_index"], name, body.new_name)
-    return {"sources": result, "documents_updated": updated}
+
+
+@app.post("/admin/sources/{name}/description")
+def admin_set_source_description(name: str, body: DescriptionUpdate, user: str = Depends(require_admin)):
+    try:
+        return sources_config.set_description(name, body.description)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/admin/sql-sources")
@@ -1030,6 +1021,7 @@ def admin_get_sql_sources(user: str = Depends(require_admin)):
             "es_index":              s.es_index,
             "poll_interval_seconds": s.poll_interval_seconds,
             "label":                 s.label,
+            "description":           s.description,
             "fields": [
                 {"column": f.column, "es_field": f.es_field, "es_type": f.es_type, "analyzer": f.analyzer}
                 for f in s.fields
@@ -1059,6 +1051,7 @@ def admin_add_sql_source(body: SqlSourceCreate, user: str = Depends(require_admi
             fields=[f.model_dump() for f in body.fields],
             poll_interval_seconds=body.poll_interval_seconds,
             label=body.label,
+            description=body.description,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1075,18 +1068,24 @@ def admin_remove_sql_source(name: str, user: str = Depends(require_admin)):
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@app.post("/admin/sql-sources/{name}/rename")
-def admin_rename_sql_source(name: str, body: RenameUpdate, user: str = Depends(require_admin)):
-    """Renomme une source SQL (registre + champ "source" des documents
-    déjà indexés) — connexion/requête/mapping/es_index inchangés."""
+@app.post("/admin/sql-sources/{name}/label")
+def admin_set_sql_source_label(name: str, body: LabelUpdate, user: str = Depends(require_admin)):
+    """Modifie le libellé d'affichage d'une source SQL — son nom
+    (registre + champ "source" des documents déjà indexés) ne change pas."""
     try:
-        result = sql_sources_config.rename_source(name, body.new_name)
+        return sql_sources_config.set_label(name, body.label)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    updated = _rename_source_documents(result[body.new_name]["es_index"], name, body.new_name)
-    return {"sources": result, "documents_updated": updated}
+
+
+@app.post("/admin/sql-sources/{name}/description")
+def admin_set_sql_source_description(name: str, body: DescriptionUpdate, user: str = Depends(require_admin)):
+    try:
+        return sql_sources_config.set_description(name, body.description)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/admin/web-sources")
@@ -1098,6 +1097,7 @@ def admin_get_web_sources(user: str = Depends(require_admin)):
             "acl_public":            s.acl_public,
             "poll_interval_seconds": s.poll_interval_seconds,
             "label":                 s.label,
+            "description":           s.description,
             "paused":                s.paused,
         }
         for name, s in web_sources_config.get_sources().items()
@@ -1121,6 +1121,7 @@ def admin_add_web_source(body: WebSourceCreate, user: str = Depends(require_admi
             acl_public=body.acl_public,
             poll_interval_seconds=body.poll_interval_seconds,
             label=body.label,
+            description=body.description,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1137,18 +1138,24 @@ def admin_remove_web_source(name: str, user: str = Depends(require_admin)):
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@app.post("/admin/web-sources/{name}/rename")
-def admin_rename_web_source(name: str, body: RenameUpdate, user: str = Depends(require_admin)):
-    """Renomme une source web (registre + champ "source" des documents
-    déjà indexés) — crawl_index/es_index inchangés."""
+@app.post("/admin/web-sources/{name}/label")
+def admin_set_web_source_label(name: str, body: LabelUpdate, user: str = Depends(require_admin)):
+    """Modifie le libellé d'affichage d'une source web — son nom
+    (registre + champ "source" des documents déjà indexés) ne change pas."""
     try:
-        result = web_sources_config.rename_source(name, body.new_name)
+        return web_sources_config.set_label(name, body.label)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    updated = _rename_source_documents(result[body.new_name]["es_index"], name, body.new_name)
-    return {"sources": result, "documents_updated": updated}
+
+
+@app.post("/admin/web-sources/{name}/description")
+def admin_set_web_source_description(name: str, body: DescriptionUpdate, user: str = Depends(require_admin)):
+    try:
+        return web_sources_config.set_description(name, body.description)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 class PauseUpdate(BaseModel):
@@ -1217,10 +1224,11 @@ def _all_sources_status() -> dict:
             result[name] = {
                 "type":       type_,
                 "es_index":   s.es_index,
-                "label":      getattr(s, "label", None) or name,
-                "searchable": s.searchable,
-                "indexed":    indexed,
-                "size_bytes": size_bytes,
+                "label":       getattr(s, "label", None) or name,
+                "description": getattr(s, "description", None) or "",
+                "searchable":  s.searchable,
+                "indexed":     indexed,
+                "size_bytes":  size_bytes,
             }
     return result
 
@@ -1387,6 +1395,7 @@ class NpsCreate(BaseModel):
 class SuggestionCreate(BaseModel):
     text: str
     category: str | None = None   # "bug" | "idea" | "other", libre (pas de contrainte serveur)
+    anonymous: bool = True        # défaut anonyme — l'utilisateur doit explicitement décocher pour être identifié
 
 
 class EngagementConfigUpdate(BaseModel):
@@ -1401,6 +1410,7 @@ class UiConfigUpdate(BaseModel):
     footer_enabled:      bool | None = None
     admin_links_enabled: bool | None = None
     export_enabled:      bool | None = None
+    help_enabled:        bool | None = None
 
 
 @app.get("/ui-config")
@@ -1437,6 +1447,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("admin_links_enabled", body.admin_links_enabled)
         if body.export_enabled is not None:
             config = ui_config.set_param("export_enabled", body.export_enabled)
+        if body.help_enabled is not None:
+            config = ui_config.set_param("help_enabled", body.help_enabled)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1524,16 +1536,18 @@ def submit_nps(body: NpsCreate, x_user: str | None = Header(default=None)):
 
 
 @app.post("/suggestions")
-def submit_suggestion(body: SuggestionCreate):
-    """Enregistre une suggestion libre, anonyme, indépendamment de toute
-    recherche précise — voir suggestion_log.py. Pas de X-User ici : à la
-    différence du pouce/NPS, aucune identité n'est capturée."""
+def submit_suggestion(body: SuggestionCreate, x_user: str | None = Header(default=None)):
+    """Enregistre une suggestion libre, indépendamment de toute recherche
+    précise — voir suggestion_log.py. Anonyme par défaut ; l'identité
+    n'est résolue via X-User que si l'utilisateur a explicitement décoché
+    "rester anonyme" côté UI (body.anonymous == False)."""
     if not engagement_config.get_config()["suggestions_enabled"]:
         raise HTTPException(status_code=403, detail="Le recueil de suggestions est désactivé.")
     text = body.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="La suggestion ne peut pas être vide.")
-    suggestion_log.log_suggestion(es, text=text, category=body.category)
+    username = None if body.anonymous else resolve_user(x_user)
+    suggestion_log.log_suggestion(es, text=text, category=body.category, username=username)
     return {"status": "ok"}
 
 
