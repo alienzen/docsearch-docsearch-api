@@ -35,6 +35,10 @@ DEFAULT_UI_CONFIG = {
     "help_enabled":        True,   # lien "❓ Aide" dans l'en-tête de recherche + raccourci clavier "?" —
                                     # ne bloque pas l'accès direct à /help.html (page statique sans
                                     # donnée sensible), seulement sa mise en avant dans l'UI.
+    "lists_enabled":       True,   # sélection de documents + listes personnelles ("📋 Mes listes") —
+                                    # désactivé, TOUTES les routes /lists renvoient 403 (voir
+                                    # search_api.py) : les listes déjà créées restent en Redis,
+                                    # simplement inaccessibles tant que le flag est désactivé.
 }
 
 _cache: dict = {}

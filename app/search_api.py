@@ -33,6 +33,7 @@ import suggestion_log
 import engagement_config
 import ui_config
 import saved_searches
+import saved_lists
 import sources_config
 from sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
 import sql_sources_config
@@ -100,6 +101,18 @@ class SavedSearchCreate(BaseModel):
     date_from: str | None = None
     date_to:   str | None = None
     sort:      str = "_score"
+
+
+class SavedListCreate(BaseModel):
+    name: str
+
+
+class SavedListRename(BaseModel):
+    name: str
+
+
+class SavedListDocumentAdd(BaseModel):
+    doc_id: str
 
 
 # ── Filtre ACL ───────────────────────────────────────────────
@@ -730,6 +743,84 @@ def remove_saved_search(search_id: str, x_user: str | None = Header(default=None
     username = resolve_user(x_user)
     try:
         return saved_searches.delete_saved(username, search_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ── Listes de documents ──────────────────────────────────────────
+# Strictement personnel (voir saved_lists.py) — entièrement suspendable
+# depuis l'admin (ui_config.lists_enabled) : désactivé, toutes les routes
+# ci-dessous renvoient 403, y compris la simple consultation, plutôt que
+# de ne bloquer que la création (cohérent avec l'intention d'un flag
+# "fonctionnalité désactivée" plutôt que "création désactivée").
+def _require_lists_enabled() -> None:
+    if not ui_config.get_config().get("lists_enabled", True):
+        raise HTTPException(status_code=403, detail="Les listes de documents sont désactivées.")
+
+
+@app.get("/lists")
+def get_lists(x_user: str | None = Header(default=None)):
+    _require_lists_enabled()
+    username = resolve_user(x_user)
+    return saved_lists.list_lists(username)
+
+
+@app.post("/lists")
+def create_list(body: SavedListCreate, x_user: str | None = Header(default=None)):
+    _require_lists_enabled()
+    username = resolve_user(x_user)
+    try:
+        return saved_lists.create_list(username, body.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.delete("/lists/{list_id}")
+def remove_list(list_id: str, x_user: str | None = Header(default=None)):
+    _require_lists_enabled()
+    username = resolve_user(x_user)
+    try:
+        return saved_lists.delete_list(username, list_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/lists/{list_id}/rename")
+def rename_list(list_id: str, body: SavedListRename, x_user: str | None = Header(default=None)):
+    _require_lists_enabled()
+    username = resolve_user(x_user)
+    try:
+        return saved_lists.rename_list(username, list_id, body.name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/lists/{list_id}/documents")
+def add_list_document(list_id: str, body: SavedListDocumentAdd, x_user: str | None = Header(default=None)):
+    _require_lists_enabled()
+    username = resolve_user(x_user)
+    try:
+        return saved_lists.add_document(username, list_id, body.doc_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.delete("/lists/{list_id}/documents/{doc_id}")
+def remove_list_document(list_id: str, doc_id: str, x_user: str | None = Header(default=None)):
+    _require_lists_enabled()
+    username = resolve_user(x_user)
+    try:
+        return saved_lists.remove_document(username, list_id, doc_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -1411,6 +1502,7 @@ class UiConfigUpdate(BaseModel):
     admin_links_enabled: bool | None = None
     export_enabled:      bool | None = None
     help_enabled:        bool | None = None
+    lists_enabled:       bool | None = None
 
 
 @app.get("/ui-config")
@@ -1449,6 +1541,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("export_enabled", body.export_enabled)
         if body.help_enabled is not None:
             config = ui_config.set_param("help_enabled", body.help_enabled)
+        if body.lists_enabled is not None:
+            config = ui_config.set_param("lists_enabled", body.lists_enabled)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
