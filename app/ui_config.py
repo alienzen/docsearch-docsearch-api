@@ -24,7 +24,8 @@ UI_CONFIG_KEY = "docsearch:config:ui"
 UI_CONFIG_CACHE_TTL = int(os.getenv("UI_CONFIG_CACHE_TTL", "10"))
 
 DEFAULT_UI_CONFIG = {
-    "chat_enabled": True,   # lien "Assistant IA" dans l'en-tête de recherche
+    "chat_enabled":   True,   # lien "Assistant IA" dans l'en-tête de recherche
+    "footer_enabled": True,   # pied de page de la page de recherche
 }
 
 _cache: dict = {}
