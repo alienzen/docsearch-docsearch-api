@@ -30,6 +30,7 @@ import search_log
 import nps_log
 import suggestion_log
 import engagement_config
+import ui_config
 import saved_searches
 import sources_config
 from sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
@@ -1176,6 +1177,31 @@ class EngagementConfigUpdate(BaseModel):
     feedback_enabled:    bool | None = None
     nps_enabled:         bool | None = None
     suggestions_enabled: bool | None = None
+
+
+# ── Bascules d'interface (distinct de la mesure de satisfaction) ──
+class UiConfigUpdate(BaseModel):
+    chat_enabled: bool | None = None
+
+
+@app.get("/ui-config")
+def get_ui_config():
+    """Public (pas d'auth) — l'interface de recherche l'appelle pour
+    savoir si le lien "Assistant IA" doit être affiché dans l'en-tête."""
+    return ui_config.get_config()
+
+
+@app.post("/admin/ui-config")
+def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)):
+    """Active/désactive des éléments d'interface (ex: lien Assistant IA)
+    — effectif immédiatement pour toute nouvelle page chargée."""
+    try:
+        config = ui_config.get_config()
+        if body.chat_enabled is not None:
+            config = ui_config.set_param("chat_enabled", body.chat_enabled)
+        return config
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/engagement-config")
