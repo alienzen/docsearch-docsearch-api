@@ -63,6 +63,7 @@ class WebSource:
     es_index: str         # index ES final DocSearch (rejoint ES_SEARCH_ALIAS)
     acl_public: bool
     poll_interval_seconds: int
+    label: str = ""
     searchable: bool = True
     paused: bool = False  # web_worker.py saute cette source tant que True (voir set_paused)
 
@@ -128,6 +129,7 @@ def _to_source(name: str, entry: dict) -> WebSource:
         es_index=entry["es_index"],
         acl_public=bool(entry.get("acl_public", True)),
         poll_interval_seconds=int(entry.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
+        label=entry.get("label") or name,
         searchable=entry.get("searchable", True),
         paused=entry.get("paused", False),
     )
@@ -178,7 +180,7 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, crawl_index: str, es_index: str,
     acl_public: bool = True, poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
-    searchable: bool = True,
+    label: str | None = None, searchable: bool = True,
 ) -> dict:
     """
     Enregistre une nouvelle source web (ou met à jour une source existante
@@ -224,6 +226,7 @@ def add_source(
             "es_index":               es_index,
             "acl_public":             acl_public,
             "poll_interval_seconds":  poll_interval_seconds,
+            "label":                  label or name,
             "searchable":             searchable,
         }
 
@@ -289,6 +292,10 @@ def rename_source(old_name: str, new_name: str) -> dict:
     search_api.py, ce module est Redis-only). Tant que ce n'est pas
     fait, filtrer par le nouveau nom ne retrouve pas les documents
     indexés avant le renommage.
+
+    Si le libellé n'avait jamais été personnalisé (label == old_name,
+    cas par défaut de add_source), il suit le renommage ; un libellé
+    explicite est conservé tel quel.
     """
     _validate_name(new_name, "Nouveau nom de source web")
 
@@ -297,6 +304,9 @@ def rename_source(old_name: str, new_name: str) -> dict:
             raise KeyError(f"Source web inconnue : '{old_name}'")
         if new_name in sources:
             raise ValueError(f"Une source web nommée '{new_name}' existe déjà.")
-        sources[new_name] = sources.pop(old_name)
+        entry = sources.pop(old_name)
+        if entry.get("label") == old_name:
+            entry["label"] = new_name
+        sources[new_name] = entry
 
     return _read_write(mutate)

@@ -253,10 +253,10 @@ def get_searchable_sources():
             result.append({"name": name, "label": s.label or name, "type": "file"})
     for name, s in sql_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": name, "type": "sql"})
+            result.append({"name": name, "label": s.label or name, "type": "sql"})
     for name, s in web_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": name, "type": "web"})
+            result.append({"name": name, "label": s.label or name, "type": "web"})
     return sorted(result, key=lambda s: s["label"].lower())
 
 
@@ -905,6 +905,7 @@ class SqlSourceCreate(BaseModel):
     es_index: str
     fields: list[SqlFieldMapping]
     poll_interval_seconds: int = sql_sources_config.DEFAULT_POLL_INTERVAL_SECONDS
+    label: str | None = None
 
 
 class WebSourceCreate(BaseModel):
@@ -913,6 +914,7 @@ class WebSourceCreate(BaseModel):
     es_index: str
     acl_public: bool = True
     poll_interval_seconds: int = web_sources_config.DEFAULT_POLL_INTERVAL_SECONDS
+    label: str | None = None
 
 
 def _sources_status() -> dict:
@@ -1028,6 +1030,7 @@ def admin_get_sql_sources(user: str = Depends(require_admin)):
             "id_column":             s.id_column,
             "es_index":              s.es_index,
             "poll_interval_seconds": s.poll_interval_seconds,
+            "label":                 s.label,
             "fields": [
                 {"column": f.column, "es_field": f.es_field, "es_type": f.es_type, "analyzer": f.analyzer}
                 for f in s.fields
@@ -1056,6 +1059,7 @@ def admin_add_sql_source(body: SqlSourceCreate, user: str = Depends(require_admi
             es_index=body.es_index,
             fields=[f.model_dump() for f in body.fields],
             poll_interval_seconds=body.poll_interval_seconds,
+            label=body.label,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1094,6 +1098,7 @@ def admin_get_web_sources(user: str = Depends(require_admin)):
             "es_index":              s.es_index,
             "acl_public":            s.acl_public,
             "poll_interval_seconds": s.poll_interval_seconds,
+            "label":                 s.label,
             "paused":                s.paused,
         }
         for name, s in web_sources_config.get_sources().items()
@@ -1116,6 +1121,7 @@ def admin_add_web_source(body: WebSourceCreate, user: str = Depends(require_admi
             es_index=body.es_index,
             acl_public=body.acl_public,
             poll_interval_seconds=body.poll_interval_seconds,
+            label=body.label,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

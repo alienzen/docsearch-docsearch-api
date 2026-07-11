@@ -88,6 +88,7 @@ class SqlSource:
     id_column: str
     es_index: str
     poll_interval_seconds: int
+    label: str = ""
     searchable: bool = True
     fields: tuple[FieldMapping, ...] = field(default_factory=tuple)
 
@@ -163,6 +164,7 @@ def _to_source(name: str, entry: dict) -> SqlSource:
         id_column=entry["id_column"],
         es_index=entry["es_index"],
         poll_interval_seconds=int(entry.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
+        label=entry.get("label") or name,
         searchable=entry.get("searchable", True),
         fields=fields,
     )
@@ -250,7 +252,7 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, db_type: str, connection_ref: str, query: str, id_column: str,
     es_index: str, fields: list[dict], poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
-    searchable: bool = True,
+    label: str | None = None, searchable: bool = True,
 ) -> dict:
     """
     Enregistre une nouvelle source SQL (ou met à jour une source
@@ -295,6 +297,7 @@ def add_source(
             "id_column":             id_column,
             "es_index":              es_index,
             "poll_interval_seconds": poll_interval_seconds,
+            "label":                 label or name,
             "searchable":            searchable,
             "fields":                fields,
         }
@@ -342,6 +345,10 @@ def rename_source(old_name: str, new_name: str) -> dict:
     search_api.py, ce module est Redis-only). Tant que ce n'est pas
     fait, filtrer par le nouveau nom ne retrouve pas les documents
     indexés avant le renommage.
+
+    Si le libellé n'avait jamais été personnalisé (label == old_name,
+    cas par défaut de add_source), il suit le renommage ; un libellé
+    explicite est conservé tel quel.
     """
     _validate_name(new_name, "Nouveau nom de source SQL")
 
@@ -350,6 +357,9 @@ def rename_source(old_name: str, new_name: str) -> dict:
             raise KeyError(f"Source SQL inconnue : '{old_name}'")
         if new_name in sources:
             raise ValueError(f"Une source SQL nommée '{new_name}' existe déjà.")
-        sources[new_name] = sources.pop(old_name)
+        entry = sources.pop(old_name)
+        if entry.get("label") == old_name:
+            entry["label"] = new_name
+        sources[new_name] = entry
 
     return _read_write(mutate)
