@@ -34,3 +34,7 @@ openpyxl==3.1.5
 
 # Export DOCX des résultats de recherche (/search/export)
 python-docx==1.1.2
+
+# Chiffrement symétrique des DSN SQL enregistrés depuis le panneau
+# d'administration (sql_dsn_registry.py) — jamais stockés en clair dans Redis
+cryptography==49.0.0

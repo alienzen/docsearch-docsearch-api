@@ -37,6 +37,7 @@ import saved_lists
 import sources_config
 from sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
 import sql_sources_config
+import sql_dsn_registry
 import web_sources_config
 
 logger = logging.getLogger(__name__)
@@ -1000,6 +1001,11 @@ class SqlSourceCreate(BaseModel):
     description: str | None = None
 
 
+class SqlDsnCreate(BaseModel):
+    name: str
+    dsn: str
+
+
 class WebSourceCreate(BaseModel):
     name: str
     crawl_index: str
@@ -1177,6 +1183,56 @@ def admin_set_sql_source_description(name: str, body: DescriptionUpdate, user: s
         return sql_sources_config.set_description(name, body.description)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# ── DSN SQL chiffrés (registre dynamique, alternative aux variables
+# d'environnement de connection_ref) — voir sql_dsn_registry.py ─────
+@app.get("/admin/sql-dsns")
+def admin_list_sql_dsns(user: str = Depends(require_admin)):
+    """Liste les DSN dynamiques enregistrés (nom + indice non sensible
+    schéma/hôte, jamais le DSN déchiffré ni son chiffré). Ne lève jamais
+    (même comportement que /admin/sql-sources : Redis injoignable dégrade
+    silencieusement vers une liste vide plutôt que de faire échouer la
+    route)."""
+    return sql_dsn_registry.list_names()
+
+
+@app.post("/admin/sql-dsns")
+def admin_add_sql_dsn(body: SqlDsnCreate, user: str = Depends(require_admin)):
+    """
+    Enregistre (ou remplace) un DSN chiffré dans Redis, sous un nom au
+    format variable d'environnement — ce nom devient ensuite utilisable
+    comme connection_ref d'une source SQL, à condition qu'aucune variable
+    d'environnement de ce nom n'existe déjà (elle resterait sinon
+    prioritaire, voir docsearch-ingestion/app/sql_indexer.py::_resolve_dsn).
+    Nécessite DSN_ENCRYPTION_KEY, définie à l'identique côté docsearch-api
+    (chiffrement ici) ET côté sql-worker/indexer-init (déchiffrement pour
+    se connecter réellement) — voir docsearch-infra/.env.example. Aucune
+    connexion à la base n'est testée ici : seule la forme du DSN est
+    vérifiée.
+    """
+    try:
+        return sql_dsn_registry.add_dsn(body.name, body.dsn)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.delete("/admin/sql-dsns/{name}")
+def admin_remove_sql_dsn(name: str, user: str = Depends(require_admin)):
+    """Retire un DSN chiffré du registre — toute source SQL dont le
+    connection_ref pointe encore vers ce nom échouera à son prochain
+    passage (sauf si une variable d'environnement du même nom existe) ;
+    aucune vérification qu'une source l'utilise encore, cohérent avec
+    DELETE /admin/sql-sources/{name} qui ne vérifie pas non plus les
+    dépendances inverses."""
+    try:
+        return sql_dsn_registry.remove_dsn(name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.get("/admin/web-sources")
