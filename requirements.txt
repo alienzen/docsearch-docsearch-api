@@ -29,4 +29,8 @@ ldap3==2.9.1
 kafka-python-ng==2.2.3
 
 # Export XLSX de l'historique des recherches (/admin/search-logs/export)
+# et des résultats de recherche (/search/export)
 openpyxl==3.1.5
+
+# Export DOCX des résultats de recherche (/search/export)
+python-docx==1.1.2

@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import logging
 import io
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -421,7 +422,19 @@ def search(
             post_filter={"bool": {"filter": active_facet_filters}},
             highlight={
                 "fields": {
-                    "content": {"fragment_size": 200, "number_of_fragments": 2}
+                    # max_analyzed_offset : sans lui, dès qu'un document du
+                    # lot (ex: gros PST/PDF) dépasse index.highlight.max_analyzed_offset
+                    # (1 000 000 caractères), ES fait échouer TOUS les shards
+                    # portant ce document, et le highlighting renvoie alors
+                    # hits.hits=[] pour la requête entière (total correct,
+                    # mais aucun résultat) — d'où des recherches qui
+                    # semblaient soudain ne plus rien retourner. On tronque
+                    # explicitement l'analyse du surlignage à cette limite.
+                    "content": {
+                        "fragment_size": 200,
+                        "number_of_fragments": 2,
+                        "max_analyzed_offset": 1000000,
+                    }
                 },
                 # Sans ceci, ES utilise ses balises par défaut (<em>...</em>),
                 # qui ne correspondent à AUCUNE règle CSS du frontend — les
@@ -495,6 +508,202 @@ def search(
             "sources":    res["aggregations"]["by_source"]["values"]["buckets"],
         }
     }
+
+
+# ── Export des résultats de recherche (XLSX / DOCX) ─────────────
+# Même critères que POST /search (SearchQuery), mais TOUS les résultats
+# correspondants (jusqu'à SEARCH_EXPORT_MAX_ROWS) plutôt que la seule
+# page affichée — d'où une requête ES séparée, sans les agrégations de
+# facettes (inutiles ici, pas d'UI à peupler).
+SEARCH_EXPORT_MAX_ROWS = 500
+
+
+class SearchExportQuery(SearchQuery):
+    format: str = "xlsx"   # "xlsx" | "docx"
+
+
+def _build_search_query(req: SearchQuery, username: str) -> dict:
+    """
+    Construit la requête ES (must + filtres) pour une recherche —
+    factorisé entre POST /search et POST /search/export. Ne couvre PAS
+    les agrégations de facettes ni le post_filter associé (spécifiques
+    à /search, sans objet pour un export).
+    """
+    acl_filter = build_acl_filter(username)
+    FIELD_SETS = {
+        "all":      ["content", "title^4", "filename^6", "author.text"],
+        "title":    ["title"],
+        "author":   ["author.text"],
+        "filepath": ["filepath.text"],
+    }
+    fields = FIELD_SETS.get(req.search_in, FIELD_SETS["all"])
+
+    query_text = req.query.strip()
+    is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
+    if is_exact_phrase:
+        phrase = query_text[1:-1].strip()
+        must = [{"multi_match": {"query": phrase, "fields": fields, "type": "phrase"}}]
+    else:
+        must = [{"multi_match": {"query": query_text, "fields": fields, "fuzziness": "AUTO"}}]
+
+    filters = [acl_filter, {"terms": {"source": _searchable_source_names()}}]
+    if req.has_attachments:
+        filters.append({"term": {"has_attachments": True}})
+    if req.date_from or req.date_to:
+        r = {}
+        if req.date_from: r["gte"] = req.date_from
+        if req.date_to:   r["lte"] = req.date_to
+        filters.append({"range": {"date_modified": r}})
+    if req.extension:
+        exts = req.extension if isinstance(req.extension, list) else [req.extension]
+        filters.append({"terms": {"extension": exts}})
+    if req.author:
+        authors = req.author if isinstance(req.author, list) else [req.author]
+        filters.append({"terms": {"author": authors}})
+    if req.folder:
+        filters.append({
+            "bool": {
+                "should": [
+                    {"term":   {"folder": req.folder}},
+                    {"prefix": {"folder": req.folder.rstrip("/") + "/"}},
+                ],
+                "minimum_should_match": 1,
+            }
+        })
+    source_names = _validate_source_names(req.source)
+    if source_names:
+        filters.append({"terms": {"source": source_names}})
+
+    return {"bool": {"must": must, "filter": filters}}
+
+
+def _slugify_query(text: str) -> str:
+    """Nom de fichier sûr à partir de la requête — alphanumérique et
+    tirets seulement, tronqué pour rester raisonnable."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower()).strip("-")
+    return (slug or "recherche")[:60]
+
+
+def _export_results_xlsx(query_text: str, hits: list) -> StreamingResponse:
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Résultats de recherche"
+    ws.append(["Nom", "Extension", "Auteur", "Source", "Dossier",
+               "Date de modification", "Taille (o)", "Chemin", "Extrait"])
+    for h in hits:
+        s = h["_source"]
+        snippet = " … ".join(h.get("highlight", {}).get("content", []))
+        ws.append([
+            s.get("filename", ""),
+            s.get("extension", ""),
+            s.get("author", ""),
+            s.get("source", ""),
+            s.get("folder", ""),
+            s.get("date_modified", ""),
+            s.get("size", 0),
+            s.get("filepath", ""),
+            snippet,
+        ])
+    for col_idx, width in enumerate([32, 10, 18, 14, 24, 18, 12, 50, 60], start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    filename = f"resultats-{_slugify_query(query_text)}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _export_results_docx(query_text: str, hits: list) -> StreamingResponse:
+    from docx import Document
+
+    doc = Document()
+    doc.add_heading(f'Résultats de recherche — « {query_text} »', level=1)
+    doc.add_paragraph(f"{len(hits)} document(s)")
+    for h in hits:
+        s = h["_source"]
+        doc.add_heading(s.get("filename") or "(sans nom)", level=2)
+        meta = []
+        if s.get("author"):        meta.append(f"Auteur : {s['author']}")
+        if s.get("source"):        meta.append(f"Source : {s['source']}")
+        if s.get("folder"):        meta.append(f"Dossier : {s['folder']}")
+        if s.get("date_modified"): meta.append(f"Modifié le : {s['date_modified'][:10]}")
+        if meta:
+            doc.add_paragraph(" · ".join(meta))
+        if s.get("filepath"):
+            doc.add_paragraph(s["filepath"], style="Intense Quote")
+        snippet = " … ".join(h.get("highlight", {}).get("content", []))
+        if snippet:
+            doc.add_paragraph(snippet)
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    filename = f"resultats-{_slugify_query(query_text)}.docx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/search/export")
+def export_search_results(req: SearchExportQuery, x_user: str | None = Header(default=None)):
+    """
+    Export XLSX ou DOCX des résultats d'une recherche — mêmes critères
+    que POST /search (même corps de requête, avec juste "format" en
+    plus), mais jusqu'à SEARCH_EXPORT_MAX_ROWS résultats plutôt que la
+    seule page affichée à l'écran.
+    """
+    _ensure_index_exists()
+    username = resolve_user(x_user)
+    query = _build_search_query(req, username)
+
+    sort_clause = (
+        [{"_score": "desc"}]
+        if req.sort == "_score"
+        else [{req.sort: {"order": "desc", "missing": "_last"}}, {"_score": "desc"}]
+    )
+
+    try:
+        res = es.search(
+            index=ES_SEARCH_ALIAS,
+            query=query,
+            sort=sort_clause,
+            track_scores=True,
+            size=SEARCH_EXPORT_MAX_ROWS,
+            source=["filename", "filepath", "extension", "title", "author",
+                    "size", "date_modified", "folder", "source"],
+            highlight={
+                # max_analyzed_offset : voir le commentaire équivalent dans
+                # /search — sans lui, un seul document trop long dans les
+                # 500 lignes de l'export fait échouer le highlighting sur
+                # tous les shards qui le portent, et hits.hits revient
+                # vide (total correct, mais 0 ligne exportée).
+                "fields": {"content": {
+                    "fragment_size": 200,
+                    "number_of_fragments": 2,
+                    "max_analyzed_offset": 1000000,
+                }},
+                # Pas de balises de surlignage ici (texte brut pour un export,
+                # contrairement à /search qui les affiche en HTML).
+                "pre_tags": [""], "post_tags": [""],
+            },
+        )
+    except Exception as e:
+        logger.error(f"[search/export] Erreur ES pour la requête '{req.query}' : {e}")
+        raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}")
+
+    hits = res["hits"]["hits"]
+    if req.format == "docx":
+        return _export_results_docx(req.query, hits)
+    return _export_results_xlsx(req.query, hits)
 
 
 # ── Recherches sauvegardées ─────────────────────────────────────
