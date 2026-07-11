@@ -390,7 +390,14 @@ def search(
     query_text = req.query.strip()
     is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
 
-    if is_exact_phrase:
+    if not query_text:
+        # Champ de recherche vide mais des filtres actifs (ex: syntaxe
+        # avancée "auteur:...", "type:...", "source:...", "dossier:..."
+        # utilisée seule, sans texte libre — voir index.html,
+        # parseAdvancedQuery()) : matche tous les documents, les filtres
+        # ci-dessous restent seuls responsables de la restriction.
+        must = [{"match_all": {}}]
+    elif is_exact_phrase:
         phrase = query_text[1:-1].strip()
         must = [{
             "multi_match": {
@@ -613,7 +620,11 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
 
     query_text = req.query.strip()
     is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
-    if is_exact_phrase:
+    if not query_text:
+        # Voir le commentaire équivalent dans /search — champ vide + filtres
+        # actifs (syntaxe avancée seule) doit matcher tout, pas rien.
+        must = [{"match_all": {}}]
+    elif is_exact_phrase:
         phrase = query_text[1:-1].strip()
         must = [{"multi_match": {"query": phrase, "fields": fields, "type": "phrase"}}]
     else:
