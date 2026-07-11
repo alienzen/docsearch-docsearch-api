@@ -1181,8 +1181,9 @@ class EngagementConfigUpdate(BaseModel):
 
 # ── Bascules d'interface (distinct de la mesure de satisfaction) ──
 class UiConfigUpdate(BaseModel):
-    chat_enabled:   bool | None = None
-    footer_enabled: bool | None = None
+    chat_enabled:        bool | None = None
+    footer_enabled:      bool | None = None
+    admin_links_enabled: bool | None = None
 
 
 @app.get("/ui-config")
@@ -1215,6 +1216,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("chat_enabled", body.chat_enabled)
         if body.footer_enabled is not None:
             config = ui_config.set_param("footer_enabled", body.footer_enabled)
+        if body.admin_links_enabled is not None:
+            config = ui_config.set_param("admin_links_enabled", body.admin_links_enabled)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
