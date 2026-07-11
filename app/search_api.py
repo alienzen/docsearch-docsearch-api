@@ -651,9 +651,6 @@ def _export_results_docx(query_text: str, hits: list) -> StreamingResponse:
             doc.add_paragraph(" · ".join(meta))
         if s.get("filepath"):
             doc.add_paragraph(s["filepath"], style="Intense Quote")
-        snippet = " … ".join(h.get("highlight", {}).get("content", []))
-        if snippet:
-            doc.add_paragraph(snippet)
 
     buffer = io.BytesIO()
     doc.save(buffer)
