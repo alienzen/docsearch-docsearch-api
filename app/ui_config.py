@@ -29,6 +29,9 @@ DEFAULT_UI_CONFIG = {
     "admin_links_enabled": True,   # liens "Administration"/"Statistiques" (en-tête + pied de page) —
                                     # combiné en ET logique avec /is-admin côté index.html : un
                                     # utilisateur admin ne les voit QUE si ce flag est aussi actif.
+    "export_enabled":      True,   # boutons "Exporter en XLSX/DOCX" des résultats de recherche —
+                                    # ne bloque que l'affichage côté index.html ; POST /search/export
+                                    # reste refusé côté API si ce flag est désactivé (voir search_api.py).
 }
 
 _cache: dict = {}

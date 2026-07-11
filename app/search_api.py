@@ -661,6 +661,8 @@ def export_search_results(req: SearchExportQuery, x_user: str | None = Header(de
     plus), mais jusqu'à SEARCH_EXPORT_MAX_ROWS résultats plutôt que la
     seule page affichée à l'écran.
     """
+    if not ui_config.get_config().get("export_enabled", True):
+        raise HTTPException(status_code=403, detail="L'export des résultats est désactivé.")
     _ensure_index_exists()
     username = resolve_user(x_user)
     query = _build_search_query(req, username)
@@ -1393,6 +1395,7 @@ class UiConfigUpdate(BaseModel):
     chat_enabled:        bool | None = None
     footer_enabled:      bool | None = None
     admin_links_enabled: bool | None = None
+    export_enabled:      bool | None = None
 
 
 @app.get("/ui-config")
@@ -1427,6 +1430,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("footer_enabled", body.footer_enabled)
         if body.admin_links_enabled is not None:
             config = ui_config.set_param("admin_links_enabled", body.admin_links_enabled)
+        if body.export_enabled is not None:
+            config = ui_config.set_param("export_enabled", body.export_enabled)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
