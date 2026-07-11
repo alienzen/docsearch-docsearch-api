@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan as es_scan
 from ldap_resolver import get_user_groups
-from admin_auth import require_admin
+from admin_auth import require_admin, is_admin
 import cluster_status
 import admin_scan
 import filetype_config
@@ -1190,6 +1190,18 @@ def get_ui_config():
     """Public (pas d'auth) — l'interface de recherche l'appelle pour
     savoir si le lien "Assistant IA" doit être affiché dans l'en-tête."""
     return ui_config.get_config()
+
+
+@app.get("/is-admin")
+def get_is_admin(x_user: str | None = Header(default=None)):
+    """
+    Public (jamais de 401/403 — voir is_admin(), version non levante de
+    require_admin()) : l'interface de recherche l'appelle pour savoir si
+    les liens "Administration"/"Statistiques" doivent être affichés —
+    ces pages échoueraient de toute façon avec un 403 pour un
+    utilisateur non admin, autant ne pas les proposer.
+    """
+    return {"is_admin": is_admin(x_user)}
 
 
 @app.post("/admin/ui-config")
