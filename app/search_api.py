@@ -76,7 +76,7 @@ class SearchQuery(BaseModel):
     date_from:       str | None = None   # filtre sur date_modified (voir build de la requête)
     date_to:         str | None = None   # idem
     author:          str | list[str] | None = None
-    folder:          str | None = None
+    folder:          str | list[str] | None = None   # sélection cumulative, comme extension/author/source
     source:          str | list[str] | None = None   # nom(s) de source (sources_config.py) — absent = recherche fédérée sur toutes
     search_in:       str = "all"   # "all" | "title" | "author" — restreint le champ interrogé
 
@@ -95,7 +95,7 @@ class SavedSearchCreate(BaseModel):
     search_in: str = "all"
     ext:       str | list[str] = "all"
     author:    str | list[str] | None = None
-    folder:    str | None = None
+    folder:    str | list[str] | None = None
     source:    str | list[str] | None = None
     date_from: str | None = None
     date_to:   str | None = None
@@ -126,6 +126,24 @@ def build_acl_filter(username: str) -> dict:
             "minimum_should_match": 1,
         }
     }
+
+
+def _folder_filter(folder: str | list[str] | None) -> dict | None:
+    """
+    Filtre ES pour la facette "Dossier" — sélection cumulative (comme
+    extension/author/source) : matche tout document sous N'IMPORTE LEQUEL
+    des dossiers demandés, exact OU sous-dossier (ex: folder="Finance"
+    matche "Finance" et "Finance/Rapports"). Chaque dossier ajoute sa
+    propre paire term/prefix au should, combinées en OR.
+    """
+    if not folder:
+        return None
+    folders = folder if isinstance(folder, list) else [folder]
+    should = []
+    for f in folders:
+        should.append({"term": {"folder": f}})
+        should.append({"prefix": {"folder": f.rstrip("/") + "/"}})
+    return {"bool": {"should": should, "minimum_should_match": 1}}
 
 
 def resolve_user(x_user: str | None) -> str:
@@ -364,19 +382,7 @@ def search(
         authors = req.author if isinstance(req.author, list) else [req.author]
         author_filter = {"terms": {"author": authors}}
 
-    folder_filter = None
-    if req.folder:
-        # Correspond au dossier exact OU à tout sous-dossier en dessous
-        # (ex: folder="Finance" matche "Finance" et "Finance/Rapports")
-        folder_filter = {
-            "bool": {
-                "should": [
-                    {"term":   {"folder": req.folder}},
-                    {"prefix": {"folder": req.folder.rstrip("/") + "/"}},
-                ],
-                "minimum_should_match": 1,
-            }
-        }
+    folder_filter = _folder_filter(req.folder)
 
     source_names  = _validate_source_names(req.source)
     source_filter = {"terms": {"source": source_names}} if source_names else None
@@ -560,16 +566,9 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
     if req.author:
         authors = req.author if isinstance(req.author, list) else [req.author]
         filters.append({"terms": {"author": authors}})
-    if req.folder:
-        filters.append({
-            "bool": {
-                "should": [
-                    {"term":   {"folder": req.folder}},
-                    {"prefix": {"folder": req.folder.rstrip("/") + "/"}},
-                ],
-                "minimum_should_match": 1,
-            }
-        })
+    folder_filter = _folder_filter(req.folder)
+    if folder_filter:
+        filters.append(folder_filter)
     source_names = _validate_source_names(req.source)
     if source_names:
         filters.append({"terms": {"source": source_names}})
@@ -1716,7 +1715,7 @@ def admin_export_search_logs(
                 _join(s.get("source")),
                 _join(s.get("extension")),
                 _join(s.get("author")),
-                s.get("folder", ""),
+                _join(s.get("folder")),
                 s.get("date_from", ""),
                 s.get("date_to", ""),
                 s.get("total_results", 0),

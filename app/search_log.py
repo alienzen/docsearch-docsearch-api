@@ -88,7 +88,7 @@ def log_search(
     result_files: list[str],
     extension: str | list[str] | None = None,
     author: str | list[str] | None = None,
-    folder: str | None = None,
+    folder: str | list[str] | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> str | None:
@@ -108,9 +108,10 @@ def log_search(
     pour stocker une liste.
 
     extension/author/folder/date_from/date_to : critères de filtrage
-    actifs au moment de la recherche (facettes cumulatives, période) —
-    purement informatif pour /stats.html ("Historique des recherches"),
-    jamais réutilisés pour rejouer la recherche.
+    actifs au moment de la recherche (facettes cumulatives — extension/
+    author/folder acceptent une liste —, période) — purement informatif
+    pour /stats.html ("Historique des recherches"), jamais réutilisés
+    pour rejouer la recherche.
     """
     try:
         _ensure_index(es)
