@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 
 SUGGESTION_LOG_INDEX = os.getenv("SUGGESTION_LOG_INDEX", "suggestions")
 
+# Suivi de traitement (voir /stats.html, panneau Suggestions) — purement
+# un statut de gestion pour l'équipe, sans effet sur ce que voit
+# l'utilisateur qui a soumis la suggestion (aucune notification, cohérent
+# avec l'anonymat par défaut : on ne peut pas prévenir quelqu'un dont on
+# ne connaît pas forcément l'identité).
+SUGGESTION_STATUSES = ("nouveau", "en_cours", "traite")
+DEFAULT_STATUS = "nouveau"
+
 _index_ready = False
 
 
@@ -36,10 +44,16 @@ def _ensure_index(es: Elasticsearch) -> None:
                     "category":  {"type": "keyword"},
                     "text":      {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
                     "username":  {"type": "keyword"},
+                    "status":    {"type": "keyword"},
                 }
             }
         })
         logger.info(f"Index '{SUGGESTION_LOG_INDEX}' créé.")
+    else:
+        # Index déjà créé par une version antérieure (avant le suivi de
+        # statut) — complète son mapping sans y toucher autrement,
+        # idempotent (même pattern que search_log.py).
+        es.indices.put_mapping(index=SUGGESTION_LOG_INDEX, properties={"status": {"type": "keyword"}})
     _index_ready = True
 
 
@@ -54,6 +68,7 @@ def log_suggestion(es: Elasticsearch, *, text: str, category: str | None, userna
         doc = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "text":      text,
+            "status":    DEFAULT_STATUS,
         }
         if category:
             doc["category"] = category
@@ -62,6 +77,19 @@ def log_suggestion(es: Elasticsearch, *, text: str, category: str | None, userna
         es.index(index=SUGGESTION_LOG_INDEX, document=doc)
     except Exception as e:
         logger.warning(f"[suggestion_log] Échec d'écriture de la suggestion : {e}")
+
+
+def set_status(es: Elasticsearch, *, suggestion_id: str, status: str) -> None:
+    """Met à jour le statut de traitement d'une suggestion. Lève
+    ValueError si le statut n'est pas une des valeurs reconnues — une
+    faute de frappe ne doit pas créer silencieusement un statut fantôme
+    qu'aucun filtre de l'UI ne reconnaîtrait ensuite."""
+    if status not in SUGGESTION_STATUSES:
+        raise ValueError(
+            f"Statut invalide : '{status}' — valeurs possibles : {', '.join(SUGGESTION_STATUSES)}"
+        )
+    _ensure_index(es)
+    es.update(index=SUGGESTION_LOG_INDEX, id=suggestion_id, doc={"status": status})
 
 
 def list_suggestions(es: Elasticsearch, *, size: int, from_: int) -> dict:

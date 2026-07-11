@@ -12,6 +12,7 @@ import tempfile
 import logging
 import io
 import re
+import json
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -34,6 +35,7 @@ import engagement_config
 import ui_config
 import saved_searches
 import saved_lists
+import audit_log
 import sources_config
 from sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
 import sql_sources_config
@@ -49,6 +51,57 @@ es = Elasticsearch(ES_HOST, retry_on_timeout=True, max_retries=3, request_timeou
 
 # Utilisateur anonyme de secours (dev uniquement — désactiver en prod)
 DEV_USER = DEV_USER
+
+
+@app.middleware("http")
+async def audit_log_middleware(request: Request, call_next):
+    """
+    Journal d'audit générique des actions d'administration — voir
+    audit_log.py. Volontairement un middleware plutôt qu'un appel
+    explicite dans chaque route /admin/* : une nouvelle route de mutation
+    est ainsi auditée automatiquement dès sa création, sans modification
+    de ce fichier ni oubli possible.
+
+    Ne journalise que les mutations (POST/DELETE/PUT) sous /admin/* dont
+    la réponse est un succès (< 400) — un échec (validation, 404, Redis/ES
+    injoignable...) ne représente aucun changement réel, l'enregistrer
+    serait trompeur. Le corps de la requête est lu ICI, avant call_next :
+    Starlette met en cache les octets déjà lus (request._body), la route
+    elle-même peut donc ensuite reconstruire son modèle Pydantic à partir
+    du corps sans rien perdre.
+    """
+    is_mutation = (
+        request.method in ("POST", "DELETE", "PUT")
+        and request.url.path.startswith("/admin/")
+    )
+    body_bytes = await request.body() if is_mutation else b""
+
+    response = await call_next(request)
+
+    if is_mutation and response.status_code < 400:
+        # scope["route"] n'est renseigné qu'après résolution du routage,
+        # qui a lieu à l'intérieur de call_next — d'où sa lecture ici,
+        # après coup. .path est le PATRON de route (ex:
+        # "/admin/sources/{name}/label"), request.path_params les valeurs
+        # résolues (ex: {"name": "finance"}) — les deux ensemble
+        # permettent de reconstituer une action lisible côté UI sans
+        # dépendre d'une regex sur l'URL brute.
+        route = request.scope.get("route")
+        path_template = getattr(route, "path", request.url.path)
+        try:
+            body = json.loads(body_bytes) if body_bytes else {}
+        except json.JSONDecodeError:
+            body = {}
+        audit_log.log_action(
+            es,
+            username=resolve_user(request.headers.get("x-user")),
+            method=request.method,
+            path=path_template,
+            path_params=dict(request.path_params),
+            body=body if isinstance(body, dict) else {},
+            status_code=response.status_code,
+        )
+    return response
 
 
 # ── Santé ────────────────────────────────────────────────────
@@ -1735,6 +1788,25 @@ def admin_list_suggestions(
     return suggestion_log.list_suggestions(es, size=size, from_=from_)
 
 
+class SuggestionStatusUpdate(BaseModel):
+    status: str
+
+
+@app.post("/admin/suggestions/{suggestion_id}/status")
+def admin_set_suggestion_status(suggestion_id: str, body: SuggestionStatusUpdate, user: str = Depends(require_admin)):
+    """Suivi de traitement d'une suggestion (nouveau/en_cours/traite) —
+    purement interne à l'équipe, n'informe jamais l'auteur (voir
+    suggestion_log.py : l'anonymat par défaut rend une notification
+    impossible à garantir de toute façon)."""
+    try:
+        suggestion_log.set_status(es, suggestion_id=suggestion_id, status=body.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Suggestion introuvable : {e}")
+    return {"status": "ok"}
+
+
 # ── Statistiques de recherche ───────────────────────────────────
 @app.get("/admin/search-logs/summary")
 def admin_search_logs_summary(user: str = Depends(require_admin)):
@@ -1771,6 +1843,56 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
         "feedback_up":   res["aggregations"]["feedback_up"]["doc_count"],
         "feedback_down": res["aggregations"]["feedback_down"]["doc_count"],
     }
+
+
+@app.get("/admin/search-logs/zero-results")
+def admin_zero_result_searches(user: str = Depends(require_admin), size: int = 50):
+    """Requêtes ayant retourné 0 résultat, groupées et comptées (les plus
+    fréquentes en premier) — à partir des logs déjà collectés par chaque
+    recherche (voir search_log.py), aucun nouveau tracking nécessaire.
+    Aide à repérer du contenu manquant ou des requêtes mal formulées."""
+    try:
+        res = es.search(
+            index=search_log.SEARCH_LOG_INDEX,
+            size=0,
+            query={"term": {"total_results": 0}},
+            aggs={
+                "by_query": {
+                    "terms": {"field": "query.keyword", "size": size, "order": {"_count": "desc"}},
+                    "aggs": {
+                        "last_seen": {"max": {"field": "timestamp", "format": "strict_date_optional_time"}},
+                    },
+                },
+            },
+        )
+    except Exception as e:
+        if "index_not_found" in str(e).lower():
+            return {"total_zero_result_searches": 0, "results": []}
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "total_zero_result_searches": res["hits"]["total"]["value"],
+        "results": [
+            {
+                "query":     b["key"],
+                "count":     b["doc_count"],
+                "last_seen": b["last_seen"]["value_as_string"],
+            }
+            for b in res["aggregations"]["by_query"]["buckets"]
+        ],
+    }
+
+
+# ── Journal d'audit ──────────────────────────────────────────────
+@app.get("/admin/audit-log")
+def admin_get_audit_log(
+    user:  str = Depends(require_admin),
+    size:  int = 50,
+    from_: int = Query(0, alias="from"),
+):
+    """Liste paginée des actions d'administration, plus récentes
+    d'abord — alimentée par audit_log_middleware, voir audit_log.py."""
+    return audit_log.list_actions(es, size=size, from_=from_)
 
 
 def _search_logs_query(q: str | None, username: str | None) -> dict:
