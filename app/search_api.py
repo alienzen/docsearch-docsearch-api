@@ -321,6 +321,29 @@ def _searchable_source_names() -> list[str]:
     return names
 
 
+def _collectable_source_names() -> set[str]:
+    """
+    Noms de TOUTES les sources dont les documents peuvent actuellement
+    être ajoutés à une collection ("Mes collections"), tous types
+    confondus — indépendant de "searchable" : une source peut rester
+    cherchable normalement tout en étant exclue des collections (voir
+    set_collectable() dans chaque registre). Utilisé par
+    add_collection_document() ; un set (pas une liste) car seul le test
+    d'appartenance importe ici, pas l'ordre.
+    """
+    names = set()
+    for name, s in file_sources_config.get_sources().items():
+        if s.collectable:
+            names.add(name)
+    for name, s in sql_sources_config.get_sources().items():
+        if s.collectable:
+            names.add(name)
+    for name, s in web_sources_config.get_sources().items():
+        if s.collectable:
+            names.add(name)
+    return names
+
+
 @app.get("/searchable-sources")
 def get_searchable_sources():
     """
@@ -330,18 +353,21 @@ def get_searchable_sources():
     qu'APRÈS une recherche (dérivée des résultats, avec leur compte).
     Contrairement à /admin/all-sources, pas de nombre de documents ni de
     taille d'index (réservé à l'admin) : juste de quoi peupler une liste
-    de cases à cocher.
+    de cases à cocher. `collectable` est inclus pour la même raison que
+    `label`/`type` : index.html s'en sert pour masquer la case "ajouter à
+    une collection" sur les résultats d'une source qui l'interdit (voir
+    sourceCollectable() côté UI), sans appel séparé.
     """
     result = []
     for name, s in file_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": s.label or name, "type": "file"})
+            result.append({"name": name, "label": s.label or name, "type": "file", "collectable": s.collectable})
     for name, s in sql_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": s.label or name, "type": "sql"})
+            result.append({"name": name, "label": s.label or name, "type": "sql", "collectable": s.collectable})
     for name, s in web_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": s.label or name, "type": "web"})
+            result.append({"name": name, "label": s.label or name, "type": "web", "collectable": s.collectable})
     return sorted(result, key=lambda s: s["label"].lower())
 
 
@@ -356,6 +382,23 @@ def _resolve_doc_index(doc_id: str) -> str:
     if not hits:
         raise HTTPException(status_code=404, detail="Document introuvable")
     return hits[0]["_index"]
+
+
+def _resolve_doc_source(doc_id: str) -> str | None:
+    """
+    Retourne le nom de la source (champ "source") d'un document, ou None
+    s'il est introuvable — utilisé pour vérifier "collectable" avant
+    l'ajout à une collection (voir add_collection_document). Ne lève
+    jamais d'erreur ici : un doc_id déjà invalide/inaccessible est un cas
+    déjà toléré ailleurs par saved_collections.py (une liste peut
+    contenir des doc_ids devenus obsolètes).
+    """
+    try:
+        res = es.search(index=ES_SEARCH_ALIAS, query={"ids": {"values": [doc_id]}}, size=1, source=["source"])
+        hits = res["hits"]["hits"]
+        return hits[0]["_source"].get("source") if hits else None
+    except Exception:
+        return None
 
 
 # ── Recherche ────────────────────────────────────────────────
@@ -868,6 +911,12 @@ def rename_collection(collection_id: str, body: SavedCollectionRename, x_user: s
 def add_collection_document(collection_id: str, body: SavedCollectionDocumentAdd, x_user: str | None = Header(default=None)):
     _require_collections_enabled()
     username = resolve_user(x_user)
+    source_name = _resolve_doc_source(body.doc_id)
+    if source_name is not None and source_name not in _collectable_source_names():
+        raise HTTPException(
+            status_code=403,
+            detail=f"Les documents de la source '{source_name}' ne peuvent pas être ajoutés à une collection.",
+        )
     try:
         return saved_collections.add_document(es, username, collection_id, body.doc_id)
     except KeyError as e:
@@ -1130,8 +1179,14 @@ def admin_get_sources(user: str = Depends(require_admin)):
 @app.post("/admin/file-sources")
 def admin_add_source(body: SourceCreate, user: str = Depends(require_admin)):
     try:
+        # add_source() REMPLACE l'entrée existante en entier — on relit
+        # searchable/collectable au préalable pour ne pas les réinitialiser
+        # à True au premier "Modifier" venu (voir add_source() docstring).
+        existing = file_sources_config.get_sources().get(body.name)
         return file_sources_config.add_source(
             body.name, body.es_index, subfolder=body.subfolder, label=body.label,
+            searchable=existing.searchable if existing else True,
+            collectable=existing.collectable if existing else True,
             description=body.description,
         )
     except ValueError as e:
@@ -1200,6 +1255,10 @@ def admin_add_sql_source(body: SqlSourceCreate, user: str = Depends(require_admi
     source sous ~5s, sans redémarrage.
     """
     try:
+        # add_source() REMPLACE l'entrée existante en entier — on relit
+        # searchable/collectable au préalable pour ne pas les réinitialiser
+        # à True au premier "Modifier" venu (voir add_source() docstring).
+        existing = sql_sources_config.get_sources().get(body.name)
         return sql_sources_config.add_source(
             name=body.name,
             db_type=body.db_type,
@@ -1210,6 +1269,8 @@ def admin_add_sql_source(body: SqlSourceCreate, user: str = Depends(require_admi
             fields=[f.model_dump() for f in body.fields],
             poll_interval_seconds=body.poll_interval_seconds,
             label=body.label,
+            searchable=existing.searchable if existing else True,
+            collectable=existing.collectable if existing else True,
             description=body.description,
         )
     except ValueError as e:
@@ -1323,6 +1384,10 @@ def admin_add_web_source(body: WebSourceCreate, user: str = Depends(require_admi
     compte la nouvelle source sous ~5s, sans redémarrage.
     """
     try:
+        # add_source() REMPLACE l'entrée existante en entier — on relit
+        # searchable/collectable au préalable pour ne pas les réinitialiser
+        # à True au premier "Modifier" venu (voir add_source() docstring).
+        existing = web_sources_config.get_sources().get(body.name)
         return web_sources_config.add_source(
             name=body.name,
             crawl_index=body.crawl_index,
@@ -1330,6 +1395,8 @@ def admin_add_web_source(body: WebSourceCreate, user: str = Depends(require_admi
             acl_public=body.acl_public,
             poll_interval_seconds=body.poll_interval_seconds,
             label=body.label,
+            searchable=existing.searchable if existing else True,
+            collectable=existing.collectable if existing else True,
             description=body.description,
         )
     except ValueError as e:
@@ -1402,6 +1469,10 @@ class SearchableUpdate(BaseModel):
     searchable: bool
 
 
+class CollectableUpdate(BaseModel):
+    collectable: bool
+
+
 _SOURCE_REGISTRIES = {
     "file": file_sources_config,
     "sql":  sql_sources_config,
@@ -1436,6 +1507,7 @@ def _all_sources_status() -> dict:
                 "label":       getattr(s, "label", None) or name,
                 "description": getattr(s, "description", None) or "",
                 "searchable":  s.searchable,
+                "collectable": s.collectable,
                 "indexed":     indexed,
                 "size_bytes":  size_bytes,
             }
@@ -1461,6 +1533,26 @@ def admin_set_source_searchable(
         raise HTTPException(status_code=400, detail=f"Type de source invalide : '{type}' (attendu file, sql ou web)")
     try:
         registry.set_searchable(name, body.searchable)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _all_sources_status()
+
+
+@app.post("/admin/all-sources/{name}/collectable")
+def admin_set_source_collectable(
+    name: str, body: CollectableUpdate,
+    type: str = Query(..., description="file, sql ou web"),
+    user: str = Depends(require_admin),
+):
+    """Active/désactive l'ajout à une collection pour les documents
+    d'une source, quel que soit son type — n'affecte ni l'ingestion ni
+    la recherche (voir add_collection_document() et
+    set_collectable() dans chaque registre)."""
+    registry = _SOURCE_REGISTRIES.get(type)
+    if registry is None:
+        raise HTTPException(status_code=400, detail=f"Type de source invalide : '{type}' (attendu file, sql ou web)")
+    try:
+        registry.set_collectable(name, body.collectable)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return _all_sources_status()

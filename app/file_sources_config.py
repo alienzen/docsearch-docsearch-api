@@ -80,10 +80,11 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 DEFAULT_SOURCES = {
     DEFAULT_SOURCE_NAME: {
-        "subfolder":  _DEFAULT_SUBFOLDER,
-        "es_index":   _DEFAULT_ES_INDEX,
-        "label":      "Documents",
-        "searchable": True,
+        "subfolder":   _DEFAULT_SUBFOLDER,
+        "es_index":    _DEFAULT_ES_INDEX,
+        "label":       "Documents",
+        "searchable":  True,
+        "collectable": True,
         "description": "",
     }
 }
@@ -96,6 +97,7 @@ class Source:
     folder: str    # chemin absolu résolu (SOURCES_MOUNT/subfolder)
     label: str
     searchable: bool
+    collectable: bool = True
     description: str = ""
 
 
@@ -168,6 +170,7 @@ def _to_source(name: str, entry: dict) -> Source:
         folder=folder,
         label=entry.get("label") or name,
         searchable=entry.get("searchable", True),
+        collectable=entry.get("collectable", True),
         description=entry.get("description") or "",
     )
 
@@ -231,7 +234,7 @@ def _read_write(mutate) -> dict:
 
 def add_source(
     name: str, es_index: str, subfolder: str | None = None, label: str | None = None,
-    searchable: bool = True, description: str | None = None,
+    searchable: bool = True, collectable: bool = True, description: str | None = None,
 ) -> dict:
     """
     Enregistre une nouvelle source (ou met à jour une source existante du
@@ -239,6 +242,12 @@ def add_source(
     `$SOURCES_ROOT/<name>` sur l'hôte avant (ou après) cet appel, l'ordre
     n'a pas d'importance pour le registre, seul le premier scan/passage
     watcher a besoin que le dossier existe réellement sur disque.
+
+    ATTENTION : cette fonction REMPLACE entièrement l'entrée existante
+    (pas de fusion partielle) — un appelant qui réenregistre une source
+    déjà configurée doit relire `searchable`/`collectable` au préalable
+    (voir /admin/all-sources) et les repasser explicitement, sous peine
+    de réinitialiser ces bascules à leur valeur par défaut (True).
     """
     _validate_name(name, "Nom de source")
     _validate_name(es_index, "Nom d'index Elasticsearch")
@@ -255,6 +264,7 @@ def add_source(
             "es_index":    es_index,
             "label":       label or name,
             "searchable":  searchable,
+            "collectable": collectable,
             "description": description or "",
         }
 
@@ -276,6 +286,25 @@ def set_searchable(name: str, searchable: bool) -> dict:
                 f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
             )
         sources[name]["searchable"] = searchable
+
+    return _read_write(mutate)
+
+
+def set_collectable(name: str, collectable: bool) -> dict:
+    """
+    Active/désactive l'ajout DES DOCUMENTS de cette source à une
+    collection ("Mes collections", voir saved_collections.py) — sans
+    effet sur l'ingestion ni sur la recherche elle-même : la source
+    reste indexée et cherchable normalement, seule l'action "Ajouter à
+    une collection" devient refusée (403) pour ses documents (voir
+    add_collection_document() dans search_api.py).
+    """
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(
+                f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
+            )
+        sources[name]["collectable"] = collectable
 
     return _read_write(mutate)
 
