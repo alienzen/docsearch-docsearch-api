@@ -40,6 +40,13 @@ DEFAULT_UI_CONFIG = {
                                     # renvoient 403 (voir search_api.py) : les collections déjà
                                     # créées restent dans leur index ES, simplement inaccessibles
                                     # tant que le flag est désactivé.
+    "custom_keywords_enabled": True,   # ajout/retrait de mots-clés personnalisés sur les documents
+                                        # de type fichier (voir custom_keywords.py) — désactivé, les
+                                        # routes POST/DELETE /document/{id}/keywords renvoient 403.
+                                        # Les surcharges déjà enregistrées restent appliquées par le
+                                        # pipeline d'ingestion (docsearch-ingestion ne consulte jamais
+                                        # ce flag — seule la création/modification depuis l'UI est
+                                        # concernée, pas la réapplication à l'indexation).
 }
 
 _cache: dict = {}

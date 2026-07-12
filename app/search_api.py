@@ -35,6 +35,7 @@ import engagement_config
 import ui_config
 import saved_searches
 import saved_collections
+import custom_keywords
 import audit_log
 import file_sources_config
 from file_sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
@@ -955,6 +956,22 @@ def remove_collection_document(collection_id: str, doc_id: str, x_user: str | No
         raise HTTPException(status_code=503, detail=str(e))
 
 
+def _check_doc_access(doc: dict, username: str) -> bool:
+    """Même règle ACL que build_acl_filter() (public/propriétaire/partagé
+    utilisateur ou groupe), mais évaluée sur un document déjà récupéré
+    plutôt qu'en filtre de requête ES — utilisée partout où un document
+    précis est accédé par id (GET /document, édition des mots-clés
+    personnalisés...)."""
+    acl         = doc.get("acl", {})
+    user_groups = get_user_groups(username)
+    return (
+        acl.get("public", False)
+        or acl.get("owner")  == username
+        or username in acl.get("users",  [])
+        or any(g in acl.get("groups", []) for g in user_groups)
+    )
+
+
 # ── Détail document ──────────────────────────────────────────
 @app.get("/document/{doc_id}")
 def get_document(
@@ -971,20 +988,100 @@ def get_document(
 
     doc = res["_source"]
 
-    # Vérification ACL avant de retourner les détails
-    acl         = doc.get("acl", {})
-    user_groups = get_user_groups(username)
-
-    allowed = (
-        acl.get("public", False)
-        or acl.get("owner")  == username
-        or username in acl.get("users",  [])
-        or any(g in acl.get("groups", []) for g in user_groups)
-    )
-    if not allowed:
+    if not _check_doc_access(doc, username):
         raise HTTPException(status_code=403, detail="Accès refusé")
 
     return doc
+
+
+# ── Mots-clés personnalisés ────────────────────────────────────
+# Activable/désactivable depuis l'admin (ui_config.custom_keywords_enabled)
+# — désactivé, ces deux routes renvoient 403 ; les surcharges déjà
+# enregistrées restent dans leur index ES (custom_keywords.py), simplement
+# plus modifiables tant que le flag est désactivé (même principe que
+# collections_enabled).
+#
+# Réservé aux documents de TYPE FICHIER ("document"/"archive_member") —
+# email PST, page web, ligne SQL n'ont pas de notion de "mots-clés Office/
+# PDF" à compléter.
+class DocumentKeywordBody(BaseModel):
+    keyword: str
+
+
+def _require_custom_keywords_enabled() -> None:
+    if not ui_config.get_config().get("custom_keywords_enabled", True):
+        raise HTTPException(status_code=403, detail="Les mots-clés personnalisés sont désactivés.")
+
+
+def _load_doc_for_keyword_edit(doc_id: str, username: str) -> tuple[str, dict]:
+    """Facteur commun aux deux routes ci-dessous : résout l'index,
+    récupère le document, vérifie ACL et type. Retourne (doc_index, doc)."""
+    doc_index = _resolve_doc_index(doc_id)
+    try:
+        doc = es.get(index=doc_index, id=doc_id)["_source"]
+    except Exception:
+        raise HTTPException(status_code=404, detail="Document introuvable")
+
+    if not _check_doc_access(doc, username):
+        raise HTTPException(status_code=403, detail="Accès refusé")
+
+    if doc.get("type") not in ("document", "archive_member"):
+        raise HTTPException(
+            status_code=400,
+            detail="Les mots-clés personnalisés ne sont disponibles que pour les documents de type fichier.",
+        )
+    return doc_index, doc
+
+
+@app.post("/document/{doc_id}/keywords")
+def add_document_keyword(doc_id: str, body: DocumentKeywordBody, x_user: str | None = Header(default=None)):
+    _require_custom_keywords_enabled()
+    username = resolve_user(x_user)
+    keyword = body.keyword.strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="Mot-clé vide.")
+
+    doc_index, doc = _load_doc_for_keyword_edit(doc_id, username)
+    try:
+        custom_keywords.add_keyword(es, doc_id, doc.get("source"), keyword, username)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    # Effet immédiat sur le document principal — la surcharge persistée
+    # ci-dessus n'est réappliquée par le pipeline d'ingestion qu'à la
+    # PROCHAINE réindexation (voir indexer.py:apply_keyword_overrides),
+    # sans quoi l'utilisateur ne verrait pas son ajout tout de suite.
+    #
+    # refresh=True (pas "wait_for") : les index de documents passent par
+    # restore_after_bulk() (indexer.py) après une indexation en masse, qui
+    # fixe refresh_interval à 30s — "wait_for" attendrait alors jusqu'à
+    # 30s le prochain rafraîchissement PLANIFIÉ au lieu d'en déclencher un
+    # immédiatement. Coût négligeable ici (écriture d'un seul document,
+    # action utilisateur peu fréquente), contrairement à un rafraîchissement
+    # forcé pendant un bulk() de plusieurs milliers de documents.
+    current = doc.get("keywords") or []
+    if keyword not in current:
+        current = current + [keyword]
+        es.update(index=doc_index, id=doc_id, refresh=True, doc={"keywords": current})
+    return {"keywords": current}
+
+
+@app.delete("/document/{doc_id}/keywords/{keyword}")
+def remove_document_keyword(doc_id: str, keyword: str, x_user: str | None = Header(default=None)):
+    _require_custom_keywords_enabled()
+    username = resolve_user(x_user)
+
+    doc_index, doc = _load_doc_for_keyword_edit(doc_id, username)
+    try:
+        custom_keywords.remove_keyword(es, doc_id, doc.get("source"), keyword, username)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    current = [k for k in (doc.get("keywords") or []) if k != keyword]
+    if current != (doc.get("keywords") or []):
+        # refresh=True — voir le commentaire équivalent dans add_document_keyword().
+        es.update(index=doc_index, id=doc_id, refresh=True, doc={"keywords": current})
+    return {"keywords": current}
 
 
 # ── Aperçu document ──────────────────────────────────────────
@@ -1731,6 +1828,7 @@ class UiConfigUpdate(BaseModel):
     export_enabled:      bool | None = None
     help_enabled:        bool | None = None
     collections_enabled: bool | None = None
+    custom_keywords_enabled: bool | None = None
 
 
 @app.get("/ui-config")
@@ -1771,6 +1869,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("help_enabled", body.help_enabled)
         if body.collections_enabled is not None:
             config = ui_config.set_param("collections_enabled", body.collections_enabled)
+        if body.custom_keywords_enabled is not None:
+            config = ui_config.set_param("custom_keywords_enabled", body.custom_keywords_enabled)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
