@@ -41,6 +41,7 @@ _CRITERIA_PROPERTIES = {
     "extension": {"type": "keyword"},
     "author":    {"type": "keyword"},
     "folder":    {"type": "keyword"},
+    "keywords":  {"type": "keyword"},
     "date_from": {"type": "keyword"},
     "date_to":   {"type": "keyword"},
 }
@@ -89,6 +90,7 @@ def log_search(
     extension: str | list[str] | None = None,
     author: str | list[str] | None = None,
     folder: str | list[str] | None = None,
+    keywords: str | list[str] | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> str | None:
@@ -107,11 +109,11 @@ def log_search(
     keyword, nativement multi-valué : aucun changement de mapping requis
     pour stocker une liste.
 
-    extension/author/folder/date_from/date_to : critères de filtrage
-    actifs au moment de la recherche (facettes cumulatives — extension/
-    author/folder acceptent une liste —, période) — purement informatif
-    pour /stats.html ("Historique des recherches"), jamais réutilisés
-    pour rejouer la recherche.
+    extension/author/folder/keywords/date_from/date_to : critères de
+    filtrage actifs au moment de la recherche (facettes cumulatives —
+    extension/author/folder/keywords acceptent une liste —, période) —
+    purement informatif pour /stats.html ("Historique des recherches"),
+    jamais réutilisés pour rejouer la recherche.
     """
     try:
         _ensure_index(es)
@@ -131,6 +133,8 @@ def log_search(
             doc["author"] = author
         if folder:
             doc["folder"] = folder
+        if keywords:
+            doc["keywords"] = keywords
         if date_from:
             doc["date_from"] = date_from
         if date_to:

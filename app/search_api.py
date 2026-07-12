@@ -132,8 +132,9 @@ class SearchQuery(BaseModel):
     date_to:         str | None = None   # idem
     author:          str | list[str] | None = None
     folder:          str | list[str] | None = None   # sélection cumulative, comme extension/author/source
+    keywords:        str | list[str] | None = None   # sélection cumulative, comme extension/author/folder/source
     source:          str | list[str] | None = None   # nom(s) de source (file_sources_config.py) — absent = recherche fédérée sur toutes
-    search_in:       str = "all"   # "all" | "title" | "author" — restreint le champ interrogé
+    search_in:       str = "all"   # "all" | "title" | "author" | "keywords" | "filepath" — restreint le champ interrogé
 
     model_config = {"populate_by_name": True}
 
@@ -151,6 +152,7 @@ class SavedSearchCreate(BaseModel):
     ext:       str | list[str] = "all"
     author:    str | list[str] | None = None
     folder:    str | list[str] | None = None
+    keywords:  str | list[str] | None = None
     source:    str | list[str] | None = None
     date_from: str | None = None
     date_to:   str | None = None
@@ -418,9 +420,10 @@ def search(
     # une recherche en texte libre dessus ne matcherait jamais un nom
     # partiel comme "Dupont" contre "Martin Dupont").
     FIELD_SETS = {
-        "all":      ["content", "title^4", "filename^6", "author.text"],
+        "all":      ["content", "title^4", "filename^6", "author.text", "keywords.text^2"],
         "title":    ["title"],
         "author":   ["author.text"],
+        "keywords": ["keywords.text"],
         "filepath": ["filepath.text"],
     }
     fields = FIELD_SETS.get(req.search_in, FIELD_SETS["all"])
@@ -499,6 +502,11 @@ def search(
         authors = req.author if isinstance(req.author, list) else [req.author]
         author_filter = {"terms": {"author": authors}}
 
+    keywords_filter = None
+    if req.keywords:
+        keywords = req.keywords if isinstance(req.keywords, list) else [req.keywords]
+        keywords_filter = {"terms": {"keywords": keywords}}
+
     folder_filter = _folder_filter(req.folder)
 
     source_names  = _validate_source_names(req.source)
@@ -507,6 +515,7 @@ def search(
     facet_filters = {
         "extension": extension_filter,
         "author":    author_filter,
+        "keywords":  keywords_filter,
         "folder":    folder_filter,
         "source":    source_filter,
     }
@@ -575,12 +584,13 @@ def search(
             track_scores=True,
             from_=req.from_,
             size=req.size,
-            source=["filename", "filepath", "extension", "title", "author",
+            source=["filename", "filepath", "extension", "title", "author", "keywords",
                     "size", "date_created", "date_modified", "indexed_at", "has_attachments", "folder",
                     "source", "acl.owner", "acl.groups", "acl.public"],
             aggs={
                 "by_extension": facet_agg("extension",  10, "extension"),
                 "by_author":    facet_agg("author",     10, "author"),
+                "by_keywords":  facet_agg("keywords",   20, "keywords"),
                 "by_folder":    facet_agg("folder_top", 10, "folder"),
                 "by_source":    facet_agg("source",     20, "source"),
             }
@@ -607,6 +617,7 @@ def search(
         extension=req.extension,
         author=req.author,
         folder=req.folder,
+        keywords=req.keywords,
         date_from=req.date_from,
         date_to=req.date_to,
     )
@@ -627,6 +638,7 @@ def search(
         "facets": {
             "extensions": res["aggregations"]["by_extension"]["values"]["buckets"],
             "authors":    res["aggregations"]["by_author"]["values"]["buckets"],
+            "keywords":   res["aggregations"]["by_keywords"]["values"]["buckets"],
             "folders":    res["aggregations"]["by_folder"]["values"]["buckets"],
             "sources":    res["aggregations"]["by_source"]["values"]["buckets"],
         }
@@ -654,9 +666,10 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
     """
     acl_filter = build_acl_filter(username)
     FIELD_SETS = {
-        "all":      ["content", "title^4", "filename^6", "author.text"],
+        "all":      ["content", "title^4", "filename^6", "author.text", "keywords.text^2"],
         "title":    ["title"],
         "author":   ["author.text"],
+        "keywords": ["keywords.text"],
         "filepath": ["filepath.text"],
     }
     fields = FIELD_SETS.get(req.search_in, FIELD_SETS["all"])
@@ -687,6 +700,9 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
     if req.author:
         authors = req.author if isinstance(req.author, list) else [req.author]
         filters.append({"terms": {"author": authors}})
+    if req.keywords:
+        keywords = req.keywords if isinstance(req.keywords, list) else [req.keywords]
+        filters.append({"terms": {"keywords": keywords}})
     folder_filter = _folder_filter(req.folder)
     if folder_filter:
         filters.append(folder_filter)
@@ -710,7 +726,7 @@ def _export_results_xlsx(query_text: str, hits: list) -> StreamingResponse:
     wb = Workbook()
     ws = wb.active
     ws.title = "Résultats de recherche"
-    ws.append(["Nom", "Extension", "Auteur", "Source", "Dossier",
+    ws.append(["Nom", "Extension", "Auteur", "Mots-clés", "Source", "Dossier",
                "Date de modification", "Taille (o)", "Chemin", "Extrait"])
     for h in hits:
         s = h["_source"]
@@ -719,6 +735,7 @@ def _export_results_xlsx(query_text: str, hits: list) -> StreamingResponse:
             s.get("filename", ""),
             s.get("extension", ""),
             s.get("author", ""),
+            ", ".join(s.get("keywords") or []),
             s.get("source", ""),
             s.get("folder", ""),
             s.get("date_modified", ""),
@@ -726,7 +743,7 @@ def _export_results_xlsx(query_text: str, hits: list) -> StreamingResponse:
             s.get("filepath", ""),
             snippet,
         ])
-    for col_idx, width in enumerate([32, 10, 18, 14, 24, 18, 12, 50, 60], start=1):
+    for col_idx, width in enumerate([32, 10, 18, 24, 14, 24, 18, 12, 50, 60], start=1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
 
     buffer = io.BytesIO()
@@ -751,6 +768,7 @@ def _export_results_docx(query_text: str, hits: list) -> StreamingResponse:
         doc.add_heading(s.get("filename") or "(sans nom)", level=2)
         meta = []
         if s.get("author"):        meta.append(f"Auteur : {s['author']}")
+        if s.get("keywords"):      meta.append(f"Mots-clés : {', '.join(s['keywords'])}")
         if s.get("source"):        meta.append(f"Source : {s['source']}")
         if s.get("folder"):        meta.append(f"Dossier : {s['folder']}")
         if s.get("date_modified"): meta.append(f"Modifié le : {s['date_modified'][:10]}")
@@ -797,7 +815,7 @@ def export_search_results(req: SearchExportQuery, x_user: str | None = Header(de
             sort=sort_clause,
             track_scores=True,
             size=SEARCH_EXPORT_MAX_ROWS,
-            source=["filename", "filepath", "extension", "title", "author",
+            source=["filename", "filepath", "extension", "title", "author", "keywords",
                     "size", "date_modified", "folder", "source"],
             highlight={
                 # max_analyzed_offset : voir le commentaire équivalent dans
