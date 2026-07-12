@@ -1389,7 +1389,7 @@ def admin_set_web_source_paused(name: str, body: PauseUpdate, user: str = Depend
 
 
 # ── Vue d'ensemble unifiée (les 3 types de sources confondus) ─────
-# Les panneaux /admin/sources, /admin/sql-sources, /admin/web-sources
+# Les panneaux /admin/file-sources, /admin/sql-sources, /admin/web-sources
 # ci-dessus restent le CRUD dédié à chaque type (champs spécifiques :
 # dossier pour un fichier, requête pour du SQL, crawl_index pour du
 # web). Cette route sert un usage différent et transverse : une seule
