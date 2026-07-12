@@ -78,6 +78,12 @@ ES_SEARCH_ALIAS = os.getenv("ES_SEARCH_ALIAS", "docsearch-all")
 # clé Redis ou d'un nom d'index ES avec des caractères piégeux.
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
+# Styles de mise en page des résultats disponibles pour cette source dans
+# l'interface de recherche (index.html:renderResults) — "default" = carte
+# détaillée actuelle, "compact" = ligne dense sans bloc métadonnées/
+# extrait, clic direct vers la fiche détail. Voir set_display_style().
+DISPLAY_STYLES = {"default", "compact"}
+
 DEFAULT_SOURCES = {
     DEFAULT_SOURCE_NAME: {
         "subfolder":   _DEFAULT_SUBFOLDER,
@@ -86,6 +92,7 @@ DEFAULT_SOURCES = {
         "searchable":  True,
         "collectable": True,
         "description": "",
+        "display_style": "default",
     }
 }
 
@@ -99,6 +106,7 @@ class Source:
     searchable: bool
     collectable: bool = True
     description: str = ""
+    display_style: str = "default"
 
 
 _cache: dict = {}
@@ -172,6 +180,7 @@ def _to_source(name: str, entry: dict) -> Source:
         searchable=entry.get("searchable", True),
         collectable=entry.get("collectable", True),
         description=entry.get("description") or "",
+        display_style=entry.get("display_style") or "default",
     )
 
 
@@ -305,6 +314,29 @@ def set_collectable(name: str, collectable: bool) -> dict:
                 f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
             )
         sources[name]["collectable"] = collectable
+
+    return _read_write(mutate)
+
+
+def set_display_style(name: str, display_style: str) -> dict:
+    """
+    Change le style d'affichage des résultats de cette source dans
+    l'interface de recherche (voir DISPLAY_STYLES) — n'affecte ni
+    l'ingestion ni la recherche elle-même, purement une préférence de
+    présentation résolue côté index.html via GET /searchable-sources.
+    """
+    if display_style not in DISPLAY_STYLES:
+        raise ValueError(
+            f"Style d'affichage invalide : '{display_style}'. "
+            f"Valeurs possibles : {', '.join(sorted(DISPLAY_STYLES))}"
+        )
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(
+                f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
+            )
+        sources[name]["display_style"] = display_style
 
     return _read_write(mutate)
 

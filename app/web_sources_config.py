@@ -55,6 +55,11 @@ DEFAULT_POLL_INTERVAL_SECONDS = 3600
 # vide — même contrainte que file_sources_config.py / sql_sources_config.py.
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
+# Styles de mise en page des résultats disponibles pour cette source dans
+# l'interface de recherche — voir file_sources_config.py:DISPLAY_STYLES
+# (même ensemble, dupliqué ici comme le reste de ce module autonome).
+DISPLAY_STYLES = {"default", "compact"}
+
 
 @dataclass(frozen=True)
 class WebSource:
@@ -68,6 +73,7 @@ class WebSource:
     collectable: bool = True
     description: str = ""
     paused: bool = False  # web_worker.py saute cette source tant que True (voir set_paused)
+    display_style: str = "default"
 
 
 _cache: dict = {}
@@ -136,6 +142,7 @@ def _to_source(name: str, entry: dict) -> WebSource:
         collectable=entry.get("collectable", True),
         description=entry.get("description") or "",
         paused=entry.get("paused", False),
+        display_style=entry.get("display_style") or "default",
     )
 
 
@@ -269,6 +276,24 @@ def set_collectable(name: str, collectable: bool) -> dict:
         if name not in sources:
             raise KeyError(f"Source web inconnue : '{name}'")
         sources[name]["collectable"] = collectable
+
+    return _read_write(mutate)
+
+
+def set_display_style(name: str, display_style: str) -> dict:
+    """Change le style d'affichage des résultats de cette source web —
+    voir file_sources_config.set_display_style() pour le détail, même
+    principe."""
+    if display_style not in DISPLAY_STYLES:
+        raise ValueError(
+            f"Style d'affichage invalide : '{display_style}'. "
+            f"Valeurs possibles : {', '.join(sorted(DISPLAY_STYLES))}"
+        )
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source web inconnue : '{name}'")
+        sources[name]["display_style"] = display_style
 
     return _read_write(mutate)
 

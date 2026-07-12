@@ -70,6 +70,11 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # Nom de variable d'environnement : convention shell classique.
 _ENV_VAR_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
+# Styles de mise en page des résultats disponibles pour cette source dans
+# l'interface de recherche — voir file_sources_config.py:DISPLAY_STYLES
+# (même ensemble, dupliqué ici comme le reste de ce module autonome).
+DISPLAY_STYLES = {"default", "compact"}
+
 
 @dataclass(frozen=True)
 class FieldMapping:
@@ -92,6 +97,7 @@ class SqlSource:
     searchable: bool = True
     collectable: bool = True
     description: str = ""
+    display_style: str = "default"
     fields: tuple[FieldMapping, ...] = field(default_factory=tuple)
 
 
@@ -170,6 +176,7 @@ def _to_source(name: str, entry: dict) -> SqlSource:
         searchable=entry.get("searchable", True),
         collectable=entry.get("collectable", True),
         description=entry.get("description") or "",
+        display_style=entry.get("display_style") or "default",
         fields=fields,
     )
 
@@ -341,6 +348,24 @@ def set_collectable(name: str, collectable: bool) -> dict:
         if name not in sources:
             raise KeyError(f"Source SQL inconnue : '{name}'")
         sources[name]["collectable"] = collectable
+
+    return _read_write(mutate)
+
+
+def set_display_style(name: str, display_style: str) -> dict:
+    """Change le style d'affichage des résultats de cette source SQL —
+    voir file_sources_config.set_display_style() pour le détail, même
+    principe."""
+    if display_style not in DISPLAY_STYLES:
+        raise ValueError(
+            f"Style d'affichage invalide : '{display_style}'. "
+            f"Valeurs possibles : {', '.join(sorted(DISPLAY_STYLES))}"
+        )
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source SQL inconnue : '{name}'")
+        sources[name]["display_style"] = display_style
 
     return _read_write(mutate)
 

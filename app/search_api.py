@@ -359,18 +359,20 @@ def get_searchable_sources():
     de cases à cocher. `collectable` est inclus pour la même raison que
     `label`/`type` : index.html s'en sert pour masquer la case "ajouter à
     une collection" sur les résultats d'une source qui l'interdit (voir
-    sourceCollectable() côté UI), sans appel séparé.
+    sourceCollectable() côté UI), sans appel séparé. `display_style` de
+    même : renderResults() choisit le gabarit de carte par résultat sans
+    appel séparé (voir sourceDisplayStyle() côté UI).
     """
     result = []
     for name, s in file_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": s.label or name, "type": "file", "collectable": s.collectable})
+            result.append({"name": name, "label": s.label or name, "type": "file", "collectable": s.collectable, "display_style": s.display_style})
     for name, s in sql_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": s.label or name, "type": "sql", "collectable": s.collectable})
+            result.append({"name": name, "label": s.label or name, "type": "sql", "collectable": s.collectable, "display_style": s.display_style})
     for name, s in web_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": s.label or name, "type": "web", "collectable": s.collectable})
+            result.append({"name": name, "label": s.label or name, "type": "web", "collectable": s.collectable, "display_style": s.display_style})
     return sorted(result, key=lambda s: s["label"].lower())
 
 
@@ -1588,6 +1590,10 @@ class CollectableUpdate(BaseModel):
     collectable: bool
 
 
+class DisplayStyleUpdate(BaseModel):
+    display_style: str
+
+
 _SOURCE_REGISTRIES = {
     "file": file_sources_config,
     "sql":  sql_sources_config,
@@ -1623,6 +1629,7 @@ def _all_sources_status() -> dict:
                 "description": getattr(s, "description", None) or "",
                 "searchable":  s.searchable,
                 "collectable": s.collectable,
+                "display_style": getattr(s, "display_style", "default"),
                 "indexed":     indexed,
                 "size_bytes":  size_bytes,
             }
@@ -1670,6 +1677,29 @@ def admin_set_source_collectable(
         registry.set_collectable(name, body.collectable)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    return _all_sources_status()
+
+
+@app.post("/admin/all-sources/{name}/display-style")
+def admin_set_source_display_style(
+    name: str, body: DisplayStyleUpdate,
+    type: str = Query(..., description="file, sql ou web"),
+    user: str = Depends(require_admin),
+):
+    """Change le style d'affichage des résultats d'une source dans
+    l'interface de recherche, quel que soit son type — n'affecte ni
+    l'ingestion ni la recherche elle-même (voir
+    set_display_style() dans chaque registre, et sourceDisplayStyle()/
+    renderResults() côté index.html)."""
+    registry = _SOURCE_REGISTRIES.get(type)
+    if registry is None:
+        raise HTTPException(status_code=400, detail=f"Type de source invalide : '{type}' (attendu file, sql ou web)")
+    try:
+        registry.set_display_style(name, body.display_style)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return _all_sources_status()
 
 
