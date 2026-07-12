@@ -46,7 +46,7 @@ def _ensure_index(es: Elasticsearch) -> None:
                     "timestamp":    {"type": "date"},
                     "username":     {"type": "keyword"},
                     "method":       {"type": "keyword"},
-                    # "path" est le PATRON de route (ex: "/admin/sources/{name}/label"),
+                    # "path" est le PATRON de route (ex: "/admin/file-sources/{name}/label"),
                     # pas l'URL réellement appelée — les valeurs variables
                     # vivent dans path_params, ça permet de filtrer/compter
                     # par type d'action sans exploser en une entrée par nom
