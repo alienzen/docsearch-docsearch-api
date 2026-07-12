@@ -1,17 +1,20 @@
-# sources_config.py — Registre dynamique des sources d'indexation
+# file_sources_config.py — Registre dynamique des sources d'indexation (fichiers)
 #
-# Port de docsearch-ingestion/app/sources_config.py — dupliqué à
+# Port de docsearch-ingestion/app/file_sources_config.py — dupliqué à
 # l'identique ici (impossible d'importer un autre dépôt dans
 # l'architecture multi-dépôts, même rationale que admin_scan.py). Ce
 # module est totalement autonome (Redis + variables d'environnement,
 # aucune dépendance vers le reste de l'ingestion) : il peut être copié
 # tel quel entre les deux dépôts sans adaptation.
 #
-# Une "source" = un sous-dossier de SOURCES_MOUNT indexé vers son propre
-# index Elasticsearch. Permet d'ajouter un nouveau répertoire à indexer
-# sans reconstruire ni redémarrer aucun conteneur : le registre vit dans
-# Redis (même principe que path_filter.py / filetype_config.py /
-# runtime_config.py), watcher/worker/producer le relisent à chaud.
+# Une "source fichier" = un sous-dossier de SOURCES_MOUNT indexé vers son
+# propre index Elasticsearch — à distinguer des sources SQL
+# (sql_sources_config.py) et web (web_sources_config.py), disponibles en
+# plus depuis l'ajout de ces connecteurs. Permet d'ajouter un nouveau
+# répertoire à indexer sans reconstruire ni redémarrer aucun conteneur :
+# le registre vit dans Redis (même principe que path_filter.py /
+# filetype_config.py / runtime_config.py), watcher/worker/producer le
+# relisent à chaud.
 #
 # Contrainte Docker : un bind-mount est fixé à la création du conteneur —
 # impossible d'en monter un nouveau dans un conteneur déjà démarré. C'est
@@ -21,7 +24,10 @@
 # montage lui-même (voir docsearch-infra/.env.example pour la migration
 # unique DOCS_PATH -> SOURCES_ROOT à faire avant la première utilisation).
 #
-# Stockage (clé Redis "docsearch:config:sources") :
+# Stockage (clé Redis "docsearch:config:file_sources" — migrée depuis
+# l'ancien nom "docsearch:config:sources" en même temps que le
+# renommage sources_config.py -> file_sources_config.py, pour être
+# cohérente avec "docsearch:config:sql_sources"/"docsearch:config:web_sources") :
 #   {"documents": {"subfolder": "documents", "es_index": "documents", "label": "Documents", "searchable": true},
 #    "finance":   {"subfolder": "finance",   "es_index": "finance_docs", "label": "Finance", "searchable": true}}
 #
@@ -47,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-SOURCES_KEY = "docsearch:config:sources"
+SOURCES_KEY = "docsearch:config:file_sources"
 SOURCES_CACHE_TTL = int(os.getenv("SOURCES_CONFIG_CACHE_TTL", "10"))
 
 # Point de montage fixe (identique dans tous les conteneurs) sous lequel
@@ -78,6 +84,7 @@ DEFAULT_SOURCES = {
         "es_index":   _DEFAULT_ES_INDEX,
         "label":      "Documents",
         "searchable": True,
+        "description": "",
     }
 }
 
@@ -89,6 +96,7 @@ class Source:
     folder: str    # chemin absolu résolu (SOURCES_MOUNT/subfolder)
     label: str
     searchable: bool
+    description: str = ""
 
 
 _cache: dict = {}
@@ -113,7 +121,7 @@ def _get_redis_client():
         global _redis_unavailable_logged
         if not _redis_unavailable_logged:
             logger.warning(
-                f"[sources_config] Redis injoignable ({e}) — "
+                f"[file_sources_config] Redis injoignable ({e}) — "
                 f"repli sur la source unique par défaut ('{DEFAULT_SOURCE_NAME}')."
             )
             _redis_unavailable_logged = True
@@ -144,7 +152,7 @@ def _raw_sources() -> dict:
                 _cache_time = now
                 return _cache
         except Exception as e:
-            logger.warning(f"[sources_config] Erreur lecture Redis : {e} — repli sur défaut")
+            logger.warning(f"[file_sources_config] Erreur lecture Redis : {e} — repli sur défaut")
 
     _cache = dict(DEFAULT_SOURCES)
     _cache_time = now
@@ -160,6 +168,7 @@ def _to_source(name: str, entry: dict) -> Source:
         folder=folder,
         label=entry.get("label") or name,
         searchable=entry.get("searchable", True),
+        description=entry.get("description") or "",
     )
 
 
@@ -222,7 +231,7 @@ def _read_write(mutate) -> dict:
 
 def add_source(
     name: str, es_index: str, subfolder: str | None = None, label: str | None = None,
-    searchable: bool = True,
+    searchable: bool = True, description: str | None = None,
 ) -> dict:
     """
     Enregistre une nouvelle source (ou met à jour une source existante du
@@ -242,10 +251,11 @@ def add_source(
                     f"L'index '{es_index}' est déjà utilisé par la source '{other_name}'."
                 )
         sources[name] = {
-            "subfolder":  subfolder,
-            "es_index":   es_index,
-            "label":      label or name,
-            "searchable": searchable,
+            "subfolder":   subfolder,
+            "es_index":    es_index,
+            "label":       label or name,
+            "searchable":  searchable,
+            "description": description or "",
         }
 
     return _read_write(mutate)
@@ -283,5 +293,37 @@ def remove_source(name: str) -> dict:
 
     def mutate(sources):
         sources.pop(name, None)
+
+    return _read_write(mutate)
+
+
+def set_label(name: str, label: str) -> dict:
+    """
+    Modifie le LIBELLÉ d'affichage d'une source, sans toucher à son nom
+    (clé de registre), son index ES ni son dossier — contrairement à
+    l'ancien rename_source(), le nom qui identifie la source dans le
+    registre et dans le champ "source" des documents déjà indexés ne
+    change jamais, donc aucune répercussion sur l'index ES n'est
+    nécessaire ici.
+    """
+    if not label.strip():
+        raise ValueError("Le libellé ne peut pas être vide.")
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source inconnue : '{name}'")
+        sources[name]["label"] = label.strip()
+
+    return _read_write(mutate)
+
+
+def set_description(name: str, description: str) -> dict:
+    """Modifie la description d'une source (texte libre, affiché dans
+    l'admin — n'affecte ni l'ingestion ni la recherche)."""
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source inconnue : '{name}'")
+        sources[name]["description"] = description.strip()
 
     return _read_write(mutate)

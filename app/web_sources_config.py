@@ -31,7 +31,7 @@
 # ce module ne fait QUE gérer le registre de la seconde étape (transfert
 # crawl_index -> es_index). Voir web_indexer.py pour cette transformation.
 #
-# Contrairement à sources_config.py, il n'existe PAS de source par défaut :
+# Contrairement à file_sources_config.py, il n'existe PAS de source par défaut :
 # une installation sans source web enregistrée n'en a simplement aucune à
 # traiter (web_worker.py tourne alors sans rien faire).
 
@@ -52,7 +52,7 @@ WEB_SOURCES_CACHE_TTL = int(os.getenv("WEB_SOURCES_CACHE_TTL", "10"))
 DEFAULT_POLL_INTERVAL_SECONDS = 3600
 
 # Nom de source/index valides : alphanumérique + tiret/underscore, jamais
-# vide — même contrainte que sources_config.py / sql_sources_config.py.
+# vide — même contrainte que file_sources_config.py / sql_sources_config.py.
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
@@ -63,7 +63,10 @@ class WebSource:
     es_index: str         # index ES final DocSearch (rejoint ES_SEARCH_ALIAS)
     acl_public: bool
     poll_interval_seconds: int
+    label: str = ""
     searchable: bool = True
+    description: str = ""
+    paused: bool = False  # web_worker.py saute cette source tant que True (voir set_paused)
 
 
 _cache: dict = {}
@@ -127,7 +130,10 @@ def _to_source(name: str, entry: dict) -> WebSource:
         es_index=entry["es_index"],
         acl_public=bool(entry.get("acl_public", True)),
         poll_interval_seconds=int(entry.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
+        label=entry.get("label") or name,
         searchable=entry.get("searchable", True),
+        description=entry.get("description") or "",
+        paused=entry.get("paused", False),
     )
 
 
@@ -176,7 +182,7 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, crawl_index: str, es_index: str,
     acl_public: bool = True, poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
-    searchable: bool = True,
+    label: str | None = None, searchable: bool = True, description: str | None = None,
 ) -> dict:
     """
     Enregistre une nouvelle source web (ou met à jour une source existante
@@ -205,7 +211,7 @@ def add_source(
         # Vérifie aussi contre les sources fichiers et SQL — un même index
         # partagé entre deux types de sources mélangerait deux schémas
         # incompatibles dans le même index.
-        from sources_config import get_sources as get_file_sources
+        from file_sources_config import get_sources as get_file_sources
         from sql_sources_config import get_sources as get_sql_sources
         for other_name, other in get_file_sources().items():
             if other.es_index == es_index:
@@ -222,7 +228,9 @@ def add_source(
             "es_index":               es_index,
             "acl_public":             acl_public,
             "poll_interval_seconds":  poll_interval_seconds,
+            "label":                  label or name,
             "searchable":             searchable,
+            "description":            description or "",
         }
 
     return _read_write(mutate)
@@ -243,6 +251,25 @@ def set_searchable(name: str, searchable: bool) -> dict:
     return _read_write(mutate)
 
 
+def set_paused(name: str, paused: bool) -> dict:
+    """
+    Suspend/reprend le CRAWL pour une source web — tant que True,
+    web_worker.py saute cette source à chaque tick (voir web_worker.py),
+    donc crawl_index n'est plus relu ni transformé vers es_index. Ne
+    pilote PAS le conteneur Elastic Open Web Crawler lui-même (ce module
+    n'a aucune visibilité Docker) : si ce conteneur tourne en mode
+    "schedule" en continu, il continue d'écrire dans crawl_index — seule
+    la RÉPERCUSSION vers DocSearch est mise en pause. Les documents déjà
+    dans es_index restent cherchables (contrairement à searchable=False).
+    """
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source web inconnue : '{name}'")
+        sources[name]["paused"] = paused
+
+    return _read_write(mutate)
+
+
 def remove_source(name: str) -> dict:
     """
     Retire une source web du registre — web_worker.py arrête de la
@@ -253,5 +280,37 @@ def remove_source(name: str) -> dict:
         if name not in sources:
             raise KeyError(f"Source web inconnue : '{name}'")
         sources.pop(name, None)
+
+    return _read_write(mutate)
+
+
+def set_label(name: str, label: str) -> dict:
+    """
+    Modifie le LIBELLÉ d'affichage d'une source web, sans toucher à son
+    nom (clé de registre), son crawl_index ni son es_index —
+    contrairement à l'ancien rename_source(), le nom qui identifie la
+    source dans le registre et dans le champ "source" des documents déjà
+    indexés ne change jamais, donc aucune répercussion sur l'index ES
+    n'est nécessaire ici.
+    """
+    if not label.strip():
+        raise ValueError("Le libellé ne peut pas être vide.")
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source web inconnue : '{name}'")
+        sources[name]["label"] = label.strip()
+
+    return _read_write(mutate)
+
+
+def set_description(name: str, description: str) -> dict:
+    """Modifie la description d'une source web (texte libre, affiché
+    dans l'admin — n'affecte ni l'ingestion ni la recherche)."""
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source web inconnue : '{name}'")
+        sources[name]["description"] = description.strip()
 
     return _read_write(mutate)

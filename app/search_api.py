@@ -10,25 +10,36 @@ LDAP_ENABLED = os.getenv("LDAP_ENABLED", "false").lower() == "true"
 import subprocess
 import tempfile
 import logging
+import io
+import re
+import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Header, Depends, Request, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from elasticsearch import Elasticsearch
+from elasticsearch.helpers import scan as es_scan
 from ldap_resolver import get_user_groups
-from admin_auth import require_admin
+from admin_auth import require_admin, is_admin
 import cluster_status
 import admin_scan
 import filetype_config
 import runtime_config
 import path_filter
 import search_log
+import nps_log
+import suggestion_log
+import engagement_config
+import ui_config
 import saved_searches
-import sources_config
-from sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
+import saved_collections
+import audit_log
+import file_sources_config
+from file_sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
 import sql_sources_config
+import sql_dsn_registry
 import web_sources_config
 
 logger = logging.getLogger(__name__)
@@ -40,6 +51,57 @@ es = Elasticsearch(ES_HOST, retry_on_timeout=True, max_retries=3, request_timeou
 
 # Utilisateur anonyme de secours (dev uniquement — désactiver en prod)
 DEV_USER = DEV_USER
+
+
+@app.middleware("http")
+async def audit_log_middleware(request: Request, call_next):
+    """
+    Journal d'audit générique des actions d'administration — voir
+    audit_log.py. Volontairement un middleware plutôt qu'un appel
+    explicite dans chaque route /admin/* : une nouvelle route de mutation
+    est ainsi auditée automatiquement dès sa création, sans modification
+    de ce fichier ni oubli possible.
+
+    Ne journalise que les mutations (POST/DELETE/PUT) sous /admin/* dont
+    la réponse est un succès (< 400) — un échec (validation, 404, Redis/ES
+    injoignable...) ne représente aucun changement réel, l'enregistrer
+    serait trompeur. Le corps de la requête est lu ICI, avant call_next :
+    Starlette met en cache les octets déjà lus (request._body), la route
+    elle-même peut donc ensuite reconstruire son modèle Pydantic à partir
+    du corps sans rien perdre.
+    """
+    is_mutation = (
+        request.method in ("POST", "DELETE", "PUT")
+        and request.url.path.startswith("/admin/")
+    )
+    body_bytes = await request.body() if is_mutation else b""
+
+    response = await call_next(request)
+
+    if is_mutation and response.status_code < 400:
+        # scope["route"] n'est renseigné qu'après résolution du routage,
+        # qui a lieu à l'intérieur de call_next — d'où sa lecture ici,
+        # après coup. .path est le PATRON de route (ex:
+        # "/admin/file-sources/{name}/label"), request.path_params les valeurs
+        # résolues (ex: {"name": "finance"}) — les deux ensemble
+        # permettent de reconstituer une action lisible côté UI sans
+        # dépendre d'une regex sur l'URL brute.
+        route = request.scope.get("route")
+        path_template = getattr(route, "path", request.url.path)
+        try:
+            body = json.loads(body_bytes) if body_bytes else {}
+        except json.JSONDecodeError:
+            body = {}
+        audit_log.log_action(
+            es,
+            username=resolve_user(request.headers.get("x-user")),
+            method=request.method,
+            path=path_template,
+            path_params=dict(request.path_params),
+            body=body if isinstance(body, dict) else {},
+            status_code=response.status_code,
+        )
+    return response
 
 
 # ── Santé ────────────────────────────────────────────────────
@@ -69,8 +131,8 @@ class SearchQuery(BaseModel):
     date_from:       str | None = None   # filtre sur date_modified (voir build de la requête)
     date_to:         str | None = None   # idem
     author:          str | list[str] | None = None
-    folder:          str | None = None
-    source:          str | list[str] | None = None   # nom(s) de source (sources_config.py) — absent = recherche fédérée sur toutes
+    folder:          str | list[str] | None = None   # sélection cumulative, comme extension/author/source
+    source:          str | list[str] | None = None   # nom(s) de source (file_sources_config.py) — absent = recherche fédérée sur toutes
     search_in:       str = "all"   # "all" | "title" | "author" — restreint le champ interrogé
 
     model_config = {"populate_by_name": True}
@@ -88,11 +150,23 @@ class SavedSearchCreate(BaseModel):
     search_in: str = "all"
     ext:       str | list[str] = "all"
     author:    str | list[str] | None = None
-    folder:    str | None = None
+    folder:    str | list[str] | None = None
     source:    str | list[str] | None = None
     date_from: str | None = None
     date_to:   str | None = None
     sort:      str = "_score"
+
+
+class SavedCollectionCreate(BaseModel):
+    name: str
+
+
+class SavedCollectionRename(BaseModel):
+    name: str
+
+
+class SavedCollectionDocumentAdd(BaseModel):
+    doc_id: str
 
 
 # ── Filtre ACL ───────────────────────────────────────────────
@@ -119,6 +193,24 @@ def build_acl_filter(username: str) -> dict:
             "minimum_should_match": 1,
         }
     }
+
+
+def _folder_filter(folder: str | list[str] | None) -> dict | None:
+    """
+    Filtre ES pour la facette "Dossier" — sélection cumulative (comme
+    extension/author/source) : matche tout document sous N'IMPORTE LEQUEL
+    des dossiers demandés, exact OU sous-dossier (ex: folder="Finance"
+    matche "Finance" et "Finance/Rapports"). Chaque dossier ajoute sa
+    propre paire term/prefix au should, combinées en OR.
+    """
+    if not folder:
+        return None
+    folders = folder if isinstance(folder, list) else [folder]
+    should = []
+    for f in folders:
+        should.append({"term": {"folder": f}})
+        should.append({"prefix": {"folder": f.rstrip("/") + "/"}})
+    return {"bool": {"should": should, "minimum_should_match": 1}}
 
 
 def resolve_user(x_user: str | None) -> str:
@@ -185,7 +277,7 @@ def _validate_source_names(source_names: str | list[str] | None) -> list[str]:
     names = source_names if isinstance(source_names, list) else [source_names]
     for name in names:
         try:
-            sources_config.get_source(name)
+            file_sources_config.get_source(name)
             continue
         except KeyError:
             pass
@@ -217,7 +309,7 @@ def _searchable_source_names() -> list[str]:
     est explicitement demandée via `source`.
     """
     names = []
-    for name, s in sources_config.get_sources().items():
+    for name, s in file_sources_config.get_sources().items():
         if s.searchable:
             names.append(name)
     for name, s in sql_sources_config.get_sources().items():
@@ -227,6 +319,30 @@ def _searchable_source_names() -> list[str]:
         if s.searchable:
             names.append(name)
     return names
+
+
+@app.get("/searchable-sources")
+def get_searchable_sources():
+    """
+    Public (pas d'auth) — liste des sources actuellement cherchables,
+    pour la présélection de sources AVANT de lancer une recherche (voir
+    index.html) — complète la facette "Source" existante, qui n'apparaît
+    qu'APRÈS une recherche (dérivée des résultats, avec leur compte).
+    Contrairement à /admin/all-sources, pas de nombre de documents ni de
+    taille d'index (réservé à l'admin) : juste de quoi peupler une liste
+    de cases à cocher.
+    """
+    result = []
+    for name, s in file_sources_config.get_sources().items():
+        if s.searchable:
+            result.append({"name": name, "label": s.label or name, "type": "file"})
+    for name, s in sql_sources_config.get_sources().items():
+        if s.searchable:
+            result.append({"name": name, "label": s.label or name, "type": "sql"})
+    for name, s in web_sources_config.get_sources().items():
+        if s.searchable:
+            result.append({"name": name, "label": s.label or name, "type": "web"})
+    return sorted(result, key=lambda s: s["label"].lower())
 
 
 def _resolve_doc_index(doc_id: str) -> str:
@@ -274,7 +390,14 @@ def search(
     query_text = req.query.strip()
     is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
 
-    if is_exact_phrase:
+    if not query_text:
+        # Champ de recherche vide mais des filtres actifs (ex: syntaxe
+        # avancée "auteur:...", "type:...", "source:...", "dossier:..."
+        # utilisée seule, sans texte libre — voir index.html,
+        # parseAdvancedQuery()) : matche tous les documents, les filtres
+        # ci-dessous restent seuls responsables de la restriction.
+        must = [{"match_all": {}}]
+    elif is_exact_phrase:
         phrase = query_text[1:-1].strip()
         must = [{
             "multi_match": {
@@ -333,19 +456,7 @@ def search(
         authors = req.author if isinstance(req.author, list) else [req.author]
         author_filter = {"terms": {"author": authors}}
 
-    folder_filter = None
-    if req.folder:
-        # Correspond au dossier exact OU à tout sous-dossier en dessous
-        # (ex: folder="Finance" matche "Finance" et "Finance/Rapports")
-        folder_filter = {
-            "bool": {
-                "should": [
-                    {"term":   {"folder": req.folder}},
-                    {"prefix": {"folder": req.folder.rstrip("/") + "/"}},
-                ],
-                "minimum_should_match": 1,
-            }
-        }
+    folder_filter = _folder_filter(req.folder)
 
     source_names  = _validate_source_names(req.source)
     source_filter = {"terms": {"source": source_names}} if source_names else None
@@ -391,7 +502,19 @@ def search(
             post_filter={"bool": {"filter": active_facet_filters}},
             highlight={
                 "fields": {
-                    "content": {"fragment_size": 200, "number_of_fragments": 2}
+                    # max_analyzed_offset : sans lui, dès qu'un document du
+                    # lot (ex: gros PST/PDF) dépasse index.highlight.max_analyzed_offset
+                    # (1 000 000 caractères), ES fait échouer TOUS les shards
+                    # portant ce document, et le highlighting renvoie alors
+                    # hits.hits=[] pour la requête entière (total correct,
+                    # mais aucun résultat) — d'où des recherches qui
+                    # semblaient soudain ne plus rien retourner. On tronque
+                    # explicitement l'analyse du surlignage à cette limite.
+                    "content": {
+                        "fragment_size": 200,
+                        "number_of_fragments": 2,
+                        "max_analyzed_offset": 1000000,
+                    }
                 },
                 # Sans ceci, ES utilise ses balises par défaut (<em>...</em>),
                 # qui ne correspondent à AUCUNE règle CSS du frontend — les
@@ -429,7 +552,7 @@ def search(
     hits  = res["hits"]["hits"]
     total = res["hits"]["total"]["value"]
 
-    search_log.log_search(
+    search_id = search_log.log_search(
         es,
         username=username,
         ip=get_client_ip(request),
@@ -438,11 +561,17 @@ def search(
         source=req.source,
         total_results=total,
         result_files=[h["_source"].get("filename", "") for h in hits],
+        extension=req.extension,
+        author=req.author,
+        folder=req.folder,
+        date_from=req.date_from,
+        date_to=req.date_to,
     )
 
     return {
-        "total":    total,
-        "username": username,
+        "total":     total,
+        "username":  username,
+        "search_id": search_id,
         "results": [
             {
                 "id":        h["_id"],
@@ -459,6 +588,198 @@ def search(
             "sources":    res["aggregations"]["by_source"]["values"]["buckets"],
         }
     }
+
+
+# ── Export des résultats de recherche (XLSX / DOCX) ─────────────
+# Même critères que POST /search (SearchQuery), mais TOUS les résultats
+# correspondants (jusqu'à SEARCH_EXPORT_MAX_ROWS) plutôt que la seule
+# page affichée — d'où une requête ES séparée, sans les agrégations de
+# facettes (inutiles ici, pas d'UI à peupler).
+SEARCH_EXPORT_MAX_ROWS = 500
+
+
+class SearchExportQuery(SearchQuery):
+    format: str = "xlsx"   # "xlsx" | "docx"
+
+
+def _build_search_query(req: SearchQuery, username: str) -> dict:
+    """
+    Construit la requête ES (must + filtres) pour une recherche —
+    factorisé entre POST /search et POST /search/export. Ne couvre PAS
+    les agrégations de facettes ni le post_filter associé (spécifiques
+    à /search, sans objet pour un export).
+    """
+    acl_filter = build_acl_filter(username)
+    FIELD_SETS = {
+        "all":      ["content", "title^4", "filename^6", "author.text"],
+        "title":    ["title"],
+        "author":   ["author.text"],
+        "filepath": ["filepath.text"],
+    }
+    fields = FIELD_SETS.get(req.search_in, FIELD_SETS["all"])
+
+    query_text = req.query.strip()
+    is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
+    if not query_text:
+        # Voir le commentaire équivalent dans /search — champ vide + filtres
+        # actifs (syntaxe avancée seule) doit matcher tout, pas rien.
+        must = [{"match_all": {}}]
+    elif is_exact_phrase:
+        phrase = query_text[1:-1].strip()
+        must = [{"multi_match": {"query": phrase, "fields": fields, "type": "phrase"}}]
+    else:
+        must = [{"multi_match": {"query": query_text, "fields": fields, "fuzziness": "AUTO"}}]
+
+    filters = [acl_filter, {"terms": {"source": _searchable_source_names()}}]
+    if req.has_attachments:
+        filters.append({"term": {"has_attachments": True}})
+    if req.date_from or req.date_to:
+        r = {}
+        if req.date_from: r["gte"] = req.date_from
+        if req.date_to:   r["lte"] = req.date_to
+        filters.append({"range": {"date_modified": r}})
+    if req.extension:
+        exts = req.extension if isinstance(req.extension, list) else [req.extension]
+        filters.append({"terms": {"extension": exts}})
+    if req.author:
+        authors = req.author if isinstance(req.author, list) else [req.author]
+        filters.append({"terms": {"author": authors}})
+    folder_filter = _folder_filter(req.folder)
+    if folder_filter:
+        filters.append(folder_filter)
+    source_names = _validate_source_names(req.source)
+    if source_names:
+        filters.append({"terms": {"source": source_names}})
+
+    return {"bool": {"must": must, "filter": filters}}
+
+
+def _slugify_query(text: str) -> str:
+    """Nom de fichier sûr à partir de la requête — alphanumérique et
+    tirets seulement, tronqué pour rester raisonnable."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower()).strip("-")
+    return (slug or "recherche")[:60]
+
+
+def _export_results_xlsx(query_text: str, hits: list) -> StreamingResponse:
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Résultats de recherche"
+    ws.append(["Nom", "Extension", "Auteur", "Source", "Dossier",
+               "Date de modification", "Taille (o)", "Chemin", "Extrait"])
+    for h in hits:
+        s = h["_source"]
+        snippet = " … ".join(h.get("highlight", {}).get("content", []))
+        ws.append([
+            s.get("filename", ""),
+            s.get("extension", ""),
+            s.get("author", ""),
+            s.get("source", ""),
+            s.get("folder", ""),
+            s.get("date_modified", ""),
+            s.get("size", 0),
+            s.get("filepath", ""),
+            snippet,
+        ])
+    for col_idx, width in enumerate([32, 10, 18, 14, 24, 18, 12, 50, 60], start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    filename = f"resultats-{_slugify_query(query_text)}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _export_results_docx(query_text: str, hits: list) -> StreamingResponse:
+    from docx import Document
+
+    doc = Document()
+    doc.add_heading(f'Résultats de recherche — « {query_text} »', level=1)
+    doc.add_paragraph(f"{len(hits)} document(s)")
+    for h in hits:
+        s = h["_source"]
+        doc.add_heading(s.get("filename") or "(sans nom)", level=2)
+        meta = []
+        if s.get("author"):        meta.append(f"Auteur : {s['author']}")
+        if s.get("source"):        meta.append(f"Source : {s['source']}")
+        if s.get("folder"):        meta.append(f"Dossier : {s['folder']}")
+        if s.get("date_modified"): meta.append(f"Modifié le : {s['date_modified'][:10]}")
+        if meta:
+            doc.add_paragraph(" · ".join(meta))
+        if s.get("filepath"):
+            doc.add_paragraph(s["filepath"], style="Intense Quote")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    filename = f"resultats-{_slugify_query(query_text)}.docx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/search/export")
+def export_search_results(req: SearchExportQuery, x_user: str | None = Header(default=None)):
+    """
+    Export XLSX ou DOCX des résultats d'une recherche — mêmes critères
+    que POST /search (même corps de requête, avec juste "format" en
+    plus), mais jusqu'à SEARCH_EXPORT_MAX_ROWS résultats plutôt que la
+    seule page affichée à l'écran.
+    """
+    if not ui_config.get_config().get("export_enabled", True):
+        raise HTTPException(status_code=403, detail="L'export des résultats est désactivé.")
+    _ensure_index_exists()
+    username = resolve_user(x_user)
+    query = _build_search_query(req, username)
+
+    sort_clause = (
+        [{"_score": "desc"}]
+        if req.sort == "_score"
+        else [{req.sort: {"order": "desc", "missing": "_last"}}, {"_score": "desc"}]
+    )
+
+    try:
+        res = es.search(
+            index=ES_SEARCH_ALIAS,
+            query=query,
+            sort=sort_clause,
+            track_scores=True,
+            size=SEARCH_EXPORT_MAX_ROWS,
+            source=["filename", "filepath", "extension", "title", "author",
+                    "size", "date_modified", "folder", "source"],
+            highlight={
+                # max_analyzed_offset : voir le commentaire équivalent dans
+                # /search — sans lui, un seul document trop long dans les
+                # 500 lignes de l'export fait échouer le highlighting sur
+                # tous les shards qui le portent, et hits.hits revient
+                # vide (total correct, mais 0 ligne exportée).
+                "fields": {"content": {
+                    "fragment_size": 200,
+                    "number_of_fragments": 2,
+                    "max_analyzed_offset": 1000000,
+                }},
+                # Pas de balises de surlignage ici (texte brut pour un export,
+                # contrairement à /search qui les affiche en HTML).
+                "pre_tags": [""], "post_tags": [""],
+            },
+        )
+    except Exception as e:
+        logger.error(f"[search/export] Erreur ES pour la requête '{req.query}' : {e}")
+        raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}")
+
+    hits = res["hits"]["hits"]
+    if req.format == "docx":
+        return _export_results_docx(req.query, hits)
+    return _export_results_xlsx(req.query, hits)
 
 
 # ── Recherches sauvegardées ─────────────────────────────────────
@@ -484,6 +805,85 @@ def remove_saved_search(search_id: str, x_user: str | None = Header(default=None
     username = resolve_user(x_user)
     try:
         return saved_searches.delete_saved(username, search_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ── Collections de documents ──────────────────────────────────────────
+# Strictement personnel (voir saved_collections.py) — entièrement
+# suspendable depuis l'admin (ui_config.collections_enabled) : désactivé,
+# toutes les routes ci-dessous renvoient 403, y compris la simple
+# consultation, plutôt que de ne bloquer que la création (cohérent avec
+# l'intention d'un flag "fonctionnalité désactivée" plutôt que "création
+# désactivée").
+def _require_collections_enabled() -> None:
+    if not ui_config.get_config().get("collections_enabled", True):
+        raise HTTPException(status_code=403, detail="Les collections de documents sont désactivées.")
+
+
+@app.get("/collections")
+def get_collections(x_user: str | None = Header(default=None)):
+    _require_collections_enabled()
+    username = resolve_user(x_user)
+    return saved_collections.list_collections(es, username)
+
+
+@app.post("/collections")
+def create_collection(body: SavedCollectionCreate, x_user: str | None = Header(default=None)):
+    _require_collections_enabled()
+    username = resolve_user(x_user)
+    try:
+        return saved_collections.create_collection(es, username, body.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.delete("/collections/{collection_id}")
+def remove_collection(collection_id: str, x_user: str | None = Header(default=None)):
+    _require_collections_enabled()
+    username = resolve_user(x_user)
+    try:
+        return saved_collections.delete_collection(es, username, collection_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/collections/{collection_id}/rename")
+def rename_collection(collection_id: str, body: SavedCollectionRename, x_user: str | None = Header(default=None)):
+    _require_collections_enabled()
+    username = resolve_user(x_user)
+    try:
+        return saved_collections.rename_collection(es, username, collection_id, body.name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/collections/{collection_id}/documents")
+def add_collection_document(collection_id: str, body: SavedCollectionDocumentAdd, x_user: str | None = Header(default=None)):
+    _require_collections_enabled()
+    username = resolve_user(x_user)
+    try:
+        return saved_collections.add_document(es, username, collection_id, body.doc_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.delete("/collections/{collection_id}/documents/{doc_id}")
+def remove_collection_document(collection_id: str, doc_id: str, x_user: str | None = Header(default=None)):
+    _require_collections_enabled()
+    username = resolve_user(x_user)
+    try:
+        return saved_collections.remove_document(es, username, collection_id, doc_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -640,6 +1040,7 @@ class SourceCreate(BaseModel):
     es_index: str
     subfolder: str | None = None
     label: str | None = None
+    description: str | None = None
 
 
 class SqlFieldMapping(BaseModel):
@@ -658,6 +1059,13 @@ class SqlSourceCreate(BaseModel):
     es_index: str
     fields: list[SqlFieldMapping]
     poll_interval_seconds: int = sql_sources_config.DEFAULT_POLL_INTERVAL_SECONDS
+    label: str | None = None
+    description: str | None = None
+
+
+class SqlDsnCreate(BaseModel):
+    name: str
+    dsn: str
 
 
 class WebSourceCreate(BaseModel):
@@ -666,6 +1074,8 @@ class WebSourceCreate(BaseModel):
     es_index: str
     acl_public: bool = True
     poll_interval_seconds: int = web_sources_config.DEFAULT_POLL_INTERVAL_SECONDS
+    label: str | None = None
+    description: str | None = None
 
 
 def _sources_status() -> dict:
@@ -673,7 +1083,7 @@ def _sources_status() -> dict:
     (source enregistrée mais jamais indexée) compte pour 0 plutôt que de
     faire échouer tout /admin/status."""
     result = {}
-    for name, source in sources_config.get_sources().items():
+    for name, source in file_sources_config.get_sources().items():
         try:
             result[name] = {
                 "es_index": source.es_index,
@@ -701,33 +1111,62 @@ def admin_status(user: str = Depends(require_admin)):
     return status
 
 
-@app.get("/admin/sources")
+class LabelUpdate(BaseModel):
+    label: str
+
+
+class DescriptionUpdate(BaseModel):
+    description: str
+
+
+@app.get("/admin/file-sources")
 def admin_get_sources(user: str = Depends(require_admin)):
     return {
-        name: {"es_index": s.es_index, "folder": s.folder, "label": s.label}
-        for name, s in sources_config.get_sources().items()
+        name: {"es_index": s.es_index, "folder": s.folder, "label": s.label, "description": s.description}
+        for name, s in file_sources_config.get_sources().items()
     }
 
 
-@app.post("/admin/sources")
+@app.post("/admin/file-sources")
 def admin_add_source(body: SourceCreate, user: str = Depends(require_admin)):
     try:
-        return sources_config.add_source(
-            body.name, body.es_index, subfolder=body.subfolder, label=body.label
+        return file_sources_config.add_source(
+            body.name, body.es_index, subfolder=body.subfolder, label=body.label,
+            description=body.description,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.delete("/admin/sources/{name}")
+@app.delete("/admin/file-sources/{name}")
 def admin_remove_source(name: str, user: str = Depends(require_admin)):
     """Retire la source du registre (le watcher arrête de l'observer) —
     NE supprime PAS l'index Elasticsearch ni les documents déjà
     indexés : utiliser /admin/purge-path pour nettoyer l'existant."""
     try:
-        return sources_config.remove_source(name)
+        return file_sources_config.remove_source(name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/admin/file-sources/{name}/label")
+def admin_set_source_label(name: str, body: LabelUpdate, user: str = Depends(require_admin)):
+    """Modifie le libellé d'affichage d'une source fichier — son nom
+    (registre + champ "source" des documents déjà indexés) ne change pas."""
+    try:
+        return file_sources_config.set_label(name, body.label)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/admin/file-sources/{name}/description")
+def admin_set_source_description(name: str, body: DescriptionUpdate, user: str = Depends(require_admin)):
+    try:
+        return file_sources_config.set_description(name, body.description)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/admin/sql-sources")
@@ -740,6 +1179,8 @@ def admin_get_sql_sources(user: str = Depends(require_admin)):
             "id_column":             s.id_column,
             "es_index":              s.es_index,
             "poll_interval_seconds": s.poll_interval_seconds,
+            "label":                 s.label,
+            "description":           s.description,
             "fields": [
                 {"column": f.column, "es_field": f.es_field, "es_type": f.es_type, "analyzer": f.analyzer}
                 for f in s.fields
@@ -768,6 +1209,8 @@ def admin_add_sql_source(body: SqlSourceCreate, user: str = Depends(require_admi
             es_index=body.es_index,
             fields=[f.model_dump() for f in body.fields],
             poll_interval_seconds=body.poll_interval_seconds,
+            label=body.label,
+            description=body.description,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -784,6 +1227,76 @@ def admin_remove_sql_source(name: str, user: str = Depends(require_admin)):
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@app.post("/admin/sql-sources/{name}/label")
+def admin_set_sql_source_label(name: str, body: LabelUpdate, user: str = Depends(require_admin)):
+    """Modifie le libellé d'affichage d'une source SQL — son nom
+    (registre + champ "source" des documents déjà indexés) ne change pas."""
+    try:
+        return sql_sources_config.set_label(name, body.label)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/admin/sql-sources/{name}/description")
+def admin_set_sql_source_description(name: str, body: DescriptionUpdate, user: str = Depends(require_admin)):
+    try:
+        return sql_sources_config.set_description(name, body.description)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# ── DSN SQL chiffrés (registre dynamique, alternative aux variables
+# d'environnement de connection_ref) — voir sql_dsn_registry.py ─────
+@app.get("/admin/sql-dsns")
+def admin_list_sql_dsns(user: str = Depends(require_admin)):
+    """Liste les DSN dynamiques enregistrés (nom + indice non sensible
+    schéma/hôte, jamais le DSN déchiffré ni son chiffré). Ne lève jamais
+    (même comportement que /admin/sql-sources : Redis injoignable dégrade
+    silencieusement vers une liste vide plutôt que de faire échouer la
+    route)."""
+    return sql_dsn_registry.list_names()
+
+
+@app.post("/admin/sql-dsns")
+def admin_add_sql_dsn(body: SqlDsnCreate, user: str = Depends(require_admin)):
+    """
+    Enregistre (ou remplace) un DSN chiffré dans Redis, sous un nom au
+    format variable d'environnement — ce nom devient ensuite utilisable
+    comme connection_ref d'une source SQL, à condition qu'aucune variable
+    d'environnement de ce nom n'existe déjà (elle resterait sinon
+    prioritaire, voir docsearch-ingestion/app/sql_indexer.py::_resolve_dsn).
+    Nécessite DSN_ENCRYPTION_KEY, définie à l'identique côté docsearch-api
+    (chiffrement ici) ET côté sql-worker/indexer-init (déchiffrement pour
+    se connecter réellement) — voir docsearch-infra/.env.example. Aucune
+    connexion à la base n'est testée ici : seule la forme du DSN est
+    vérifiée.
+    """
+    try:
+        return sql_dsn_registry.add_dsn(body.name, body.dsn)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.delete("/admin/sql-dsns/{name}")
+def admin_remove_sql_dsn(name: str, user: str = Depends(require_admin)):
+    """Retire un DSN chiffré du registre — toute source SQL dont le
+    connection_ref pointe encore vers ce nom échouera à son prochain
+    passage (sauf si une variable d'environnement du même nom existe) ;
+    aucune vérification qu'une source l'utilise encore, cohérent avec
+    DELETE /admin/sql-sources/{name} qui ne vérifie pas non plus les
+    dépendances inverses."""
+    try:
+        return sql_dsn_registry.remove_dsn(name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
 @app.get("/admin/web-sources")
 def admin_get_web_sources(user: str = Depends(require_admin)):
     return {
@@ -792,6 +1305,9 @@ def admin_get_web_sources(user: str = Depends(require_admin)):
             "es_index":              s.es_index,
             "acl_public":            s.acl_public,
             "poll_interval_seconds": s.poll_interval_seconds,
+            "label":                 s.label,
+            "description":           s.description,
+            "paused":                s.paused,
         }
         for name, s in web_sources_config.get_sources().items()
     }
@@ -813,6 +1329,8 @@ def admin_add_web_source(body: WebSourceCreate, user: str = Depends(require_admi
             es_index=body.es_index,
             acl_public=body.acl_public,
             poll_interval_seconds=body.poll_interval_seconds,
+            label=body.label,
+            description=body.description,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -825,6 +1343,47 @@ def admin_remove_web_source(name: str, user: str = Depends(require_admin)):
     ni es_index) ni les documents déjà indexés."""
     try:
         return web_sources_config.remove_source(name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/admin/web-sources/{name}/label")
+def admin_set_web_source_label(name: str, body: LabelUpdate, user: str = Depends(require_admin)):
+    """Modifie le libellé d'affichage d'une source web — son nom
+    (registre + champ "source" des documents déjà indexés) ne change pas."""
+    try:
+        return web_sources_config.set_label(name, body.label)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/admin/web-sources/{name}/description")
+def admin_set_web_source_description(name: str, body: DescriptionUpdate, user: str = Depends(require_admin)):
+    try:
+        return web_sources_config.set_description(name, body.description)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+class PauseUpdate(BaseModel):
+    paused: bool
+
+
+@app.post("/admin/web-sources/{name}/pause")
+def admin_set_web_source_paused(name: str, body: PauseUpdate, user: str = Depends(require_admin)):
+    """
+    Suspend/reprend la synchronisation crawl_index -> es_index pour une
+    source web (web-worker saute cette source à chaque tick tant que
+    paused=true). Ne pilote PAS le conteneur Elastic Open Web Crawler
+    lui-même (aucun accès Docker depuis cette API) : si ce conteneur
+    tourne en continu (mode "schedule"), il continue d'écrire dans
+    crawl_index — seule la répercussion vers DocSearch s'arrête. Les
+    documents déjà indexés dans es_index restent cherchables.
+    """
+    try:
+        return web_sources_config.set_paused(name, body.paused)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -844,7 +1403,7 @@ class SearchableUpdate(BaseModel):
 
 
 _SOURCE_REGISTRIES = {
-    "file": sources_config,
+    "file": file_sources_config,
     "sql":  sql_sources_config,
     "web":  web_sources_config,
 }
@@ -852,9 +1411,9 @@ _SOURCE_REGISTRIES = {
 
 def _all_sources_status() -> dict:
     """Fusionne les trois registres de sources en une seule liste, avec
-    le nombre de documents indexés par source — un index manquant
-    (source enregistrée mais jamais indexée, ou vidée) compte pour 0
-    plutôt que de faire échouer tout l'appel."""
+    le nombre de documents et la taille sur disque de chaque index — un
+    index manquant (source enregistrée mais jamais indexée, ou vidée)
+    compte pour 0 plutôt que de faire échouer tout l'appel."""
     result = {}
     for type_, registry in _SOURCE_REGISTRIES.items():
         for name, s in registry.get_sources().items():
@@ -862,12 +1421,23 @@ def _all_sources_status() -> dict:
                 indexed = es.count(index=s.es_index)["count"]
             except Exception:
                 indexed = 0
+            try:
+                # size_in_bytes de l'index PRIMAIRE (pas x nombre de
+                # replicas) — c'est l'espace occupé par les données elles-
+                # mêmes, l'unité pertinente ici plutôt que l'empreinte
+                # disque totale du cluster (voir /metrics pour celle-ci,
+                # calculée sur l'alias fédéré ES_SEARCH_ALIAS en entier).
+                size_bytes = es.indices.stats(index=s.es_index)["_all"]["primaries"]["store"]["size_in_bytes"]
+            except Exception:
+                size_bytes = 0
             result[name] = {
                 "type":       type_,
                 "es_index":   s.es_index,
-                "label":      getattr(s, "label", None) or name,
-                "searchable": s.searchable,
-                "indexed":    indexed,
+                "label":       getattr(s, "label", None) or name,
+                "description": getattr(s, "description", None) or "",
+                "searchable":  s.searchable,
+                "indexed":     indexed,
+                "size_bytes":  size_bytes,
             }
     return result
 
@@ -1004,6 +1574,251 @@ def admin_trigger_scan(
     return {"status": "démarré", "source": body.source, "subfolder": body.subfolder or "(dossier complet)"}
 
 
+# ── Mesure de satisfaction (pouce, NPS, clics, suggestions) ─────
+# Quatre signaux distincts, volontairement pas fusionnés :
+#   - feedback (pouce haut/bas) : explicite, par recherche (search_id).
+#   - NPS : explicite, sur l'outil en général, PAS rattaché à une
+#     recherche précise — occasionnel (cadence gérée côté client).
+#   - clics : implicite, toujours actif (aucun flag), par recherche.
+#   - suggestions : explicite, texte libre, PAS rattaché à une recherche
+#     précise — point d'entrée permanent dans l'en-tête (index.html).
+# feedback/NPS/suggestions sont individuellement suspendables
+# (engagement_config.py) sans redémarrage ; le tracking de clic n'a pas
+# cette option (signal passif, aucune UI ni friction ajoutée).
+
+class FeedbackCreate(BaseModel):
+    search_id: str
+    rating: str  # "up" | "down"
+
+
+class ClickCreate(BaseModel):
+    search_id: str
+    doc_id: str
+    position: int
+
+
+class NpsCreate(BaseModel):
+    score: int = Field(ge=0, le=10)
+
+
+class SuggestionCreate(BaseModel):
+    text: str
+    category: str | None = None   # "bug" | "idea" | "other", libre (pas de contrainte serveur)
+    anonymous: bool = True        # défaut anonyme — l'utilisateur doit explicitement décocher pour être identifié
+
+
+class EngagementConfigUpdate(BaseModel):
+    feedback_enabled:    bool | None = None
+    nps_enabled:         bool | None = None
+    suggestions_enabled: bool | None = None
+
+
+# ── Bascules d'interface (distinct de la mesure de satisfaction) ──
+class UiConfigUpdate(BaseModel):
+    chat_enabled:        bool | None = None
+    footer_enabled:      bool | None = None
+    admin_links_enabled: bool | None = None
+    export_enabled:      bool | None = None
+    help_enabled:        bool | None = None
+    collections_enabled: bool | None = None
+
+
+@app.get("/ui-config")
+def get_ui_config():
+    """Public (pas d'auth) — l'interface de recherche l'appelle pour
+    savoir si le lien "Assistant IA" doit être affiché dans l'en-tête."""
+    return ui_config.get_config()
+
+
+@app.get("/is-admin")
+def get_is_admin(x_user: str | None = Header(default=None)):
+    """
+    Public (jamais de 401/403 — voir is_admin(), version non levante de
+    require_admin()) : l'interface de recherche l'appelle pour savoir si
+    les liens "Administration"/"Statistiques" doivent être affichés —
+    ces pages échoueraient de toute façon avec un 403 pour un
+    utilisateur non admin, autant ne pas les proposer.
+    """
+    return {"is_admin": is_admin(x_user)}
+
+
+@app.post("/admin/ui-config")
+def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)):
+    """Active/désactive des éléments d'interface (ex: lien Assistant IA,
+    pied de page) — effectif immédiatement pour toute nouvelle page
+    chargée."""
+    try:
+        config = ui_config.get_config()
+        if body.chat_enabled is not None:
+            config = ui_config.set_param("chat_enabled", body.chat_enabled)
+        if body.footer_enabled is not None:
+            config = ui_config.set_param("footer_enabled", body.footer_enabled)
+        if body.admin_links_enabled is not None:
+            config = ui_config.set_param("admin_links_enabled", body.admin_links_enabled)
+        if body.export_enabled is not None:
+            config = ui_config.set_param("export_enabled", body.export_enabled)
+        if body.help_enabled is not None:
+            config = ui_config.set_param("help_enabled", body.help_enabled)
+        if body.collections_enabled is not None:
+            config = ui_config.set_param("collections_enabled", body.collections_enabled)
+        return config
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/engagement-config")
+def get_engagement_config():
+    """
+    Public (pas d'auth) — l'interface de recherche l'appelle pour savoir
+    si le pouce et le NPS doivent être affichés. Ne PAS confondre avec
+    /admin/engagement-config (même donnée, réservé à l'admin pour
+    modification) : cette route-ci n'expose rien de sensible.
+    """
+    return engagement_config.get_config()
+
+
+@app.post("/feedback")
+def submit_feedback(body: FeedbackCreate, request: Request, x_user: str | None = Header(default=None)):
+    """
+    Enregistre un pouce haut/bas pour une recherche précise (search_id
+    renvoyé par POST /search). Simple mise à jour partielle du document
+    search_logs déjà existant — écrase un avis précédent sur la même
+    recherche plutôt que d'en accumuler plusieurs (un seul avis a du sens
+    par recherche).
+    """
+    if not engagement_config.get_config()["feedback_enabled"]:
+        raise HTTPException(status_code=403, detail="Le recueil d'avis est désactivé.")
+    if body.rating not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="rating doit être 'up' ou 'down'.")
+    try:
+        es.update(index=search_log.SEARCH_LOG_INDEX, id=body.search_id, doc={"feedback": body.rating})
+    except Exception as e:
+        if "not_found" in str(e).lower():
+            raise HTTPException(status_code=404, detail="search_id introuvable.")
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "ok"}
+
+
+@app.post("/click")
+def submit_click(body: ClickCreate):
+    """
+    Enregistre le clic sur UN résultat d'une recherche précise (position
+    dans la liste, 0-indexée) — signal toujours actif, pas de flag
+    d'activation (voir docstring de section). Append via script Painless
+    plutôt qu'une mise à jour de champ simple : "clicks" est une LISTE,
+    un même search_id peut recevoir plusieurs clics (résultats consultés
+    un par un avant de trouver le bon).
+    """
+    try:
+        es.update(
+            index=search_log.SEARCH_LOG_INDEX,
+            id=body.search_id,
+            script={
+                "source": (
+                    "if (ctx._source.clicks == null) { ctx._source.clicks = [] } "
+                    "ctx._source.clicks.add(params.click)"
+                ),
+                "params": {
+                    "click": {
+                        "doc_id":    body.doc_id,
+                        "position":  body.position,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                },
+            },
+        )
+    except Exception as e:
+        # Best-effort : un clic non enregistré (search_id déjà expiré,
+        # ES momentanément indisponible...) ne doit jamais remonter comme
+        # erreur visible — l'utilisateur est en train de consulter un
+        # document, pas d'interagir avec le tracking.
+        logger.warning(f"[click] Échec d'enregistrement pour search_id={body.search_id} : {e}")
+    return {"status": "ok"}
+
+
+@app.post("/nps")
+def submit_nps(body: NpsCreate, x_user: str | None = Header(default=None)):
+    """Enregistre une réponse NPS (0-10), indépendamment de toute
+    recherche précise — voir nps_log.py."""
+    if not engagement_config.get_config()["nps_enabled"]:
+        raise HTTPException(status_code=403, detail="Le NPS est désactivé.")
+    username = resolve_user(x_user)
+    nps_log.log_nps(es, username=username, score=body.score)
+    return {"status": "ok"}
+
+
+@app.post("/suggestions")
+def submit_suggestion(body: SuggestionCreate, x_user: str | None = Header(default=None)):
+    """Enregistre une suggestion libre, indépendamment de toute recherche
+    précise — voir suggestion_log.py. Anonyme par défaut ; l'identité
+    n'est résolue via X-User que si l'utilisateur a explicitement décoché
+    "rester anonyme" côté UI (body.anonymous == False)."""
+    if not engagement_config.get_config()["suggestions_enabled"]:
+        raise HTTPException(status_code=403, detail="Le recueil de suggestions est désactivé.")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="La suggestion ne peut pas être vide.")
+    username = None if body.anonymous else resolve_user(x_user)
+    suggestion_log.log_suggestion(es, text=text, category=body.category, username=username)
+    return {"status": "ok"}
+
+
+@app.post("/admin/engagement-config")
+def admin_set_engagement_config(body: EngagementConfigUpdate, user: str = Depends(require_admin)):
+    """Active/désactive le pouce, le NPS et/ou les suggestions —
+    effectif immédiatement pour toute nouvelle page chargée (l'UI relit
+    /engagement-config à chaque chargement, pas de cache long côté
+    client)."""
+    try:
+        config = engagement_config.get_config()
+        if body.feedback_enabled is not None:
+            config = engagement_config.set_param("feedback_enabled", body.feedback_enabled)
+        if body.nps_enabled is not None:
+            config = engagement_config.set_param("nps_enabled", body.nps_enabled)
+        if body.suggestions_enabled is not None:
+            config = engagement_config.set_param("suggestions_enabled", body.suggestions_enabled)
+        return config
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/admin/nps-summary")
+def admin_nps_summary(user: str = Depends(require_admin)):
+    """Score NPS agrégé + répartition détracteurs/passifs/promoteurs,
+    pour la page /stats.html."""
+    return nps_log.summary(es)
+
+
+@app.get("/admin/suggestions")
+def admin_list_suggestions(
+    user:  str = Depends(require_admin),
+    size:  int = 50,
+    from_: int = Query(0, alias="from"),
+):
+    """Liste paginée des suggestions, plus récentes d'abord — pour la
+    page /stats.html."""
+    return suggestion_log.list_suggestions(es, size=size, from_=from_)
+
+
+class SuggestionStatusUpdate(BaseModel):
+    status: str
+
+
+@app.post("/admin/suggestions/{suggestion_id}/status")
+def admin_set_suggestion_status(suggestion_id: str, body: SuggestionStatusUpdate, user: str = Depends(require_admin)):
+    """Suivi de traitement d'une suggestion (nouveau/en_cours/traite) —
+    purement interne à l'équipe, n'informe jamais l'auteur (voir
+    suggestion_log.py : l'anonymat par défaut rend une notification
+    impossible à garantir de toute façon)."""
+    try:
+        suggestion_log.set_status(es, suggestion_id=suggestion_id, status=body.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Suggestion introuvable : {e}")
+    return {"status": "ok"}
+
+
 # ── Statistiques de recherche ───────────────────────────────────
 @app.get("/admin/search-logs/summary")
 def admin_search_logs_summary(user: str = Depends(require_admin)):
@@ -1019,11 +1834,14 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
                 "by_day": {
                     "date_histogram": {"field": "timestamp", "calendar_interval": "day"},
                 },
+                "feedback_up":   {"filter": {"term": {"feedback": "up"}}},
+                "feedback_down": {"filter": {"term": {"feedback": "down"}}},
             },
         )
     except Exception as e:
         if "index_not_found" in str(e).lower():
-            return {"total_searches": 0, "unique_users": 0, "unique_ips": 0, "by_day": []}
+            return {"total_searches": 0, "unique_users": 0, "unique_ips": 0, "by_day": [],
+                     "feedback_up": 0, "feedback_down": 0}
         raise HTTPException(status_code=500, detail=str(e))
 
     return {
@@ -1034,7 +1852,70 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
             {"date": b["key_as_string"][:10], "count": b["doc_count"]}
             for b in res["aggregations"]["by_day"]["buckets"][-14:]
         ],
+        "feedback_up":   res["aggregations"]["feedback_up"]["doc_count"],
+        "feedback_down": res["aggregations"]["feedback_down"]["doc_count"],
     }
+
+
+@app.get("/admin/search-logs/zero-results")
+def admin_zero_result_searches(user: str = Depends(require_admin), size: int = 50):
+    """Requêtes ayant retourné 0 résultat, groupées et comptées (les plus
+    fréquentes en premier) — à partir des logs déjà collectés par chaque
+    recherche (voir search_log.py), aucun nouveau tracking nécessaire.
+    Aide à repérer du contenu manquant ou des requêtes mal formulées."""
+    try:
+        res = es.search(
+            index=search_log.SEARCH_LOG_INDEX,
+            size=0,
+            query={"term": {"total_results": 0}},
+            aggs={
+                "by_query": {
+                    "terms": {"field": "query.keyword", "size": size, "order": {"_count": "desc"}},
+                    "aggs": {
+                        "last_seen": {"max": {"field": "timestamp", "format": "strict_date_optional_time"}},
+                    },
+                },
+            },
+        )
+    except Exception as e:
+        if "index_not_found" in str(e).lower():
+            return {"total_zero_result_searches": 0, "results": []}
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "total_zero_result_searches": res["hits"]["total"]["value"],
+        "results": [
+            {
+                "query":     b["key"],
+                "count":     b["doc_count"],
+                "last_seen": b["last_seen"]["value_as_string"],
+            }
+            for b in res["aggregations"]["by_query"]["buckets"]
+        ],
+    }
+
+
+# ── Journal d'audit ──────────────────────────────────────────────
+@app.get("/admin/audit-log")
+def admin_get_audit_log(
+    user:  str = Depends(require_admin),
+    size:  int = 50,
+    from_: int = Query(0, alias="from"),
+):
+    """Liste paginée des actions d'administration, plus récentes
+    d'abord — alimentée par audit_log_middleware, voir audit_log.py."""
+    return audit_log.list_actions(es, size=size, from_=from_)
+
+
+def _search_logs_query(q: str | None, username: str | None) -> dict:
+    """Filtre partagé entre /admin/search-logs (paginé) et
+    /admin/search-logs/export (export complet) — mêmes critères."""
+    must = []
+    if q:
+        must.append({"match": {"query": q}})
+    if username:
+        must.append({"term": {"username": username.lower()}})
+    return {"bool": {"must": must}} if must else {"match_all": {}}
 
 
 @app.get("/admin/search-logs")
@@ -1047,12 +1928,7 @@ def admin_search_logs(
 ):
     """Liste paginée des recherches effectuées, plus récentes d'abord —
     qui, quand, depuis quelle IP, quelle requête, combien de résultats."""
-    must = []
-    if q:
-        must.append({"match": {"query": q}})
-    if username:
-        must.append({"term": {"username": username.lower()}})
-    query = {"bool": {"must": must}} if must else {"match_all": {}}
+    query = _search_logs_query(q, username)
 
     try:
         res = es.search(
@@ -1071,6 +1947,94 @@ def admin_search_logs(
         "total":   res["hits"]["total"]["value"],
         "results": [{"id": h["_id"], **h["_source"]} for h in res["hits"]["hits"]],
     }
+
+
+# Plafond de lignes exportées : au-delà, l'export reste utilisable (les
+# N premières lignes, plus récentes d'abord) plutôt que de saturer la
+# mémoire de l'API ou du navigateur sur un historique de plusieurs
+# centaines de milliers de recherches.
+SEARCH_LOGS_EXPORT_MAX_ROWS = 20_000
+
+
+def _join(value) -> str:
+    """Aplati une valeur potentiellement multi-valuée (extension, author,
+    source...) en texte lisible dans une cellule de tableur."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    return str(value)
+
+
+@app.get("/admin/search-logs/export")
+def admin_export_search_logs(
+    user:     str = Depends(require_admin),
+    q:        str | None = None,
+    username: str | None = None,
+):
+    """
+    Export XLSX de l'historique des recherches — mêmes filtres que
+    GET /admin/search-logs (q, username), mais TOUTES les lignes
+    correspondantes (jusqu'à SEARCH_LOGS_EXPORT_MAX_ROWS) plutôt qu'une
+    seule page, pour analyse hors-ligne dans un tableur.
+    """
+    from openpyxl import Workbook
+
+    query = _search_logs_query(q, username)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Historique des recherches"
+    ws.append([
+        "Date / heure", "Utilisateur", "Requête", "Champ recherché", "Source(s)",
+        "Extension(s)", "Auteur(s)", "Dossier", "Période début", "Période fin",
+        "Résultats", "Documents retournés", "Avis", "Clics",
+    ])
+
+    try:
+        hits = es_scan(
+            es,
+            index=search_log.SEARCH_LOG_INDEX,
+            query={"query": query, "sort": [{"timestamp": {"order": "desc"}}]},
+            preserve_order=True,
+        )
+        for i, hit in enumerate(hits):
+            if i >= SEARCH_LOGS_EXPORT_MAX_ROWS:
+                break
+            s = hit["_source"]
+            ws.append([
+                s.get("timestamp", ""),
+                s.get("username", ""),
+                s.get("query", ""),
+                s.get("search_in", ""),
+                _join(s.get("source")),
+                _join(s.get("extension")),
+                _join(s.get("author")),
+                _join(s.get("folder")),
+                s.get("date_from", ""),
+                s.get("date_to", ""),
+                s.get("total_results", 0),
+                _join(s.get("result_files")),
+                s.get("feedback", ""),
+                len(s.get("clicks") or []),
+            ])
+    except Exception as e:
+        if "index_not_found" not in str(e).lower():
+            raise HTTPException(status_code=500, detail=str(e))
+
+    for col_idx, width in enumerate([19, 14, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8], start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    filename = f"historique-recherches-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── Pages ──────────────────────────────────────────────────────

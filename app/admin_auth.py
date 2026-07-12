@@ -84,3 +84,19 @@ def require_admin(x_user: str | None = Header(default=None)) -> str:
         )
 
     return x_user
+
+
+def is_admin(x_user: str | None) -> bool:
+    """
+    Version non levante de require_admin() — répond juste "oui/non",
+    pour un usage hors contrôle d'accès : l'interface de recherche
+    l'appelle pour savoir si elle doit afficher les liens "Administration"
+    /"Statistiques" (une page qui échouerait de toute façon avec 403
+    n'a pas à être proposée). Mêmes règles, jamais d'exception.
+    """
+    if ADMIN_AUTH_DISABLED:
+        return True
+    if not x_user or not ADMIN_GROUP or not LDAP_ENABLED:
+        return False
+    groups = [g.lower() for g in get_user_groups(x_user.lower())]
+    return ADMIN_GROUP in groups

@@ -8,7 +8,7 @@
 # path_filter.py — Inclusion / exclusion de sous-dossiers par motifs glob
 #
 # Permet d'exclure ou de restreindre l'indexation à certains sous-dossiers
-# d'une SOURCE (voir sources_config.py), modifiable à chaud (Redis), sans
+# d'une SOURCE (voir file_sources_config.py), modifiable à chaud (Redis), sans
 # redémarrage. Même principe que filetype_config.py et runtime_config.py.
 #
 # Structure stockée (clé Redis "docsearch:config:pathfilters" pour la
@@ -37,7 +37,7 @@ import time
 import fnmatch
 import logging
 
-from sources_config import DEFAULT_SOURCE_NAME
+from file_sources_config import DEFAULT_SOURCE_NAME
 
 logger = logging.getLogger(__name__)
 

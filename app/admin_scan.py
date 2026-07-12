@@ -13,7 +13,7 @@
 # le contenu d'une archive, seulement de savoir qu'il s'agit d'une
 # archive pour la publier telle quelle sur Kafka.
 #
-# Multi-source : chaque appel cible une source précise (sources_config.py,
+# Multi-source : chaque appel cible une source précise (file_sources_config.py,
 # lui aussi dupliqué depuis docsearch-ingestion) — scan et purge opèrent
 # toujours sur le dossier et l'index d'UNE SEULE source à la fois, jamais
 # sur toutes en une passe (cohérent avec producer.py côté ingestion).
@@ -30,7 +30,7 @@ from kafka.errors import KafkaError
 
 from filetype_config import is_allowed
 from path_filter import is_path_allowed, is_dir_excluded, matches_pattern
-from sources_config import Source, get_source, DEFAULT_SOURCE_NAME
+from file_sources_config import Source, get_source, DEFAULT_SOURCE_NAME
 
 logger = logging.getLogger(__name__)
 

@@ -9,7 +9,7 @@
 #
 # Permet d'activer/désactiver des extensions et de fixer une taille
 # maximale par type, SANS redémarrer producer.py / worker.py / watcher.py.
-# Chaque SOURCE (sources_config.py) a sa propre configuration,
+# Chaque SOURCE (file_sources_config.py) a sa propre configuration,
 # indépendante des autres — un même type de fichier peut par exemple
 # être autorisé pour "documents" et désactivé pour "finance".
 #
@@ -32,7 +32,7 @@ import json
 import time
 import logging
 
-from sources_config import DEFAULT_SOURCE_NAME
+from file_sources_config import DEFAULT_SOURCE_NAME
 
 logger = logging.getLogger(__name__)
 

@@ -2,7 +2,7 @@
 #
 # Port de docsearch-ingestion/app/sql_sources_config.py — dupliqué à
 # l'identique ici (impossible d'importer un autre dépôt dans
-# l'architecture multi-dépôts, même rationale que sources_config.py /
+# l'architecture multi-dépôts, même rationale que file_sources_config.py /
 # admin_scan.py). Ce module est totalement autonome (Redis + variables
 # d'environnement, aucune dépendance vers le reste de l'ingestion) : il
 # peut être copié tel quel entre les deux dépôts sans adaptation.
@@ -11,7 +11,7 @@
 #
 # Une "source SQL" = une requête SELECT sur une base PostgreSQL ou MySQL,
 # dont chaque ligne devient un document dans son propre index Elasticsearch.
-# Même principe que sources_config.py (registre vivant dans Redis, relu à
+# Même principe que file_sources_config.py (registre vivant dans Redis, relu à
 # chaud par sql_worker.py, sans redémarrage de conteneur) mais un modèle
 # différent : pas de dossier/watcher filesystem, une requête + un mapping
 # explicite de colonnes + un identifiant de connexion.
@@ -39,7 +39,7 @@
 # seul sql-worker/sql_indexer.py, côté docsearch-ingestion, se connecte
 # réellement aux bases). Voir docsearch-ingestion/app/sql_indexer.py.
 #
-# Contrairement à sources_config.py, il n'existe PAS de source par défaut
+# Contrairement à file_sources_config.py, il n'existe PAS de source par défaut
 # : une installation sans source SQL enregistrée n'en a simplement aucune
 # à traiter (sql_worker.py tourne alors sans rien faire).
 
@@ -63,7 +63,7 @@ SUPPORTED_DB_TYPES = ("postgresql", "mysql")
 SUPPORTED_ES_TYPES = ("keyword", "text", "long", "double", "date", "boolean")
 
 # Nom de source/index/colonne valides : alphanumérique + tiret/underscore,
-# jamais vide — même contrainte que sources_config.py, pour les mêmes
+# jamais vide — même contrainte que file_sources_config.py, pour les mêmes
 # raisons (évite qu'un nom mal formé finisse comme composant d'une clé
 # Redis ou d'un nom d'index ES).
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -88,7 +88,9 @@ class SqlSource:
     id_column: str
     es_index: str
     poll_interval_seconds: int
+    label: str = ""
     searchable: bool = True
+    description: str = ""
     fields: tuple[FieldMapping, ...] = field(default_factory=tuple)
 
 
@@ -163,7 +165,9 @@ def _to_source(name: str, entry: dict) -> SqlSource:
         id_column=entry["id_column"],
         es_index=entry["es_index"],
         poll_interval_seconds=int(entry.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
+        label=entry.get("label") or name,
         searchable=entry.get("searchable", True),
+        description=entry.get("description") or "",
         fields=fields,
     )
 
@@ -250,7 +254,7 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, db_type: str, connection_ref: str, query: str, id_column: str,
     es_index: str, fields: list[dict], poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
-    searchable: bool = True,
+    label: str | None = None, searchable: bool = True, description: str | None = None,
 ) -> dict:
     """
     Enregistre une nouvelle source SQL (ou met à jour une source
@@ -277,12 +281,12 @@ def add_source(
                 raise ValueError(
                     f"L'index '{es_index}' est déjà utilisé par la source SQL '{other_name}'."
                 )
-        # Vérifie aussi contre les sources FICHIERS (sources_config.py) —
+        # Vérifie aussi contre les sources FICHIERS (file_sources_config.py) —
         # un même index partagé entre une source fichier et une source
         # SQL mélangerait deux mappings incompatibles dans le même index.
         # Import différé : évite une dépendance circulaire au chargement
-        # du module (sources_config.py n'importe jamais celui-ci).
-        from sources_config import get_sources as get_file_sources
+        # du module (file_sources_config.py n'importe jamais celui-ci).
+        from file_sources_config import get_sources as get_file_sources
         for other_name, other in get_file_sources().items():
             if other.es_index == es_index:
                 raise ValueError(
@@ -295,7 +299,9 @@ def add_source(
             "id_column":             id_column,
             "es_index":              es_index,
             "poll_interval_seconds": poll_interval_seconds,
+            "label":                 label or name,
             "searchable":            searchable,
+            "description":           description or "",
             "fields":                fields,
         }
 
@@ -321,11 +327,43 @@ def remove_source(name: str) -> dict:
     """
     Retire une source SQL du registre — sql_worker.py arrête de
     l'interroger. NE supprime PAS l'index Elasticsearch ni les documents
-    déjà indexés (cohérent avec sources_config.remove_source).
+    déjà indexés (cohérent avec file_sources_config.remove_source).
     """
     def mutate(sources):
         if name not in sources:
             raise KeyError(f"Source SQL inconnue : '{name}'")
         sources.pop(name, None)
+
+    return _read_write(mutate)
+
+
+def set_label(name: str, label: str) -> dict:
+    """
+    Modifie le LIBELLÉ d'affichage d'une source SQL, sans toucher à son
+    nom (clé de registre), sa connexion, sa requête ni son es_index —
+    contrairement à l'ancien rename_source(), le nom qui identifie la
+    source dans le registre et dans le champ "source" des documents déjà
+    indexés ne change jamais, donc aucune répercussion sur l'index ES
+    n'est nécessaire ici.
+    """
+    if not label.strip():
+        raise ValueError("Le libellé ne peut pas être vide.")
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source SQL inconnue : '{name}'")
+        sources[name]["label"] = label.strip()
+
+    return _read_write(mutate)
+
+
+def set_description(name: str, description: str) -> dict:
+    """Modifie la description d'une source SQL (texte libre, affiché
+    dans l'admin — n'affecte ni l'ingestion ni la recherche)."""
+
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source SQL inconnue : '{name}'")
+        sources[name]["description"] = description.strip()
 
     return _read_write(mutate)
