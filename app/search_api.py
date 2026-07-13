@@ -418,6 +418,22 @@ def get_searchable_sources():
     return sorted(result, key=lambda s: s["label"].lower())
 
 
+@app.get("/custom-facets")
+def get_custom_facets():
+    """
+    Public (pas d'auth) — {es_field: label} de TOUTES les facettes SQL
+    personnalisées actives, toutes sources cherchables confondues
+    (`_active_custom_facets([])`, même fonction que `/search`, sans
+    filtre de source). Contrairement aux facettes renvoyées par
+    `/search` (dérivées des résultats d'UNE recherche déjà lancée), ceci
+    est disponible dès le chargement de la page — nécessaire pour que la
+    syntaxe avancée de la barre de recherche (ex: `bureau:Paris`, voir
+    index.html) reconnaisse un opérateur personnalisé avant même la
+    première recherche.
+    """
+    return _active_custom_facets([])
+
+
 def _resolve_doc_index(doc_id: str) -> str:
     """
     Un doc_id seul ne dit pas dans quel index il vit (recherche
