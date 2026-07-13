@@ -108,6 +108,11 @@ class Source:
     collectable: bool = True
     description: str = ""
     display_style: str = "default"
+    # Active l'OCR (Tesseract via Tika, voir indexer.py:_ocr_headers) pour
+    # les PDF scannés et images (jpg/png/...) de cette source — désactivé
+    # par défaut car coûteux en CPU, à activer explicitement pour les
+    # sources qui en ont réellement besoin (voir set_ocr_enabled()).
+    ocr_enabled: bool = False
 
 
 _cache: dict = {}
@@ -182,6 +187,7 @@ def _to_source(name: str, entry: dict) -> Source:
         collectable=entry.get("collectable", True),
         description=entry.get("description") or "",
         display_style=entry.get("display_style") or "default",
+        ocr_enabled=entry.get("ocr_enabled", False),
     )
 
 
@@ -245,6 +251,7 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, es_index: str, subfolder: str | None = None, label: str | None = None,
     searchable: bool = True, collectable: bool = True, description: str | None = None,
+    ocr_enabled: bool = False,
 ) -> dict:
     """
     Enregistre une nouvelle source (ou met à jour une source existante du
@@ -255,9 +262,10 @@ def add_source(
 
     ATTENTION : cette fonction REMPLACE entièrement l'entrée existante
     (pas de fusion partielle) — un appelant qui réenregistre une source
-    déjà configurée doit relire `searchable`/`collectable` au préalable
-    (voir /admin/all-sources) et les repasser explicitement, sous peine
-    de réinitialiser ces bascules à leur valeur par défaut (True).
+    déjà configurée doit relire `searchable`/`collectable`/`ocr_enabled`
+    au préalable (voir /admin/all-sources et /admin/file-sources) et les
+    repasser explicitement, sous peine de réinitialiser ces bascules à
+    leur valeur par défaut (True/True/False).
     """
     _validate_name(name, "Nom de source")
     _validate_name(es_index, "Nom d'index Elasticsearch")
@@ -276,6 +284,7 @@ def add_source(
             "searchable":  searchable,
             "collectable": collectable,
             "description": description or "",
+            "ocr_enabled": ocr_enabled,
         }
 
     return _read_write(mutate)
@@ -315,6 +324,24 @@ def set_collectable(name: str, collectable: bool) -> dict:
                 f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
             )
         sources[name]["collectable"] = collectable
+
+    return _read_write(mutate)
+
+
+def set_ocr_enabled(name: str, ocr_enabled: bool) -> dict:
+    """
+    Active/désactive l'OCR (Tesseract via Tika) pour cette source — sans
+    effet sur les documents déjà indexés (pas de réextraction
+    automatique : un fichier déjà indexé sans OCR ne redevient cherchable
+    par son contenu OCRisé qu'au prochain passage watcher/scan qui le
+    modifie, ou via une réindexation explicite de la source).
+    """
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(
+                f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
+            )
+        sources[name]["ocr_enabled"] = ocr_enabled
 
     return _read_write(mutate)
 

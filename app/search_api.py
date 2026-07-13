@@ -35,6 +35,7 @@ import engagement_config
 import ui_config
 import display_styles_config
 import saved_searches
+import alert_notifications
 import saved_collections
 import custom_keywords
 import audit_log
@@ -166,6 +167,11 @@ class SavedSearchCreate(BaseModel):
     date_from: str | None = None
     date_to:   str | None = None
     sort:      str = "_score"
+
+
+class SavedSearchAlertUpdate(BaseModel):
+    enabled:   bool
+    frequency: str = "daily"   # "daily" | "weekly" — voir saved_searches.set_alert()
 
 
 class SavedCollectionCreate(BaseModel):
@@ -953,6 +959,53 @@ def remove_saved_search(search_id: str, x_user: str | None = Header(default=None
         raise HTTPException(status_code=503, detail=str(e))
 
 
+# ── Alertes sur recherches sauvegardées ──────────────────────────────
+# Entièrement suspendable depuis l'admin (ui_config.alerts_enabled) :
+# désactivé, toutes les routes ci-dessous renvoient 403, y compris la
+# simple consultation des notifications déjà déposées — même principe
+# que _require_collections_enabled() plus bas.
+def _require_alerts_enabled() -> None:
+    if not ui_config.get_config().get("alerts_enabled", True):
+        raise HTTPException(status_code=403, detail="Les alertes sont désactivées.")
+
+
+@app.patch("/saved-searches/{search_id}/alert")
+def update_saved_search_alert(search_id: str, body: SavedSearchAlertUpdate, x_user: str | None = Header(default=None)):
+    _require_alerts_enabled()
+    username = resolve_user(x_user)
+    if body.frequency not in ("daily", "weekly"):
+        raise HTTPException(status_code=400, detail="frequency doit être 'daily' ou 'weekly'")
+    try:
+        return saved_searches.set_alert(username, search_id, body.enabled, body.frequency)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Recherche sauvegardée introuvable")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/alerts")
+def list_alerts(x_user: str | None = Header(default=None)):
+    """Notifications in-app de l'utilisateur (voir alert_worker.py, qui
+    les dépose en arrière-plan) — la plus récente en premier."""
+    _require_alerts_enabled()
+    username = resolve_user(x_user)
+    return alert_notifications.list_notifications(username)
+
+
+@app.post("/alerts/{notif_id}/seen")
+def mark_alert_seen(notif_id: str, x_user: str | None = Header(default=None)):
+    _require_alerts_enabled()
+    username = resolve_user(x_user)
+    return alert_notifications.mark_seen(username, notif_id)
+
+
+@app.post("/alerts/mark-all-seen")
+def mark_all_alerts_seen(x_user: str | None = Header(default=None)):
+    _require_alerts_enabled()
+    username = resolve_user(x_user)
+    return alert_notifications.mark_all_seen(username)
+
+
 # ── Collections de documents ──────────────────────────────────────────
 # Strictement personnel (voir saved_collections.py) — entièrement
 # suspendable depuis l'admin (ui_config.collections_enabled) : désactivé,
@@ -1287,6 +1340,10 @@ class SourceCreate(BaseModel):
     subfolder: str | None = None
     label: str | None = None
     description: str | None = None
+    # None = "ne pas modifier" (distinct de False = "désactiver
+    # explicitement") — nécessaire car add_source() REMPLACE l'entrée
+    # entière, voir admin_add_source().
+    ocr_enabled: bool | None = None
 
 
 class SqlFieldMapping(BaseModel):
@@ -1367,10 +1424,15 @@ class DescriptionUpdate(BaseModel):
     description: str
 
 
+class OcrUpdate(BaseModel):
+    ocr_enabled: bool
+
+
 @app.get("/admin/file-sources")
 def admin_get_sources(user: str = Depends(require_admin)):
     return {
-        name: {"es_index": s.es_index, "folder": s.folder, "label": s.label, "description": s.description}
+        name: {"es_index": s.es_index, "folder": s.folder, "label": s.label,
+               "description": s.description, "ocr_enabled": s.ocr_enabled}
         for name, s in file_sources_config.get_sources().items()
     }
 
@@ -1379,14 +1441,16 @@ def admin_get_sources(user: str = Depends(require_admin)):
 def admin_add_source(body: SourceCreate, user: str = Depends(require_admin)):
     try:
         # add_source() REMPLACE l'entrée existante en entier — on relit
-        # searchable/collectable au préalable pour ne pas les réinitialiser
-        # à True au premier "Modifier" venu (voir add_source() docstring).
+        # searchable/collectable/ocr_enabled au préalable pour ne pas les
+        # réinitialiser à leur valeur par défaut au premier "Modifier"
+        # venu (voir add_source() docstring).
         existing = file_sources_config.get_sources().get(body.name)
         return file_sources_config.add_source(
             body.name, body.es_index, subfolder=body.subfolder, label=body.label,
             searchable=existing.searchable if existing else True,
             collectable=existing.collectable if existing else True,
             description=body.description,
+            ocr_enabled=body.ocr_enabled if body.ocr_enabled is not None else (existing.ocr_enabled if existing else False),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1419,6 +1483,20 @@ def admin_set_source_label(name: str, body: LabelUpdate, user: str = Depends(req
 def admin_set_source_description(name: str, body: DescriptionUpdate, user: str = Depends(require_admin)):
     try:
         return file_sources_config.set_description(name, body.description)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/admin/file-sources/{name}/ocr")
+def admin_set_source_ocr(name: str, body: OcrUpdate, user: str = Depends(require_admin)):
+    """Active/désactive l'OCR (Tesseract via Tika) pour une source
+    fichier — n'a de sens que pour les sources fichiers (PDF scannés,
+    images), contrairement aux bascules génériques searchable/
+    collectable/display-style : volontairement absente de
+    _SOURCE_REGISTRIES//admin/all-sources/{name}/... (sql/web n'ont pas
+    de notion d'OCR)."""
+    try:
+        return file_sources_config.set_ocr_enabled(name, body.ocr_enabled)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -1944,6 +2022,7 @@ class UiConfigUpdate(BaseModel):
     help_enabled:        bool | None = None
     collections_enabled: bool | None = None
     custom_keywords_enabled: bool | None = None
+    alerts_enabled:      bool | None = None
 
 
 @app.get("/ui-config")
@@ -1986,6 +2065,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("collections_enabled", body.collections_enabled)
         if body.custom_keywords_enabled is not None:
             config = ui_config.set_param("custom_keywords_enabled", body.custom_keywords_enabled)
+        if body.alerts_enabled is not None:
+            config = ui_config.set_param("alerts_enabled", body.alerts_enabled)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
