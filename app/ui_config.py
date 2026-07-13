@@ -47,6 +47,15 @@ DEFAULT_UI_CONFIG = {
                                         # pipeline d'ingestion (docsearch-ingestion ne consulte jamais
                                         # ce flag — seule la création/modification depuis l'UI est
                                         # concernée, pas la réapplication à l'indexation).
+    "alerts_enabled":      True,   # alertes sur recherches sauvegardées ("🔔 Alertes" dans
+                                    # l'en-tête + bascule par recherche, voir saved_searches.py/
+                                    # alert_worker.py) — désactivé, les routes /alerts* et
+                                    # PATCH /saved-searches/{id}/alert renvoient 403. Le worker
+                                    # d'arrière-plan continue de tourner mais ne fait plus rien
+                                    # d'utile (aucune alerte n'est plus activable), et les
+                                    # notifications déjà déposées restent lisibles nulle part
+                                    # tant que le flag est désactivé (l'UI qui les affiche est
+                                    # elle-même masquée).
 }
 
 _cache: dict = {}

@@ -8,6 +8,11 @@
 #
 # Stockage : une clé Redis par utilisateur ("docsearch:saved_searches:{user}")
 # contenant la liste JSON de ses recherches enregistrées.
+#
+# Chaque entrée peut aussi porter une alerte (alert_enabled/alert_frequency/
+# last_alert_check, gérés via set_alert()/update_alert_check()) — voir
+# alert_worker.py, qui rejoue périodiquement les critères pour détecter les
+# nouveaux documents, et alert_notifications.py, qui stocke le résultat.
 
 import os
 import json
@@ -88,6 +93,12 @@ def save_search(username: str, name: str, criteria: dict) -> dict:
         "name": name.strip(),
         "created_at": datetime.now(timezone.utc).isoformat(),
         **criteria,
+        # Alerte désactivée par défaut (voir alert_worker.py) — last_alert_check
+        # reste vide tant qu'aucune alerte n'a jamais été activée, set_alert()
+        # le fixe à l'activation.
+        "alert_enabled": False,
+        "alert_frequency": "daily",
+        "last_alert_check": None,
     }
     saved.append(entry)
     client.set(KEY_PREFIX + username, json.dumps(saved))
@@ -103,3 +114,52 @@ def delete_saved(username: str, search_id: str) -> list[dict]:
     saved = [s for s in saved if s.get("id") != search_id]
     client.set(KEY_PREFIX + username, json.dumps(saved))
     return saved
+
+
+def set_alert(username: str, search_id: str, enabled: bool, frequency: str) -> dict:
+    """Active/désactive l'alerte d'une recherche sauvegardée, ou change sa
+    fréquence. Remet systématiquement last_alert_check à maintenant plutôt
+    que de garder l'ancienne valeur : sans ça, une recherche qui matche déjà
+    des milliers de documents existants déclencherait une notification
+    massive dès le premier tick après (ré)activation, sur des documents qui
+    n'ont en réalité rien de "nouveau". Lève KeyError si l'id est inconnu."""
+    client = _require_client()
+    raw = client.get(KEY_PREFIX + username)
+    saved = json.loads(raw) if raw else []
+    for s in saved:
+        if s.get("id") == search_id:
+            s["alert_enabled"] = enabled
+            s["alert_frequency"] = frequency
+            s["last_alert_check"] = datetime.now(timezone.utc).isoformat()
+            client.set(KEY_PREFIX + username, json.dumps(saved))
+            return s
+    raise KeyError(search_id)
+
+
+def update_alert_check(username: str, search_id: str, checked_at: str) -> None:
+    """Appelé par alert_worker.py après chaque vérification (qu'elle ait
+    trouvé de nouveaux résultats ou non) pour avancer le curseur — sans ça,
+    les mêmes documents "nouveaux" seraient re-signalés à chaque tick.
+    Échec silencieux si Redis est injoignable : un tick de vérification
+    manqué n'est pas fatal, il sera retenté au suivant."""
+    client = _get_redis_client()
+    if client is None:
+        return
+    raw = client.get(KEY_PREFIX + username)
+    saved = json.loads(raw) if raw else []
+    for s in saved:
+        if s.get("id") == search_id:
+            s["last_alert_check"] = checked_at
+            break
+    client.set(KEY_PREFIX + username, json.dumps(saved))
+
+
+def list_users_with_saved_searches() -> list[str]:
+    """Noms des utilisateurs ayant au moins une recherche sauvegardée —
+    utilisé par alert_worker.py pour savoir qui parcourir. Pas d'index
+    séparé : un simple scan des clés Redis existantes, cohérent avec le
+    reste du module (une clé par utilisateur, rien d'autre)."""
+    client = _get_redis_client()
+    if client is None:
+        return []
+    return [key[len(KEY_PREFIX):] for key in client.scan_iter(match=KEY_PREFIX + "*")]

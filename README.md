@@ -24,6 +24,10 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | GET  | `/document/{id}/similar` | Documents similaires (More Like This) |
 | GET  | `/api/preview/{id}` | Aperçu PDF (conversion LibreOffice si besoin) |
 | GET  | `/metrics` | Statistiques d'indexation |
+| GET/POST/DELETE | `/saved-searches` | Recherches enregistrées par utilisateur |
+| PATCH | `/saved-searches/{id}/alert` | Active/désactive l'alerte d'une recherche enregistrée (fréquence quotidienne/hebdomadaire) |
+| GET  | `/alerts` | Notifications in-app de l'utilisateur (nouveaux résultats détectés par `alert_worker.py`) |
+| POST | `/alerts/{id}/seen`, `/alerts/mark-all-seen` | Marque une/toutes les notifications comme lues |
 
 **Recherche exacte** : entourer la requête de guillemets (`"terme exact"`)
 force une correspondance de phrase exacte (ordre et adjacence des mots
@@ -43,6 +47,37 @@ partielle en texte libre). ⚠️ Ces sous-champs ne sont peuplés que pour
 les documents indexés après l'ajout de ce mapping — une réindexation
 est nécessaire pour que les documents déjà présents deviennent
 cherchables par ce biais.
+
+## Alertes sur recherches sauvegardées
+
+Une recherche enregistrée (`saved_searches.py`) peut être marquée
+"alerte" (`PATCH /saved-searches/{id}/alert`, fréquence quotidienne ou
+hebdomadaire). Un worker séparé, `alert_worker.py` — conteneur
+`alert-worker` dans `docsearch-infra/docker-compose.yml`, même image que
+`api` mais aucune route HTTP exposée — rejoue périodiquement les
+critères de chaque recherche marquée, restreints aux documents dont
+`indexed_at` (date d'entrée dans l'index, pas `date_modified`) est
+postérieure à la dernière vérification. S'il trouve de nouveaux
+résultats, une notification est déposée dans Redis
+(`alert_notifications.py`) et lue par l'interface via `GET /alerts`.
+
+**In-app uniquement, pas d'email** : DocSearch n'a aujourd'hui aucune
+brique SMTP, et un email ferait sortir des titres de documents
+potentiellement confidentiels (filtrés par ACL à l'intérieur de l'app)
+hors du périmètre d'accès contrôlé. Suspendable globalement depuis
+l'admin (`ui_config.alerts_enabled`), comme les collections et les
+mots-clés personnalisés — désactivé, toutes les routes `/alerts*` et
+`PATCH /saved-searches/{id}/alert` renvoient 403.
+
+`search_query.py` reconstruit volontairement sa propre version (must +
+filtres ACL/facettes) de la requête ES de `/search`, plutôt que
+d'importer `search_api.py` dans le worker — ce dernier charge FastAPI,
+Kafka et LDAP au chargement du module, inutilement lourd pour un simple
+worker de fond. ⚠️ Cette duplication doit rester en cohérence avec la
+construction de requête de `/search` : toute évolution de la logique de
+filtrage faite dans `search_api.py` doit être répercutée dans
+`search_query.py`, sinon une alerte pourrait signaler des documents
+qu'une recherche manuelle ne trouverait pas (ou l'inverse).
 
 ## Authentification / ACL
 
