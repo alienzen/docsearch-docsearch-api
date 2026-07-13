@@ -33,6 +33,7 @@ import nps_log
 import suggestion_log
 import engagement_config
 import ui_config
+import display_styles_config
 import saved_searches
 import saved_collections
 import custom_keywords
@@ -587,9 +588,15 @@ def search(
             track_scores=True,
             from_=req.from_,
             size=req.size,
-            source=["filename", "filepath", "extension", "title", "author", "keywords",
-                    "size", "date_created", "date_modified", "indexed_at", "has_attachments", "folder",
-                    "source", "acl.owner", "acl.groups", "acl.public"],
+            # Exclusion plutôt qu'une liste fixe de champs à inclure : une
+            # liste fixe (motif précédent) cassait silencieusement tout
+            # champ personnalisé mappé par une source SQL/web (ex: colonne
+            # "telephone" de la source "agents", voir sql_sources_config.py)
+            # — jamais renvoyé au navigateur quelle que soit la config des
+            # gabarits d'affichage (display_styles_config.py), sans erreur
+            # visible. "content"/"content_vector" restent exclus (volumineux,
+            # jamais affichés directement dans un résultat de recherche).
+            source_excludes=["content", "content_vector"],
             aggs={
                 "by_extension": facet_agg("extension",  10, "extension"),
                 "by_author":    facet_agg("author",     10, "author"),
@@ -818,8 +825,9 @@ def export_search_results(req: SearchExportQuery, x_user: str | None = Header(de
             sort=sort_clause,
             track_scores=True,
             size=SEARCH_EXPORT_MAX_ROWS,
-            source=["filename", "filepath", "extension", "title", "author", "keywords",
-                    "size", "date_modified", "folder", "source"],
+            # Voir le commentaire équivalent dans /search — exclusion plutôt
+            # qu'une liste figée, pour la même raison.
+            source_excludes=["content", "content_vector"],
             highlight={
                 # max_analyzed_offset : voir le commentaire équivalent dans
                 # /search — sans lui, un seul document trop long dans les
@@ -1902,6 +1910,48 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
         if body.custom_keywords_enabled is not None:
             config = ui_config.set_param("custom_keywords_enabled", body.custom_keywords_enabled)
         return config
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── Gabarits d'affichage des résultats ──────────────────────────
+# Composition de chaque style nommé (voir DISPLAY_STYLES dans
+# {file,sql,web}_sources_config.py, qui fixe les noms disponibles pour
+# assigner une source à un style — display_styles_config.py définit ce
+# que chaque nom affiche réellement, éditable à chaud sans redémarrage).
+class DisplayStyleDefinitionUpdate(BaseModel):
+    fields: list[str]
+    expandable: bool
+
+
+@app.get("/display-styles")
+def get_display_styles():
+    """Public (pas d'auth) — l'interface de recherche l'appelle pour
+    savoir quels champs composer pour chaque style (voir
+    sourceDisplayStyle()/renderCard() côté index.html)."""
+    return display_styles_config.get_style_definitions()
+
+
+@app.get("/admin/display-styles")
+def admin_get_display_styles(user: str = Depends(require_admin)):
+    """Définitions courantes + catalogue des champs disponibles — permet
+    au panneau admin de savoir quelles cases proposer sans les coder en
+    dur une seconde fois côté UI."""
+    return {
+        "styles":         display_styles_config.get_style_definitions(),
+        "allowed_fields": sorted(display_styles_config.ALLOWED_FIELDS),
+    }
+
+
+@app.post("/admin/display-styles/{style_name}")
+def admin_set_display_style(
+    style_name: str, body: DisplayStyleDefinitionUpdate, user: str = Depends(require_admin),
+):
+    """Change la composition d'un style (quels champs, dépliable ou
+    non) — effectif immédiatement pour toute nouvelle recherche, sans
+    redémarrage d'aucun conteneur."""
+    try:
+        return display_styles_config.set_style_definition(style_name, body.fields, body.expandable)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 

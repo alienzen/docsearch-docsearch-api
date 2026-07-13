@@ -58,7 +58,7 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # Styles de mise en page des résultats disponibles pour cette source dans
 # l'interface de recherche — voir file_sources_config.py:DISPLAY_STYLES
 # (même ensemble, dupliqué ici comme le reste de ce module autonome).
-DISPLAY_STYLES = {"default", "compact"}
+DISPLAY_STYLES = {"default", "compact", "minimal", "dense", "essentiel", "complet_sans_extrait"}
 
 
 @dataclass(frozen=True)

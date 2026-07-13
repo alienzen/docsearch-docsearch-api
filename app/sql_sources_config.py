@@ -73,7 +73,7 @@ _ENV_VAR_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 # Styles de mise en page des résultats disponibles pour cette source dans
 # l'interface de recherche — voir file_sources_config.py:DISPLAY_STYLES
 # (même ensemble, dupliqué ici comme le reste de ce module autonome).
-DISPLAY_STYLES = {"default", "compact"}
+DISPLAY_STYLES = {"default", "compact", "minimal", "dense", "essentiel", "complet_sans_extrait"}
 
 
 @dataclass(frozen=True)

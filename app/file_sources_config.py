@@ -79,10 +79,11 @@ ES_SEARCH_ALIAS = os.getenv("ES_SEARCH_ALIAS", "docsearch-all")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 # Styles de mise en page des résultats disponibles pour cette source dans
-# l'interface de recherche (index.html:renderResults) — "default" = carte
-# détaillée actuelle, "compact" = ligne dense sans bloc métadonnées/
-# extrait, clic direct vers la fiche détail. Voir set_display_style().
-DISPLAY_STYLES = {"default", "compact"}
+# l'interface de recherche (index.html:renderResults) — noms fixes, mais
+# CONTENU éditable à chaud depuis l'admin (voir docsearch-api/
+# display_styles_config.py, GET/POST /admin/display-styles). Voir
+# set_display_style().
+DISPLAY_STYLES = {"default", "compact", "minimal", "dense", "essentiel", "complet_sans_extrait"}
 
 DEFAULT_SOURCES = {
     DEFAULT_SOURCE_NAME: {
