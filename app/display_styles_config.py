@@ -42,7 +42,13 @@ DISPLAY_STYLES_CACHE_TTL = int(os.getenv("DISPLAY_STYLES_CACHE_TTL", "10"))
 # de source, renderCard() n'affiche le bloc que si le résultat porte
 # réellement une valeur (même motif que "folder"/"acl_group", absents sur
 # la plupart des documents sans que ça ne casse rien).
-ALLOWED_FIELDS = {"source", "author", "date_modified", "folder", "size", "acl_group", "filepath", "snippet", "telephone"}
+# "detail_button" n'est pas une donnée du document mais une bascule
+# d'interface (le bouton "Voir le détail complet") — traité comme un champ
+# de plus pour rester dans le même mécanisme plutôt que d'ajouter un
+# troisième réglage séparé à côté de "fields"/"expandable". N'a d'effet
+# que sur les styles dépliables (expandable=true) : la carte compacte
+# ouvre déjà directement la fiche détail au clic, ce bouton n'y existe pas.
+ALLOWED_FIELDS = {"source", "author", "date_modified", "folder", "size", "acl_group", "filepath", "snippet", "telephone", "bureau", "detail_button"}
 
 # Mêmes 6 noms que DISPLAY_STYLES dans {file,sql,web}_sources_config.py —
 # dupliqué ici volontairement (ce module ne dépend d'aucun des trois, et
@@ -53,7 +59,7 @@ DEFAULT_STYLE_DEFINITIONS = {
     "compact":              {"fields": ["source"], "expandable": False},
     "minimal":              {"fields": [], "expandable": False},
     "dense":                {"fields": ["source", "author", "date_modified"], "expandable": False},
-    "essentiel":            {"fields": ["author", "date_modified"], "expandable": True},
+    "essentiel":            {"fields": ["author", "date_modified", "detail_button"], "expandable": True},
     "complet_sans_extrait": {"fields": sorted(ALLOWED_FIELDS - {"snippet"}), "expandable": True},
 }
 
