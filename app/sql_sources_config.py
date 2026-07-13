@@ -82,6 +82,17 @@ class FieldMapping:
     es_field: str    # nom du champ dans le document Elasticsearch
     es_type: str     # type ES (keyword, text, long, double, date, boolean)
     analyzer: str | None = None   # uniquement pertinent si es_type == "text"
+    # facet/facet_label : champ affiché comme facette dans la sidebar de
+    # recherche (index.html), en plus des 5 facettes fixes (type/période/
+    # source/auteur/dossier) — voir search_api.py:_active_custom_facets().
+    # Concerne UNIQUEMENT docsearch-api (recherche/UI) : contrairement au
+    # reste de ce module, ces deux attributs n'ont pas besoin d'être
+    # répercutés dans la copie docsearch-ingestion — sql_indexer.py
+    # n'indexe que column/es_field/es_type/analyzer, et _to_source() y
+    # ignore déjà silencieusement toute clé inconnue du dict stocké dans
+    # Redis.
+    facet: bool = False
+    facet_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +172,7 @@ def _to_source(name: str, entry: dict) -> SqlSource:
         FieldMapping(
             column=f["column"], es_field=f["es_field"], es_type=f["es_type"],
             analyzer=f.get("analyzer"),
+            facet=f.get("facet", False), facet_label=f.get("facet_label"),
         )
         for f in entry.get("fields", [])
     )
@@ -222,6 +234,15 @@ def _validate_fields(fields: list[dict], id_column: str) -> list[dict]:
         if f.get("analyzer") and f["es_type"] != "text":
             raise ValueError(
                 f"'analyzer' n'a de sens que pour es_type='text' (colonne '{f['column']}')"
+            )
+        if f.get("facet") and f["es_type"] not in ("keyword", "boolean"):
+            # Un champ "text" n'a pas de doc_values par défaut (schéma
+            # utilisé par sql_indexer.py) : une agrégation "terms" dessus
+            # échouerait à la recherche. keyword/boolean seuls garantissent
+            # une agrégation de facette sans erreur ES.
+            raise ValueError(
+                f"La colonne '{f['column']}' ne peut pas être une facette : seuls les "
+                f"types 'keyword' et 'boolean' le permettent (type actuel : '{f['es_type']}')."
             )
         columns.add(f["column"])
 

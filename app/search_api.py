@@ -137,6 +137,12 @@ class SearchQuery(BaseModel):
     keywords:        str | list[str] | None = None   # sélection cumulative, comme extension/author/folder/source
     source:          str | list[str] | None = None   # nom(s) de source (file_sources_config.py) — absent = recherche fédérée sur toutes
     search_in:       str = "all"   # "all" | "title" | "author" | "keywords" | "filepath" — restreint le champ interrogé
+    # Facettes personnalisées par source SQL (voir sql_sources_config.py:
+    # FieldMapping.facet) — {es_field: [valeurs sélectionnées]}, sélection
+    # cumulative comme les autres facettes. Les clés qui ne correspondent
+    # à aucune facette active de la/des source(s) en jeu sont ignorées
+    # (voir _active_custom_facets()).
+    custom:          dict[str, list[str]] | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -156,6 +162,7 @@ class SavedSearchCreate(BaseModel):
     folder:    str | list[str] | None = None
     keywords:  str | list[str] | None = None
     source:    str | list[str] | None = None
+    custom:    dict[str, list[str]] | None = None
     date_from: str | None = None
     date_to:   str | None = None
     sort:      str = "_score"
@@ -323,6 +330,34 @@ def _searchable_source_names() -> list[str]:
         if s.searchable:
             names.append(name)
     return names
+
+
+def _active_custom_facets(source_names: list[str]) -> dict[str, str]:
+    """
+    Facettes personnalisées actives pour la recherche en cours —
+    {es_field: label} — dérivées des colonnes marquées "facet" dans le
+    mapping de CHAQUE source SQL en jeu (voir sql_sources_config.py:
+    FieldMapping.facet). Seules les sources SQL peuvent en déclarer :
+    fichier/web ont un schéma de document fixe, sans mapping de colonnes.
+
+    "En jeu" = les sources explicitement demandées (`source_names`), ou
+    TOUTES les sources SQL cherchables si la recherche est fédérée (pas
+    de filtre de source actif) — comme le reste de la recherche
+    (_searchable_source_names()). Dédupliqué par nom de champ ES ; en cas
+    de collision entre deux sources sur le même nom de champ, le dernier
+    libellé rencontré l'emporte.
+    """
+    names = source_names or [name for name, s in sql_sources_config.get_sources().items() if s.searchable]
+    result: dict[str, str] = {}
+    for name in names:
+        try:
+            source = sql_sources_config.get_source(name)
+        except KeyError:
+            continue   # source fichier/web, ou nom déjà rejeté par _validate_source_names
+        for f in source.fields:
+            if f.facet:
+                result[f.es_field] = f.facet_label or f.es_field
+    return result
 
 
 def _collectable_source_names() -> set[str]:
@@ -516,12 +551,27 @@ def search(
     source_names  = _validate_source_names(req.source)
     source_filter = {"terms": {"source": source_names}} if source_names else None
 
+    # Facettes personnalisées (voir _active_custom_facets) : une par champ
+    # marqué "facet" sur l'une des sources SQL actuellement en jeu. Les
+    # clés de req.custom qui ne correspondent à aucune facette active sont
+    # silencieusement ignorées (ex: source changée depuis, valeur
+    # obsolète restée dans le state du navigateur) plutôt que de lever une
+    # erreur — même tolérance que le reste de la recherche vis-à-vis d'un
+    # état client périmé.
+    custom_facet_defs = _active_custom_facets(source_names)
+    custom_filters = {}
+    for es_field in custom_facet_defs:
+        values = (req.custom or {}).get(es_field)
+        if values:
+            custom_filters[f"custom:{es_field}"] = {"terms": {es_field: values}}
+
     facet_filters = {
         "extension": extension_filter,
         "author":    author_filter,
         "keywords":  keywords_filter,
         "folder":    folder_filter,
         "source":    source_filter,
+        **custom_filters,
     }
     active_facet_filters = [f for f in facet_filters.values() if f]
 
@@ -603,6 +653,10 @@ def search(
                 "by_keywords":  facet_agg("keywords",   20, "keywords"),
                 "by_folder":    facet_agg("folder_top", 10, "folder"),
                 "by_source":    facet_agg("source",     20, "source"),
+                **{
+                    f"by_custom__{es_field}": facet_agg(es_field, 20, f"custom:{es_field}")
+                    for es_field in custom_facet_defs
+                },
             }
         )
     except Exception as e:
@@ -651,6 +705,18 @@ def search(
             "keywords":   res["aggregations"]["by_keywords"]["values"]["buckets"],
             "folders":    res["aggregations"]["by_folder"]["values"]["buckets"],
             "sources":    res["aggregations"]["by_source"]["values"]["buckets"],
+            # Facettes propres à la ou aux source(s) SQL en jeu (ex: "Bureau"/
+            # "Fonction" pour la source "agents") — absentes/vides tant
+            # qu'aucune source n'en déclare (voir _active_custom_facets()) ;
+            # index.html construit/retire dynamiquement leur section de
+            # sidebar à partir de cette clé.
+            "custom": {
+                es_field: {
+                    "label":   label,
+                    "buckets": res["aggregations"][f"by_custom__{es_field}"]["values"]["buckets"],
+                }
+                for es_field, label in custom_facet_defs.items()
+            },
         }
     }
 
@@ -719,6 +785,12 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
     source_names = _validate_source_names(req.source)
     if source_names:
         filters.append({"terms": {"source": source_names}})
+    for es_field, values in (req.custom or {}).items():
+        # Même tolérance qu'en recherche normale (voir _active_custom_facets
+        # dans /search) : une clé qui ne correspond plus à une facette
+        # active de la/des source(s) en jeu est ignorée plutôt que rejetée.
+        if values and es_field in _active_custom_facets(source_names):
+            filters.append({"terms": {es_field: values}})
 
     return {"bool": {"must": must, "filter": filters}}
 
@@ -1222,6 +1294,8 @@ class SqlFieldMapping(BaseModel):
     es_field: str
     es_type: str
     analyzer: str | None = None
+    facet: bool = False
+    facet_label: str | None = None
 
 
 class SqlSourceCreate(BaseModel):
@@ -1362,7 +1436,10 @@ def admin_get_sql_sources(user: str = Depends(require_admin)):
             "label":                 s.label,
             "description":           s.description,
             "fields": [
-                {"column": f.column, "es_field": f.es_field, "es_type": f.es_type, "analyzer": f.analyzer}
+                {
+                    "column": f.column, "es_field": f.es_field, "es_type": f.es_type, "analyzer": f.analyzer,
+                    "facet": f.facet, "facet_label": f.facet_label,
+                }
                 for f in s.fields
             ],
         }
