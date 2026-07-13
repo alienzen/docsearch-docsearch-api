@@ -10,6 +10,7 @@ aperçu de documents. Fait partie de l'écosystème DocSearch :
 | [docsearch-ui](../docsearch-ui) | Interface web statique |
 | [docsearch-infra](../docsearch-infra) | Orchestration Docker Compose |
 | [docsearch-docs](../docsearch-docs) | Documents commerciaux |
+| [docsearch-dataset-generator](../docsearch-dataset-generator) | Génération de jeux de test |
 
 Ce dépôt ne dépend d'aucun autre : il lit uniquement un index Elasticsearch
 déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
@@ -28,6 +29,15 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | PATCH | `/saved-searches/{id}/alert` | Active/désactive l'alerte d'une recherche enregistrée (fréquence quotidienne/hebdomadaire) |
 | GET  | `/alerts` | Notifications in-app de l'utilisateur (nouveaux résultats détectés par `alert_worker.py`) |
 | POST | `/alerts/{id}/seen`, `/alerts/mark-all-seen` | Marque une/toutes les notifications comme lues |
+| GET  | `/searchable-sources` | Sources cherchables, pour la présélection avant recherche |
+| GET/POST/DELETE | `/collections` | Collections de documents personnelles ("📋 Mes collections") |
+| POST | `/collections/{id}/rename`, `/collections/{id}/documents`, `/collections/{id}/documents/{doc_id}` | Gestion du contenu d'une collection |
+| POST | `/ask` | Assistant conversationnel (RAG), voir `chat.html` |
+| GET  | `/ui-config` | Bascules d'interface publique (lien Assistant IA, pied de page, export...) |
+| GET  | `/is-admin` | Indique si l'utilisateur courant a accès au panneau d'administration |
+| GET  | `/display-styles` | Gabarits d'affichage des résultats, par style nommé |
+| GET  | `/engagement-config` | Bascules de mesure de satisfaction (pouce, NPS, suggestions) |
+| POST | `/feedback`, `/click`, `/nps`, `/suggestions` | Signaux de mesure de satisfaction (voir "Mesure de satisfaction" dans l'admin) |
 
 **Recherche exacte** : entourer la requête de guillemets (`"terme exact"`)
 force une correspondance de phrase exacte (ordre et adjacence des mots
@@ -111,10 +121,20 @@ correspondante : `docsearch-ui/public/admin.html`.
 |---|---|
 | `GET /admin/status` | État de tous les composants (ES, Redis, Tika, Kafka, workers actifs, progression de l'indexation, battement du watcher) |
 | `GET /metrics` | Métriques d'indexation (documents indexés, taille de l'index, répartition par extension) — route publique existante, réutilisée par le panneau admin |
-| `GET/POST /admin/filetypes` | Types de fichiers indexés (activation, taille max) |
-| `GET/POST /admin/config` | Paramètres opérationnels (limites d'archives, cadences) |
-| `GET/POST /admin/path-filters` | Inclusion/exclusion de sous-dossiers |
+| `GET/POST/DELETE /admin/file-sources[/{name}]`, `.../label`, `.../description`, `.../ocr` | Sources fichiers : CRUD, libellé, description, activation de l'OCR par source |
+| `GET/POST/DELETE /admin/sql-sources[/{name}]`, `.../label`, `.../description` | Sources SQL (PostgreSQL/MySQL) |
+| `GET/POST/DELETE /admin/sql-dsns[/{name}]` | DSN chiffrés (Fernet) utilisables par les sources SQL |
+| `GET/POST/DELETE /admin/web-sources[/{name}]`, `.../label`, `.../description`, `.../pause` | Sources web (Elastic Open Web Crawler) |
+| `GET /admin/all-sources`, `POST .../searchable`, `.../collectable`, `.../display-style` | Vue unifiée fichier/SQL/web — bascules "Recherche"/"Collections" et gabarit d'affichage, par source |
+| `GET/POST /admin/filetypes`, `POST .../reset` | Types de fichiers indexés (activation, taille max), par source |
+| `GET/POST /admin/config`, `POST .../reset` | Paramètres opérationnels (limites d'archives, cadences, OCR) |
+| `GET/POST /admin/path-filters`, `.../exclude`, `.../include`, `.../remove` | Inclusion/exclusion de sous-dossiers |
 | `POST /admin/purge-path` | Purger l'index existant selon un motif (dry-run par défaut) |
+| `GET/POST /admin/display-styles[/{style_name}]` | Composition des gabarits d'affichage des résultats (champs visibles, dépliable) |
+| `POST /admin/ui-config` | Bascules d'interface (liens Assistant IA/Administration, export, collections...) — voir `GET /ui-config` public |
+| `POST /admin/engagement-config` | Bascules de mesure de satisfaction (pouce, NPS, suggestions) — voir `GET /engagement-config` public |
+| `GET /admin/nps-summary`, `.../suggestions`, `POST .../suggestions/{id}/status` | Résultats NPS et suggestions utilisateurs |
+| `GET /admin/search-logs[...]`, `.../summary`, `.../zero-results`, `.../export`, `GET /admin/audit-log` | Journaux de recherche et d'audit — alimentent `stats.html` |
 | `POST /admin/scan` | Déclencher un scan d'indexation (en arrière-plan) |
 
 **Aucune de ces routes n'a besoin d'un accès Docker** : l'état est
