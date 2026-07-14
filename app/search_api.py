@@ -2039,6 +2039,7 @@ class UiConfigUpdate(BaseModel):
     collections_enabled: bool | None = None
     custom_keywords_enabled: bool | None = None
     alerts_enabled:      bool | None = None
+    sort_enabled:        bool | None = None
 
 
 @app.get("/ui-config")
@@ -2056,8 +2057,19 @@ def get_is_admin(x_user: str | None = Header(default=None)):
     les liens "Administration"/"Statistiques" doivent être affichés —
     ces pages échoueraient de toute façon avec un 403 pour un
     utilisateur non admin, autant ne pas les proposer.
+
+    `user` (résolu via resolve_user(), même logique que le reste de
+    l'API : X-User, sinon DEV_USER, sinon "anonymous") permet à
+    l'interface d'afficher l'identité de l'utilisateur connecté.
+
+    `groups` vient directement de get_user_groups() sur le X-User brut
+    (pas le repli DEV_USER/anonymous : les groupes LDAP n'ont de sens
+    que pour un utilisateur réellement authentifié) — liste vide si
+    LDAP est désactivé ou si l'utilisateur n'a été trouvé dans aucun
+    groupe.
     """
-    return {"is_admin": is_admin(x_user)}
+    groups = get_user_groups(x_user.lower()) if x_user else []
+    return {"is_admin": is_admin(x_user), "user": resolve_user(x_user), "groups": groups}
 
 
 @app.post("/admin/ui-config")
@@ -2083,6 +2095,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("custom_keywords_enabled", body.custom_keywords_enabled)
         if body.alerts_enabled is not None:
             config = ui_config.set_param("alerts_enabled", body.alerts_enabled)
+        if body.sort_enabled is not None:
+            config = ui_config.set_param("sort_enabled", body.sort_enabled)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))

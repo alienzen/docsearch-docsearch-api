@@ -56,6 +56,10 @@ DEFAULT_UI_CONFIG = {
                                     # notifications déjà déposées restent lisibles nulle part
                                     # tant que le flag est désactivé (l'UI qui les affiche est
                                     # elle-même masquée).
+    "sort_enabled":        True,   # sélecteur "Trier par" au-dessus des résultats de recherche —
+                                    # purement une préférence d'affichage, pas de contrôle d'accès
+                                    # associé côté API (contrairement à export/collections/alerts) :
+                                    # désactivé, la recherche reste triée par pertinence par défaut.
 }
 
 _cache: dict = {}

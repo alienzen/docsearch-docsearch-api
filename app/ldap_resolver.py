@@ -59,7 +59,7 @@ def get_user_groups(username: str) -> list[str]:
 
         groups = []
         for dn in conn.entries[0].memberOf:
-            cn = str(dn).split(",")[0].replace("CN=", "").lower()
+            cn = str(dn).split(",")[0].split("=", 1)[-1].lower()
             groups.append(cn)
         return groups
 
