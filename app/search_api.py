@@ -23,6 +23,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan as es_scan
 from ldap_resolver import get_user_groups
 from admin_auth import require_admin, is_admin
+from access_auth import require_access
 import cluster_status
 import admin_scan
 import filetype_config
@@ -2103,6 +2104,7 @@ class UiConfigUpdate(BaseModel):
     custom_keywords_enabled: bool | None = None
     alerts_enabled:      bool | None = None
     sort_enabled:        bool | None = None
+    show_current_user_enabled: bool | None = None
 
 
 @app.get("/ui-config")
@@ -2135,6 +2137,17 @@ def get_is_admin(x_user: str | None = Header(default=None)):
     return {"is_admin": is_admin(x_user), "user": resolve_user(x_user), "groups": groups}
 
 
+@app.get("/auth/check-access", include_in_schema=False)
+def check_access(user: str = Depends(require_access)):
+    """
+    Cible interne pour Nginx (auth_request sur chaque page — voir
+    location /_access_check dans docsearch-ui/nginx.conf). Seul le
+    code HTTP compte (200/401/403) ; le corps de la réponse est
+    ignoré par Nginx.
+    """
+    return {"user": user}
+
+
 @app.post("/admin/ui-config")
 def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)):
     """Active/désactive des éléments d'interface (ex: lien Assistant IA,
@@ -2160,6 +2173,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("alerts_enabled", body.alerts_enabled)
         if body.sort_enabled is not None:
             config = ui_config.set_param("sort_enabled", body.sort_enabled)
+        if body.show_current_user_enabled is not None:
+            config = ui_config.set_param("show_current_user_enabled", body.show_current_user_enabled)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))

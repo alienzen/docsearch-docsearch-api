@@ -60,6 +60,10 @@ DEFAULT_UI_CONFIG = {
                                     # purement une préférence d'affichage, pas de contrôle d'accès
                                     # associé côté API (contrairement à export/collections/alerts) :
                                     # désactivé, la recherche reste triée par pertinence par défaut.
+    "show_current_user_enabled": True,   # badge "Connecté : <utilisateur> · <groupes>" dans l'en-tête
+                                    # de recherche (voir index.html:current-user) — purement un
+                                    # affichage, aucun contrôle d'accès associé : le contrôle
+                                    # d'accès réel se fait via access_auth.py/ACCESS_GROUP, pas ici.
 }
 
 _cache: dict = {}
