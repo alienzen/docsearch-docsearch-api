@@ -2148,6 +2148,29 @@ def check_access(user: str = Depends(require_access)):
     return {"user": user}
 
 
+@app.get("/auth/check-admin", include_in_schema=False)
+def check_admin(x_user: str | None = Header(default=None)):
+    """
+    Cible interne pour Nginx (auth_request sur location = /admin — voir
+    location /_admin_check dans docsearch-ui/nginx.conf). Rejette au
+    niveau HTTP les utilisateurs hors du groupe ADMIN_GROUP avant même
+    de charger admin.html, plutôt que de laisser la page s'afficher
+    (200) et échouer visuellement une fois les appels /admin/* résolus
+    (voir refresh() dans admin.html).
+
+    Toujours 401 en cas de refus, jamais 403 : contrairement à
+    require_admin() (utilisé tel quel par les routes /admin/* pour
+    leurs réponses JSON), ce endpoint ne sert qu'à Nginx et doit
+    bloquer la page à l'identique, qu'on soit anonyme ou simplement
+    pas membre du groupe admin.
+    """
+    try:
+        user = require_admin(x_user)
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Authentification requise (groupe administrateur)")
+    return {"user": user}
+
+
 @app.post("/admin/ui-config")
 def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)):
     """Active/désactive des éléments d'interface (ex: lien Assistant IA,
