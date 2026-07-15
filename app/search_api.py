@@ -1517,6 +1517,69 @@ def admin_set_source_ocr(name: str, body: OcrUpdate, user: str = Depends(require
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@app.get("/admin/file-sources/{name}/tree")
+def admin_get_source_tree(name: str, path: str = Query(""), user: str = Depends(require_admin)):
+    """Liste UN SEUL niveau de l'arborescence d'une source fichier (pour
+    le chargement paresseux de la section "Arborescence des sources" côté
+    admin.html) — jamais de descente récursive ici, pour rester rapide
+    même sur une source à des dizaines de milliers de fichiers ; c'est au
+    client de rappeler cette route à chaque dépliage de dossier.
+
+    `path` est relatif à la racine de la source (source.folder), jamais
+    un chemin absolu — mêmes conventions que path_filter (voir
+    producer.py:_publish_folder pour la référence)."""
+    try:
+        source = file_sources_config.get_source(name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    root = Path(source.folder).resolve()
+    target = (root / path).resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(status_code=400, detail=f"Chemin invalide : '{path}' sort de la source '{name}'.")
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail=f"Dossier introuvable dans '{name}' : '{path}'")
+
+    filter_config = path_filter.get_config(name)
+    included_patterns = filter_config.get("included", [])
+    whitelist_active = bool(included_patterns)
+
+    entries = []
+    try:
+        with os.scandir(target) as it:
+            for entry in it:
+                # Fichiers/dossiers cachés (".git", ".DS_Store", ...) —
+                # jamais indexés (voir is_excluded() côté ingestion),
+                # inutile de les faire remonter ici.
+                if entry.name.startswith("."):
+                    continue
+                rel = f"{path}/{entry.name}" if path else entry.name
+                is_dir = entry.is_dir(follow_symlinks=False)
+                item = {"name": entry.name, "path": rel, "type": "dir" if is_dir else "file"}
+                # is_dir_excluded() ne vérifie QUE la liste noire — malgré
+                # son nom (pensé pour l'élagage d'os.walk), c'est une simple
+                # comparaison de motifs qui vaut aussi bien pour un fichier
+                # que pour un dossier. On l'affiche pour les deux : un motif
+                # noir peut viser un fichier précis (ex: "*.tmp"), pas
+                # seulement un dossier entier.
+                item["excluded"] = path_filter.is_dir_excluded(rel, name)
+                # La liste blanche ne s'applique volontairement PAS aux
+                # dossiers pour décider s'il faut les parcourir (voir
+                # docstring de is_dir_excluded : "finance" ne correspond pas
+                # littéralement à "finance/rapports" mais il faut quand même
+                # y descendre) — ici on affiche juste, à titre informatif,
+                # si CE chemin correspond explicitement à un motif inclus,
+                # sans rien affirmer sur ses descendants.
+                if whitelist_active:
+                    item["included"] = any(path_filter.matches_pattern(rel, p) for p in included_patterns)
+                entries.append(item)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lecture dossier : {e}")
+
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
+    return {"path": path, "whitelist_active": whitelist_active, "entries": entries}
+
+
 @app.get("/admin/sql-sources")
 def admin_get_sql_sources(user: str = Depends(require_admin)):
     return {
