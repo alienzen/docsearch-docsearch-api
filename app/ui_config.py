@@ -93,7 +93,7 @@ DEFAULT_UI_CONFIG = {
                             # aux utilisateurs de la recherche, ou l'inverse.
 }
 
-THEMES = ["default", "dark", "slate", "contrast", "red", "green"]
+THEMES = ["default", "dark", "slate", "contrast", "red", "green", "dsfr"]
 
 _cache: dict = {}
 _cache_time: float = 0.0
