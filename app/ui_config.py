@@ -64,6 +64,11 @@ DEFAULT_UI_CONFIG = {
                                     # de recherche (voir index.html:current-user) — purement un
                                     # affichage, aucun contrôle d'accès associé : le contrôle
                                     # d'accès réel se fait via access_auth.py/ACCESS_GROUP, pas ici.
+    "show_current_user_groups_enabled": True,   # inclut " · <groupes>" dans ce même badge —
+                                    # indépendant de show_current_user_enabled (qui masque le badge
+                                    # entier) : permet d'afficher juste "Connecté : <utilisateur>"
+                                    # sans exposer l'appartenance aux groupes LDAP. Sans effet si
+                                    # l'utilisateur n'a aucun groupe (rien à masquer).
 }
 
 _cache: dict = {}

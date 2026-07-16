@@ -2105,6 +2105,7 @@ class UiConfigUpdate(BaseModel):
     alerts_enabled:      bool | None = None
     sort_enabled:        bool | None = None
     show_current_user_enabled: bool | None = None
+    show_current_user_groups_enabled: bool | None = None
 
 
 @app.get("/ui-config")
@@ -2198,6 +2199,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("sort_enabled", body.sort_enabled)
         if body.show_current_user_enabled is not None:
             config = ui_config.set_param("show_current_user_enabled", body.show_current_user_enabled)
+        if body.show_current_user_groups_enabled is not None:
+            config = ui_config.set_param("show_current_user_groups_enabled", body.show_current_user_groups_enabled)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
