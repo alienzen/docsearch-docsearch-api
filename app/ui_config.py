@@ -78,7 +78,13 @@ DEFAULT_UI_CONFIG = {
     "show_current_user_groups_enabled_admin": True,   # inclut " · <groupes>" dans le badge d'admin.html —
                                     # indépendant de show_current_user_groups_enabled (recherche) et
                                     # de show_current_user_enabled_admin (qui masque le badge entier).
+    "theme": "default",   # thème visuel des 4 pages (index/admin/help/admin-help.html) — voir
+                            # theme-search.css/theme-admin.css : chaque valeur correspond à un bloc
+                            # ":root[data-theme=...]" qui redéfinit les mêmes variables CSS. Une seule
+                            # valeur pour toute l'installation (pas de préférence par utilisateur).
 }
+
+THEMES = ["default", "dark", "slate", "contrast"]
 
 _cache: dict = {}
 _cache_time: float = 0.0
@@ -140,15 +146,9 @@ def get_config() -> dict:
     return _cache
 
 
-def set_param(key: str, value: bool) -> dict:
-    """Modifie un flag (ex: chat_enabled) et le persiste immédiatement
-    dans Redis."""
-    if key not in DEFAULT_UI_CONFIG:
-        raise ValueError(
-            f"Paramètre inconnu : '{key}'. Valeurs possibles : "
-            f"{', '.join(DEFAULT_UI_CONFIG.keys())}"
-        )
-
+def _persist(key: str, value) -> dict:
+    """Lit la config actuelle depuis Redis, applique un changement et
+    réenregistre — logique partagée par set_param()/set_theme()."""
     client = _get_redis_client()
     if client is None:
         raise RuntimeError(
@@ -160,7 +160,7 @@ def set_param(key: str, value: bool) -> dict:
     config = dict(DEFAULT_UI_CONFIG)
     if raw:
         config.update(json.loads(raw))
-    config[key] = bool(value)
+    config[key] = value
 
     client.set(UI_CONFIG_KEY, json.dumps(config))
 
@@ -169,3 +169,24 @@ def set_param(key: str, value: bool) -> dict:
     _cache_time = time.time()
 
     return config
+
+
+def set_param(key: str, value: bool) -> dict:
+    """Modifie un flag (ex: chat_enabled) et le persiste immédiatement
+    dans Redis."""
+    if key not in DEFAULT_UI_CONFIG:
+        raise ValueError(
+            f"Paramètre inconnu : '{key}'. Valeurs possibles : "
+            f"{', '.join(DEFAULT_UI_CONFIG.keys())}"
+        )
+    return _persist(key, bool(value))
+
+
+def set_theme(theme: str) -> dict:
+    """Modifie le thème visuel (voir THEMES) et le persiste immédiatement
+    dans Redis."""
+    if theme not in THEMES:
+        raise ValueError(
+            f"Thème inconnu : '{theme}'. Valeurs possibles : {', '.join(THEMES)}"
+        )
+    return _persist("theme", theme)
