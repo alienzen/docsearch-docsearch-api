@@ -2097,6 +2097,7 @@ class EngagementConfigUpdate(BaseModel):
 class UiConfigUpdate(BaseModel):
     chat_enabled:        bool | None = None
     footer_enabled:      bool | None = None
+    footer_enabled_admin: bool | None = None
     admin_links_enabled: bool | None = None
     export_enabled:      bool | None = None
     help_enabled:        bool | None = None
@@ -2109,6 +2110,7 @@ class UiConfigUpdate(BaseModel):
     show_current_user_enabled_admin: bool | None = None
     show_current_user_groups_enabled_admin: bool | None = None
     theme: str | None = None
+    theme_admin: str | None = None
 
 
 @app.get("/ui-config")
@@ -2186,6 +2188,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("chat_enabled", body.chat_enabled)
         if body.footer_enabled is not None:
             config = ui_config.set_param("footer_enabled", body.footer_enabled)
+        if body.footer_enabled_admin is not None:
+            config = ui_config.set_param("footer_enabled_admin", body.footer_enabled_admin)
         if body.admin_links_enabled is not None:
             config = ui_config.set_param("admin_links_enabled", body.admin_links_enabled)
         if body.export_enabled is not None:
@@ -2209,7 +2213,9 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
         if body.show_current_user_groups_enabled_admin is not None:
             config = ui_config.set_param("show_current_user_groups_enabled_admin", body.show_current_user_groups_enabled_admin)
         if body.theme is not None:
-            config = ui_config.set_theme(body.theme)
+            config = ui_config.set_theme(body.theme, "theme")
+        if body.theme_admin is not None:
+            config = ui_config.set_theme(body.theme_admin, "theme_admin")
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))

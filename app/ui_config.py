@@ -25,7 +25,11 @@ UI_CONFIG_CACHE_TTL = int(os.getenv("UI_CONFIG_CACHE_TTL", "10"))
 
 DEFAULT_UI_CONFIG = {
     "chat_enabled":        True,   # lien "Assistant IA" dans l'en-tête de recherche
-    "footer_enabled":      True,   # pied de page de la page de recherche
+    "footer_enabled":      True,   # pied de page des pages "recherche" (index.html, help.html)
+    "footer_enabled_admin": True,   # pied de page des pages "administration" (admin.html,
+                                    # stats.html, admin-help.html) — bascule séparée de
+                                    # footer_enabled, même principe que les paires
+                                    # show_current_user_enabled/_admin ci-dessous.
     "admin_links_enabled": True,   # liens "Administration"/"Statistiques" (en-tête + pied de page) —
                                     # combiné en ET logique avec /is-admin côté index.html : un
                                     # utilisateur admin ne les voit QUE si ce flag est aussi actif.
@@ -78,10 +82,15 @@ DEFAULT_UI_CONFIG = {
     "show_current_user_groups_enabled_admin": True,   # inclut " · <groupes>" dans le badge d'admin.html —
                                     # indépendant de show_current_user_groups_enabled (recherche) et
                                     # de show_current_user_enabled_admin (qui masque le badge entier).
-    "theme": "default",   # thème visuel des 4 pages (index/admin/help/admin-help.html) — voir
-                            # theme-search.css/theme-admin.css : chaque valeur correspond à un bloc
-                            # ":root[data-theme=...]" qui redéfinit les mêmes variables CSS. Une seule
-                            # valeur pour toute l'installation (pas de préférence par utilisateur).
+    "theme": "default",   # thème visuel des pages "recherche" (index.html, help.html) — voir
+                            # theme-search.css : chaque valeur correspond à un bloc
+                            # ":root[data-theme=...]" qui redéfinit les mêmes variables CSS. Une
+                            # seule valeur pour toute l'installation (pas de préférence par
+                            # utilisateur), indépendante de theme_admin ci-dessous.
+    "theme_admin": "default",   # même principe que theme, mais pour les pages "administration"
+                            # (admin.html, stats.html, admin-help.html) et theme-admin.css —
+                            # permet par exemple un thème sombre en administration sans l'imposer
+                            # aux utilisateurs de la recherche, ou l'inverse.
 }
 
 THEMES = ["default", "dark", "slate", "contrast"]
@@ -182,11 +191,14 @@ def set_param(key: str, value: bool) -> dict:
     return _persist(key, bool(value))
 
 
-def set_theme(theme: str) -> dict:
-    """Modifie le thème visuel (voir THEMES) et le persiste immédiatement
-    dans Redis."""
+def set_theme(theme: str, key: str = "theme") -> dict:
+    """Modifie le thème visuel (voir THEMES) — "theme" (recherche) ou
+    "theme_admin" (administration) — et le persiste immédiatement dans
+    Redis."""
+    if key not in ("theme", "theme_admin"):
+        raise ValueError(f"Champ de thème inconnu : '{key}'.")
     if theme not in THEMES:
         raise ValueError(
             f"Thème inconnu : '{theme}'. Valeurs possibles : {', '.join(THEMES)}"
         )
-    return _persist("theme", theme)
+    return _persist(key, theme)
