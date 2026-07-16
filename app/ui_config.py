@@ -61,14 +61,23 @@ DEFAULT_UI_CONFIG = {
                                     # associé côté API (contrairement à export/collections/alerts) :
                                     # désactivé, la recherche reste triée par pertinence par défaut.
     "show_current_user_enabled": True,   # badge "Connecté : <utilisateur> · <groupes>" dans l'en-tête
-                                    # de recherche (voir index.html:current-user) — purement un
-                                    # affichage, aucun contrôle d'accès associé : le contrôle
-                                    # d'accès réel se fait via access_auth.py/ACCESS_GROUP, pas ici.
-    "show_current_user_groups_enabled": True,   # inclut " · <groupes>" dans ce même badge —
+                                    # de la page de RECHERCHE (voir index.html:current-user) —
+                                    # purement un affichage, aucun contrôle d'accès associé : le
+                                    # contrôle d'accès réel se fait via access_auth.py/ACCESS_GROUP,
+                                    # pas ici. Indépendant de show_current_user_enabled_admin
+                                    # ci-dessous, qui couvre le même badge sur admin.html.
+    "show_current_user_groups_enabled": True,   # inclut " · <groupes>" dans ce même badge (recherche) —
                                     # indépendant de show_current_user_enabled (qui masque le badge
                                     # entier) : permet d'afficher juste "Connecté : <utilisateur>"
                                     # sans exposer l'appartenance aux groupes LDAP. Sans effet si
                                     # l'utilisateur n'a aucun groupe (rien à masquer).
+    "show_current_user_enabled_admin": True,   # même badge que ci-dessus, mais sur admin.html —
+                                    # bascule séparée : l'admin peut par exemple le garder visible en
+                                    # administration (utile pour savoir qui a fait quoi) tout en le
+                                    # masquant sur la page de recherche, ou l'inverse.
+    "show_current_user_groups_enabled_admin": True,   # inclut " · <groupes>" dans le badge d'admin.html —
+                                    # indépendant de show_current_user_groups_enabled (recherche) et
+                                    # de show_current_user_enabled_admin (qui masque le badge entier).
 }
 
 _cache: dict = {}
