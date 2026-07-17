@@ -2111,13 +2111,23 @@ class UiConfigUpdate(BaseModel):
     show_current_user_groups_enabled_admin: bool | None = None
     theme: str | None = None
     theme_admin: str | None = None
+    sources_mount_display: str | None = None
 
 
 @app.get("/ui-config")
 def get_ui_config():
     """Public (pas d'auth) — l'interface de recherche l'appelle pour
-    savoir si le lien "Assistant IA" doit être affiché dans l'en-tête."""
-    return ui_config.get_config()
+    savoir si le lien "Assistant IA" doit être affiché dans l'en-tête.
+
+    Ajoute "sources_mount" (préfixe réel des chemins stockés dans ES,
+    ex: "/sources") en lecture seule à côté des champs persistés dans
+    Redis — c'est une variable d'environnement (SOURCES_MOUNT, voir
+    file_sources_config.py), pas un réglage admin : index.html s'en
+    sert pour savoir quel préfixe remplacer par "sources_mount_display"
+    dans copyPathClick()."""
+    config = dict(ui_config.get_config())
+    config["sources_mount"] = file_sources_config.SOURCES_MOUNT
+    return config
 
 
 @app.get("/is-admin")
@@ -2216,6 +2226,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_theme(body.theme, "theme")
         if body.theme_admin is not None:
             config = ui_config.set_theme(body.theme_admin, "theme_admin")
+        if body.sources_mount_display is not None:
+            config = ui_config.set_text("sources_mount_display", body.sources_mount_display)
         return config
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))

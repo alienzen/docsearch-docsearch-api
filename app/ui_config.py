@@ -91,6 +91,14 @@ DEFAULT_UI_CONFIG = {
                             # (admin.html, stats.html, admin-help.html) et theme-admin.css —
                             # permet par exemple un thème sombre en administration sans l'imposer
                             # aux utilisateurs de la recherche, ou l'inverse.
+    "sources_mount_display": "",   # remplace, uniquement à l'affichage/copie côté index.html
+                            # (copyPathClick), le préfixe SOURCES_MOUNT (ex: "/sources", chemin de
+                            # montage interne aux conteneurs) par une valeur utilisable par
+                            # l'utilisateur final (ex: "\\\\serveur\\partage" ou "Z:\\"). Vide par
+                            # défaut : le chemin brut est copié tel quel (comportement historique).
+                            # Le préfixe réel à remplacer (SOURCES_MOUNT) n'est PAS stocké ici —
+                            # c'est une variable d'environnement, exposée en lecture seule dans la
+                            # réponse de /ui-config par search_api.py (champ "sources_mount").
 }
 
 THEMES = ["default", "dark", "slate", "contrast", "red", "green", "dsfr"]
@@ -202,3 +210,25 @@ def set_theme(theme: str, key: str = "theme") -> dict:
             f"Thème inconnu : '{theme}'. Valeurs possibles : {', '.join(THEMES)}"
         )
     return _persist(key, theme)
+
+
+MAX_TEXT_PARAM_LENGTH = 4000   # large marge pour une URL (data-URI possible), sans laisser Redis stocker n'importe quoi
+
+
+def set_text(key: str, value: str) -> dict:
+    """Modifie un champ texte libre (ex: sources_mount_display) et le
+    persiste immédiatement dans Redis — pendant de set_param() (bool) et
+    set_theme() (enum) pour les champs qui ne sont ni l'un ni l'autre.
+    Validation volontairement minimale (clé connue, chaîne, longueur
+    raisonnable) : pas de vérification de forme d'URL, ce champ n'est
+    modifiable que par un administrateur déjà authentifié."""
+    if key not in DEFAULT_UI_CONFIG:
+        raise ValueError(
+            f"Paramètre inconnu : '{key}'. Valeurs possibles : "
+            f"{', '.join(DEFAULT_UI_CONFIG.keys())}"
+        )
+    if not isinstance(value, str):
+        raise ValueError(f"'{key}' doit être une chaîne de caractères.")
+    if len(value) > MAX_TEXT_PARAM_LENGTH:
+        raise ValueError(f"'{key}' dépasse la longueur maximale ({MAX_TEXT_PARAM_LENGTH} caractères).")
+    return _persist(key, value)
