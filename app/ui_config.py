@@ -91,6 +91,17 @@ DEFAULT_UI_CONFIG = {
                             # (admin.html, stats.html, admin-help.html) et theme-admin.css —
                             # permet par exemple un thème sombre en administration sans l'imposer
                             # aux utilisateurs de la recherche, ou l'inverse.
+    "header_logo_url": "",   # URL d'image personnalisée pour le fond de .fr-logo (bloc "marque"
+                            # de l'en-tête, voir index.html) — vide par défaut, retombe alors sur
+                            # le monogramme générique défini en CSS. Volontairement pas de valeur
+                            # par défaut pointant vers un vrai logo (Marianne ou autre) : ce champ
+                            # est à la discrétion de l'administrateur, pas préconfiguré.
+    "header_logo_text": "Entité fictive",   # texte du bloc .fr-logo (index.html) — appliqué en
+                            # textContent (pas de <br> forcé : la largeur étroite de .fr-logo
+                            # suffit à faire retomber le texte sur 2 lignes naturellement).
+    "favicon_url": "",   # URL d'icône personnalisée pour l'onglet du navigateur (toutes les
+                            # pages qui lisent /ui-config) — vide par défaut, retombe alors sur
+                            # /favicon.svg (même monogramme générique que header_logo_url).
     "sources_mount_display": "",   # remplace, uniquement à l'affichage/copie côté index.html
                             # (copyPathClick), le préfixe SOURCES_MOUNT (ex: "/sources", chemin de
                             # montage interne aux conteneurs) par une valeur utilisable par
@@ -216,8 +227,8 @@ MAX_TEXT_PARAM_LENGTH = 4000   # large marge pour une URL (data-URI possible), s
 
 
 def set_text(key: str, value: str) -> dict:
-    """Modifie un champ texte libre (ex: sources_mount_display) et le
-    persiste immédiatement dans Redis — pendant de set_param() (bool) et
+    """Modifie un champ texte libre (ex: header_logo_url) et le persiste
+    immédiatement dans Redis — pendant de set_param() (bool) et
     set_theme() (enum) pour les champs qui ne sont ni l'un ni l'autre.
     Validation volontairement minimale (clé connue, chaîne, longueur
     raisonnable) : pas de vérification de forme d'URL, ce champ n'est
