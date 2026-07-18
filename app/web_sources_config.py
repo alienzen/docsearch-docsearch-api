@@ -40,7 +40,7 @@ import re
 import json
 import time
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,10 @@ class WebSource:
     collectable: bool = True
     description: str = ""
     paused: bool = False  # web_worker.py saute cette source tant que True (voir set_paused)
+    # Groupes AD/LDAP autorisés à voir cette source dans /search — voir
+    # Source.allowed_groups dans file_sources_config.py pour le détail
+    # (même principe, orthogonal à l'ACL par document).
+    allowed_groups: tuple[str, ...] = field(default_factory=tuple)
 
 
 _cache: dict = {}
@@ -135,6 +139,7 @@ def _to_source(name: str, entry: dict) -> WebSource:
         collectable=entry.get("collectable", True),
         description=entry.get("description") or "",
         paused=entry.get("paused", False),
+        allowed_groups=tuple(entry.get("allowed_groups") or ()),
     )
 
 
@@ -184,7 +189,7 @@ def add_source(
     name: str, crawl_index: str, es_index: str,
     acl_public: bool = True, poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
     label: str | None = None, searchable: bool = True, collectable: bool = True,
-    description: str | None = None,
+    description: str | None = None, allowed_groups: list[str] | None = None,
 ) -> dict:
     """
     Enregistre une nouvelle source web (ou met à jour une source existante
@@ -240,6 +245,7 @@ def add_source(
             "searchable":             searchable,
             "collectable":            collectable,
             "description":            description or "",
+            "allowed_groups":         list(allowed_groups or []),
         }
 
     return _read_write(mutate)
@@ -268,6 +274,18 @@ def set_collectable(name: str, collectable: bool) -> dict:
         if name not in sources:
             raise KeyError(f"Source web inconnue : '{name}'")
         sources[name]["collectable"] = collectable
+
+    return _read_write(mutate)
+
+
+def set_allowed_groups(name: str, allowed_groups: list[str]) -> dict:
+    """Restreint la visibilité de cette source web dans /search — voir
+    file_sources_config.set_allowed_groups() pour le détail, même
+    principe."""
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source web inconnue : '{name}'")
+        sources[name]["allowed_groups"] = list(allowed_groups or [])
 
     return _read_write(mutate)
 

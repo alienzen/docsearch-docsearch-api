@@ -282,6 +282,19 @@ def _ensure_index_exists():
         )
 
 
+def _get_any_source(name: str):
+    """Cherche `name` dans les trois registres (fichiers, SQL, web),
+    dans cet ordre, et retourne le premier trouvé — None si absent des
+    trois. Utile là où on a juste besoin de l'objet Source/SqlSource/
+    WebSource sans savoir a priori son type (ex: _check_doc_access)."""
+    for registry in (file_sources_config, sql_sources_config, web_sources_config):
+        try:
+            return registry.get_source(name)
+        except KeyError:
+            continue
+    return None
+
+
 def _validate_source_names(source_names: str | list[str] | None) -> list[str]:
     """
     Vérifie que chaque nom de source demandé existe bien dans l'UN des
@@ -293,52 +306,54 @@ def _validate_source_names(source_names: str | list[str] | None) -> list[str]:
         return []
     names = source_names if isinstance(source_names, list) else [source_names]
     for name in names:
-        try:
-            file_sources_config.get_source(name)
-            continue
-        except KeyError:
-            pass
-        try:
-            sql_sources_config.get_source(name)
-            continue
-        except KeyError:
-            pass
-        try:
-            web_sources_config.get_source(name)
-            continue
-        except KeyError:
-            pass
-        raise HTTPException(
-            status_code=400,
-            detail=f"Source inconnue : '{name}' (fichier, SQL et web confondus).",
-        )
+        if _get_any_source(name) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source inconnue : '{name}' (fichier, SQL et web confondus).",
+            )
     return names
 
 
-def _searchable_source_names() -> list[str]:
+def _visible_to(s, user_groups: list[str]) -> bool:
+    """Une source dont allowed_groups est vide est visible par tout le
+    monde (comportement historique, avant l'ajout de cette restriction) ;
+    sinon il faut être membre d'au moins un des groupes listés."""
+    return not s.allowed_groups or any(g in s.allowed_groups for g in user_groups)
+
+
+def _searchable_source_names(username: str) -> list[str]:
     """
-    Noms de TOUTES les sources actuellement cherchables, tous types
-    confondus (fichier/SQL/web) — une source peut continuer d'être
-    indexée normalement (watcher/sql-worker/web-worker) tout en étant
-    exclue de /search via son flag "searchable" (voir set_searchable()
-    dans chaque registre). Utilisé pour restreindre CHAQUE recherche,
-    fédérée ou non : une source désactivée reste invisible même si elle
-    est explicitement demandée via `source`.
+    Noms de TOUTES les sources actuellement cherchables PAR CET
+    UTILISATEUR, tous types confondus (fichier/SQL/web) — combine deux
+    restrictions indépendantes :
+      - "searchable" (voir set_searchable() dans chaque registre) : une
+        source peut continuer d'être indexée normalement (watcher/
+        sql-worker/web-worker) tout en étant exclue de /search.
+      - "allowed_groups" (voir set_allowed_groups()) : restreint la
+        visibilité de la source aux membres d'un des groupes AD/LDAP
+        listés, vide = aucune restriction. Orthogonal à l'ACL par
+        document (build_acl_filter) : ceci masque la source en bloc,
+        celle-là filtre les documents individuels d'une source par
+        ailleurs visible.
+    Utilisé pour restreindre CHAQUE recherche, fédérée ou non : une
+    source désactivée ou hors groupe reste invisible même si elle est
+    explicitement demandée via `source`.
     """
+    user_groups = get_user_groups(username)
     names = []
     for name, s in file_sources_config.get_sources().items():
-        if s.searchable:
+        if s.searchable and _visible_to(s, user_groups):
             names.append(name)
     for name, s in sql_sources_config.get_sources().items():
-        if s.searchable:
+        if s.searchable and _visible_to(s, user_groups):
             names.append(name)
     for name, s in web_sources_config.get_sources().items():
-        if s.searchable:
+        if s.searchable and _visible_to(s, user_groups):
             names.append(name)
     return names
 
 
-def _active_custom_facets(source_names: list[str]) -> dict[str, str]:
+def _active_custom_facets(source_names: list[str], username: str | None = None) -> dict[str, str]:
     """
     Facettes personnalisées actives pour la recherche en cours —
     {es_field: label} — dérivées des colonnes marquées "facet" dans le
@@ -352,8 +367,19 @@ def _active_custom_facets(source_names: list[str]) -> dict[str, str]:
     (_searchable_source_names()). Dédupliqué par nom de champ ES ; en cas
     de collision entre deux sources sur le même nom de champ, le dernier
     libellé rencontré l'emporte.
+
+    `username` est optionnel : None préserve le comportement public de
+    GET /custom-facets (aucune restriction par groupe, cohérent avec son
+    absence d'authentification) ; les appels depuis /search et
+    /search/export le passent pour ne jamais exposer le nom d'une
+    facette d'une source hors des groupes autorisés de l'utilisateur.
     """
-    names = source_names or [name for name, s in sql_sources_config.get_sources().items() if s.searchable]
+    user_groups = get_user_groups(username) if username else None
+    fallback_sources = sql_sources_config.get_sources().items()
+    names = source_names or [
+        name for name, s in fallback_sources
+        if s.searchable and (user_groups is None or _visible_to(s, user_groups))
+    ]
     result: dict[str, str] = {}
     for name in names:
         try:
@@ -390,28 +416,36 @@ def _collectable_source_names() -> set[str]:
 
 
 @app.get("/searchable-sources")
-def get_searchable_sources():
+def get_searchable_sources(x_user: str | None = Header(default=None)):
     """
-    Public (pas d'auth) — liste des sources actuellement cherchables,
-    pour la présélection de sources AVANT de lancer une recherche (voir
-    index.html) — complète la facette "Source" existante, qui n'apparaît
-    qu'APRÈS une recherche (dérivée des résultats, avec leur compte).
-    Contrairement à /admin/all-sources, pas de nombre de documents ni de
-    taille d'index (réservé à l'admin) : juste de quoi peupler une liste
-    de cases à cocher. `collectable` est inclus pour la même raison que
-    `label`/`type` : index.html s'en sert pour masquer la case "ajouter à
-    une collection" sur les résultats d'une source qui l'interdit (voir
-    sourceCollectable() côté UI), sans appel séparé.
+    Pas d'admin requis (n'importe quel utilisateur identifié peut lister
+    les sources qui LUI sont ouvertes) — liste des sources actuellement
+    cherchables, pour la présélection de sources AVANT de lancer une
+    recherche (voir index.html) — complète la facette "Source" existante,
+    qui n'apparaît qu'APRÈS une recherche (dérivée des résultats, avec
+    leur compte). Contrairement à /admin/all-sources, pas de nombre de
+    documents ni de taille d'index (réservé à l'admin) : juste de quoi
+    peupler une liste de cases à cocher. `collectable` est inclus pour la
+    même raison que `label`/`type` : index.html s'en sert pour masquer la
+    case "ajouter à une collection" sur les résultats d'une source qui
+    l'interdit (voir sourceCollectable() côté UI), sans appel séparé.
+
+    Filtrée par allowed_groups (voir _searchable_source_names()) : une
+    source restreinte à un groupe dont l'utilisateur n'est pas membre
+    n'apparaît pas ici, cohérent avec le fait qu'elle ne renverra de
+    toute façon jamais de résultat pour lui dans /search.
     """
+    username = resolve_user(x_user)
+    user_groups = get_user_groups(username)
     result = []
     for name, s in file_sources_config.get_sources().items():
-        if s.searchable:
+        if s.searchable and _visible_to(s, user_groups):
             result.append({"name": name, "label": s.label or name, "type": "file", "collectable": s.collectable})
     for name, s in sql_sources_config.get_sources().items():
-        if s.searchable:
+        if s.searchable and _visible_to(s, user_groups):
             result.append({"name": name, "label": s.label or name, "type": "sql", "collectable": s.collectable})
     for name, s in web_sources_config.get_sources().items():
-        if s.searchable:
+        if s.searchable and _visible_to(s, user_groups):
             result.append({"name": name, "label": s.label or name, "type": "web", "collectable": s.collectable})
     return sorted(result, key=lambda s: s["label"].lower())
 
@@ -528,7 +562,7 @@ def search(
     # désactivation est absolue, pas seulement "absente par défaut".
     base_filters = [
         acl_filter,   # ACL en premier — mis en cache par ES
-        {"terms": {"source": _searchable_source_names()}},
+        {"terms": {"source": _searchable_source_names(username)}},
     ]
     if req.has_attachments:
         base_filters.append({"term": {"has_attachments": True}})
@@ -578,7 +612,7 @@ def search(
     # obsolète restée dans le state du navigateur) plutôt que de lever une
     # erreur — même tolérance que le reste de la recherche vis-à-vis d'un
     # état client périmé.
-    custom_facet_defs = _active_custom_facets(source_names)
+    custom_facet_defs = _active_custom_facets(source_names, username)
     custom_filters = {}
     for es_field in custom_facet_defs:
         values = (req.custom or {}).get(es_field)
@@ -781,7 +815,7 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
     else:
         must = [{"multi_match": {"query": query_text, "fields": fields, "fuzziness": "AUTO"}}]
 
-    filters = [acl_filter, {"terms": {"source": _searchable_source_names()}}]
+    filters = [acl_filter, {"terms": {"source": _searchable_source_names(username)}}]
     if req.has_attachments:
         filters.append({"term": {"has_attachments": True}})
     if req.date_from or req.date_to:
@@ -808,7 +842,7 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
         # Même tolérance qu'en recherche normale (voir _active_custom_facets
         # dans /search) : une clé qui ne correspond plus à une facette
         # active de la/des source(s) en jeu est ignorée plutôt que rejetée.
-        if values and es_field in _active_custom_facets(source_names):
+        if values and es_field in _active_custom_facets(source_names, username):
             filters.append({"terms": {es_field: values}})
 
     return {"bool": {"must": must, "filter": filters}}
@@ -1109,9 +1143,19 @@ def _check_doc_access(doc: dict, username: str) -> bool:
     utilisateur ou groupe), mais évaluée sur un document déjà récupéré
     plutôt qu'en filtre de requête ES — utilisée partout où un document
     précis est accédé par id (GET /document, édition des mots-clés
-    personnalisés...)."""
+    personnalisés...). Vérifie EN PLUS que la source elle-même n'est pas
+    restreinte à des groupes dont l'utilisateur n'est pas membre (voir
+    allowed_groups) : un accès direct par doc_id doit respecter la même
+    restriction qu'une recherche, sinon un doc_id connu (partagé,
+    deviné...) contournerait la restriction de source."""
     acl         = doc.get("acl", {})
     user_groups = get_user_groups(username)
+
+    source_name = doc.get("source")
+    source = _get_any_source(source_name) if source_name else None
+    if source is not None and not _visible_to(source, user_groups):
+        return False
+
     return (
         acl.get("public", False)
         or acl.get("owner")  == username
@@ -1454,14 +1498,15 @@ def admin_get_sources(user: str = Depends(require_admin)):
 def admin_add_source(body: SourceCreate, user: str = Depends(require_admin)):
     try:
         # add_source() REMPLACE l'entrée existante en entier — on relit
-        # searchable/collectable/ocr_enabled au préalable pour ne pas les
-        # réinitialiser à leur valeur par défaut au premier "Modifier"
-        # venu (voir add_source() docstring).
+        # searchable/collectable/ocr_enabled/allowed_groups au préalable
+        # pour ne pas les réinitialiser à leur valeur par défaut au
+        # premier "Modifier" venu (voir add_source() docstring).
         existing = file_sources_config.get_sources().get(body.name)
         return file_sources_config.add_source(
             body.name, body.es_index, subfolder=body.subfolder, label=body.label,
             searchable=existing.searchable if existing else True,
             collectable=existing.collectable if existing else True,
+            allowed_groups=list(existing.allowed_groups) if existing else None,
             description=body.description,
             ocr_enabled=body.ocr_enabled if body.ocr_enabled is not None else (existing.ocr_enabled if existing else False),
         )
@@ -1612,8 +1657,9 @@ def admin_add_sql_source(body: SqlSourceCreate, user: str = Depends(require_admi
     """
     try:
         # add_source() REMPLACE l'entrée existante en entier — on relit
-        # searchable/collectable au préalable pour ne pas les réinitialiser
-        # à True au premier "Modifier" venu (voir add_source() docstring).
+        # searchable/collectable/allowed_groups au préalable pour ne pas
+        # les réinitialiser à leur valeur par défaut au premier "Modifier"
+        # venu (voir add_source() docstring).
         existing = sql_sources_config.get_sources().get(body.name)
         return sql_sources_config.add_source(
             name=body.name,
@@ -1627,6 +1673,7 @@ def admin_add_sql_source(body: SqlSourceCreate, user: str = Depends(require_admi
             label=body.label,
             searchable=existing.searchable if existing else True,
             collectable=existing.collectable if existing else True,
+            allowed_groups=list(existing.allowed_groups) if existing else None,
             description=body.description,
         )
     except ValueError as e:
@@ -1741,8 +1788,9 @@ def admin_add_web_source(body: WebSourceCreate, user: str = Depends(require_admi
     """
     try:
         # add_source() REMPLACE l'entrée existante en entier — on relit
-        # searchable/collectable au préalable pour ne pas les réinitialiser
-        # à True au premier "Modifier" venu (voir add_source() docstring).
+        # searchable/collectable/allowed_groups au préalable pour ne pas
+        # les réinitialiser à leur valeur par défaut au premier "Modifier"
+        # venu (voir add_source() docstring).
         existing = web_sources_config.get_sources().get(body.name)
         return web_sources_config.add_source(
             name=body.name,
@@ -1753,6 +1801,7 @@ def admin_add_web_source(body: WebSourceCreate, user: str = Depends(require_admi
             label=body.label,
             searchable=existing.searchable if existing else True,
             collectable=existing.collectable if existing else True,
+            allowed_groups=list(existing.allowed_groups) if existing else None,
             description=body.description,
         )
     except ValueError as e:
@@ -1829,6 +1878,10 @@ class CollectableUpdate(BaseModel):
     collectable: bool
 
 
+class GroupsUpdate(BaseModel):
+    allowed_groups: list[str]
+
+
 _SOURCE_REGISTRIES = {
     "file": file_sources_config,
     "sql":  sql_sources_config,
@@ -1862,10 +1915,11 @@ def _all_sources_status() -> dict:
                 "es_index":   s.es_index,
                 "label":       getattr(s, "label", None) or name,
                 "description": getattr(s, "description", None) or "",
-                "searchable":  s.searchable,
-                "collectable": s.collectable,
-                "indexed":     indexed,
-                "size_bytes":  size_bytes,
+                "searchable":     s.searchable,
+                "collectable":    s.collectable,
+                "allowed_groups": list(s.allowed_groups),
+                "indexed":        indexed,
+                "size_bytes":     size_bytes,
             }
     return result
 
@@ -1909,6 +1963,32 @@ def admin_set_source_collectable(
         raise HTTPException(status_code=400, detail=f"Type de source invalide : '{type}' (attendu file, sql ou web)")
     try:
         registry.set_collectable(name, body.collectable)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _all_sources_status()
+
+
+@app.post("/admin/all-sources/{name}/groups")
+def admin_set_source_groups(
+    name: str, body: GroupsUpdate,
+    type: str = Query(..., description="file, sql ou web"),
+    user: str = Depends(require_admin),
+):
+    """Restreint (ou lève la restriction sur) la visibilité d'une source
+    dans /search aux membres d'un des groupes AD/LDAP listés — liste
+    vide = aucune restriction. Quel que soit le type de source ; n'affecte
+    ni l'ingestion ni l'ACL par document (voir allowed_groups dans
+    file_sources_config.py pour le détail). Les noms de groupes ne sont
+    PAS vérifiés contre l'annuaire LDAP (ce module n'a pas de fonction
+    "lister tous les groupes" — même limite que ACCESS_GROUP/ADMIN_GROUP,
+    voir access_auth.py/admin_auth.py) : une faute de frappe rend
+    silencieusement la source invisible à tout le monde plutôt que de
+    lever une erreur, à l'admin de vérifier l'orthographe exacte du CN AD."""
+    registry = _SOURCE_REGISTRIES.get(type)
+    if registry is None:
+        raise HTTPException(status_code=400, detail=f"Type de source invalide : '{type}' (attendu file, sql ou web)")
+    try:
+        registry.set_allowed_groups(name, body.allowed_groups)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return _all_sources_status()

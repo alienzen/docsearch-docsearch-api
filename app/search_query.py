@@ -50,16 +50,25 @@ def build_acl_filter(username: str) -> dict:
     }
 
 
-def _searchable_source_names() -> list[str]:
+def _visible_to(s, user_groups: list[str]) -> bool:
+    """Identique à _visible_to() dans search_api.py — voir l'avertissement
+    de cohérence en tête de fichier."""
+    return not s.allowed_groups or any(g in s.allowed_groups for g in user_groups)
+
+
+def _searchable_source_names(username: str) -> list[str]:
+    """Identique à _searchable_source_names() dans search_api.py — voir
+    l'avertissement de cohérence en tête de fichier."""
+    user_groups = get_user_groups(username)
     names = []
     for name, s in file_sources_config.get_sources().items():
-        if s.searchable:
+        if s.searchable and _visible_to(s, user_groups):
             names.append(name)
     for name, s in sql_sources_config.get_sources().items():
-        if s.searchable:
+        if s.searchable and _visible_to(s, user_groups):
             names.append(name)
     for name, s in web_sources_config.get_sources().items():
-        if s.searchable:
+        if s.searchable and _visible_to(s, user_groups):
             names.append(name)
     return names
 
@@ -106,8 +115,12 @@ def _folder_filter(folder: str | list[str] | None) -> dict | None:
     return {"bool": {"should": should, "minimum_should_match": 1}}
 
 
-def _active_custom_facets(source_names: list[str]) -> dict[str, str]:
-    names = source_names or [name for name, s in sql_sources_config.get_sources().items() if s.searchable]
+def _active_custom_facets(source_names: list[str], username: str) -> dict[str, str]:
+    user_groups = get_user_groups(username)
+    names = source_names or [
+        name for name, s in sql_sources_config.get_sources().items()
+        if s.searchable and _visible_to(s, user_groups)
+    ]
     result: dict[str, str] = {}
     for name in names:
         try:
@@ -156,7 +169,7 @@ def build_query_clauses(criteria: dict, username: str) -> dict:
 
     filters = [
         build_acl_filter(username),
-        {"terms": {"source": _searchable_source_names()}},
+        {"terms": {"source": _searchable_source_names(username)}},
     ]
 
     date_from, date_to = criteria.get("date_from"), criteria.get("date_to")
@@ -187,7 +200,7 @@ def build_query_clauses(criteria: dict, username: str) -> dict:
     if source_names:
         filters.append({"terms": {"source": source_names}})
 
-    custom_facet_defs = _active_custom_facets(source_names)
+    custom_facet_defs = _active_custom_facets(source_names, username)
     for es_field in custom_facet_defs:
         values = (criteria.get("custom") or {}).get(es_field)
         if values:

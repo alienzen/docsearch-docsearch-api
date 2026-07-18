@@ -46,7 +46,7 @@ import re
 import json
 import time
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,18 @@ class Source:
     # par défaut car coûteux en CPU, à activer explicitement pour les
     # sources qui en ont réellement besoin (voir set_ocr_enabled()).
     ocr_enabled: bool = False
+    # Groupes AD/LDAP (voir ldap_resolver.get_user_groups) autorisés à VOIR
+    # cette source dans /search — vide (défaut) = aucune restriction,
+    # accessible à tout utilisateur passant le filtre ACL par document
+    # habituel (build_acl_filter). Restriction au niveau SOURCE entière,
+    # orthogonale à l'ACL par document (acl.groups) : celle-ci filtre les
+    # documents individuels d'une source par ailleurs accessible, celle-là
+    # masque la source en bloc à qui n'est membre d'aucun groupe listé.
+    # Concerne UNIQUEMENT docsearch-api (recherche) : comme facet/
+    # facet_label dans sql_sources_config.py, n'a pas besoin d'être
+    # répercuté dans la copie docsearch-ingestion (aucun rôle à
+    # l'ingestion, qui ne fait pas de contrôle d'accès).
+    allowed_groups: tuple[str, ...] = field(default_factory=tuple)
 
 
 _cache: dict = {}
@@ -178,6 +190,7 @@ def _to_source(name: str, entry: dict) -> Source:
         collectable=entry.get("collectable", True),
         description=entry.get("description") or "",
         ocr_enabled=entry.get("ocr_enabled", False),
+        allowed_groups=tuple(entry.get("allowed_groups") or ()),
     )
 
 
@@ -241,7 +254,7 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, es_index: str, subfolder: str | None = None, label: str | None = None,
     searchable: bool = True, collectable: bool = True, description: str | None = None,
-    ocr_enabled: bool = False,
+    ocr_enabled: bool = False, allowed_groups: list[str] | None = None,
 ) -> dict:
     """
     Enregistre une nouvelle source (ou met à jour une source existante du
@@ -275,6 +288,7 @@ def add_source(
             "collectable": collectable,
             "description": description or "",
             "ocr_enabled": ocr_enabled,
+            "allowed_groups": list(allowed_groups or []),
         }
 
     return _read_write(mutate)
@@ -332,6 +346,24 @@ def set_ocr_enabled(name: str, ocr_enabled: bool) -> dict:
                 f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
             )
         sources[name]["ocr_enabled"] = ocr_enabled
+
+    return _read_write(mutate)
+
+
+def set_allowed_groups(name: str, allowed_groups: list[str]) -> dict:
+    """
+    Restreint la visibilité de cette source dans /search aux membres d'un
+    des groupes AD/LDAP listés — liste vide = aucune restriction (défaut).
+    Sans effet sur l'ingestion (watcher continue normalement) ni sur l'ACL
+    par document (build_acl_filter) : les deux se combinent (voir
+    _searchable_source_names() dans search_api.py).
+    """
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(
+                f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
+            )
+        sources[name]["allowed_groups"] = list(allowed_groups or [])
 
     return _read_write(mutate)
 
