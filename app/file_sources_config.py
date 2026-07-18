@@ -78,13 +78,6 @@ ES_SEARCH_ALIAS = os.getenv("ES_SEARCH_ALIAS", "docsearch-all")
 # clé Redis ou d'un nom d'index ES avec des caractères piégeux.
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
-# Styles de mise en page des résultats disponibles pour cette source dans
-# l'interface de recherche (index.html:renderResults) — noms fixes, mais
-# CONTENU éditable à chaud depuis l'admin (voir docsearch-api/
-# display_styles_config.py, GET/POST /admin/display-styles). Voir
-# set_display_style().
-DISPLAY_STYLES = {"default", "compact", "minimal", "dense", "essentiel", "complet_sans_extrait"}
-
 DEFAULT_SOURCES = {
     DEFAULT_SOURCE_NAME: {
         "subfolder":   _DEFAULT_SUBFOLDER,
@@ -93,7 +86,6 @@ DEFAULT_SOURCES = {
         "searchable":  True,
         "collectable": True,
         "description": "",
-        "display_style": "default",
     }
 }
 
@@ -107,7 +99,6 @@ class Source:
     searchable: bool
     collectable: bool = True
     description: str = ""
-    display_style: str = "default"
     # Active l'OCR (Tesseract via Tika, voir indexer.py:_ocr_headers) pour
     # les PDF scannés et images (jpg/png/...) de cette source — désactivé
     # par défaut car coûteux en CPU, à activer explicitement pour les
@@ -186,7 +177,6 @@ def _to_source(name: str, entry: dict) -> Source:
         searchable=entry.get("searchable", True),
         collectable=entry.get("collectable", True),
         description=entry.get("description") or "",
-        display_style=entry.get("display_style") or "default",
         ocr_enabled=entry.get("ocr_enabled", False),
     )
 
@@ -342,29 +332,6 @@ def set_ocr_enabled(name: str, ocr_enabled: bool) -> dict:
                 f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
             )
         sources[name]["ocr_enabled"] = ocr_enabled
-
-    return _read_write(mutate)
-
-
-def set_display_style(name: str, display_style: str) -> dict:
-    """
-    Change le style d'affichage des résultats de cette source dans
-    l'interface de recherche (voir DISPLAY_STYLES) — n'affecte ni
-    l'ingestion ni la recherche elle-même, purement une préférence de
-    présentation résolue côté index.html via GET /searchable-sources.
-    """
-    if display_style not in DISPLAY_STYLES:
-        raise ValueError(
-            f"Style d'affichage invalide : '{display_style}'. "
-            f"Valeurs possibles : {', '.join(sorted(DISPLAY_STYLES))}"
-        )
-
-    def mutate(sources):
-        if name not in sources:
-            raise KeyError(
-                f"Source inconnue : '{name}'. Sources disponibles : {', '.join(sources.keys())}"
-            )
-        sources[name]["display_style"] = display_style
 
     return _read_write(mutate)
 

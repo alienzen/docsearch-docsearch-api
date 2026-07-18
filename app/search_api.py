@@ -34,7 +34,6 @@ import nps_log
 import suggestion_log
 import engagement_config
 import ui_config
-import display_styles_config
 import saved_searches
 import alert_notifications
 import saved_collections
@@ -402,20 +401,18 @@ def get_searchable_sources():
     de cases à cocher. `collectable` est inclus pour la même raison que
     `label`/`type` : index.html s'en sert pour masquer la case "ajouter à
     une collection" sur les résultats d'une source qui l'interdit (voir
-    sourceCollectable() côté UI), sans appel séparé. `display_style` de
-    même : renderResults() choisit le gabarit de carte par résultat sans
-    appel séparé (voir sourceDisplayStyle() côté UI).
+    sourceCollectable() côté UI), sans appel séparé.
     """
     result = []
     for name, s in file_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": s.label or name, "type": "file", "collectable": s.collectable, "display_style": s.display_style})
+            result.append({"name": name, "label": s.label or name, "type": "file", "collectable": s.collectable})
     for name, s in sql_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": s.label or name, "type": "sql", "collectable": s.collectable, "display_style": s.display_style})
+            result.append({"name": name, "label": s.label or name, "type": "sql", "collectable": s.collectable})
     for name, s in web_sources_config.get_sources().items():
         if s.searchable:
-            result.append({"name": name, "label": s.label or name, "type": "web", "collectable": s.collectable, "display_style": s.display_style})
+            result.append({"name": name, "label": s.label or name, "type": "web", "collectable": s.collectable})
     return sorted(result, key=lambda s: s["label"].lower())
 
 
@@ -665,10 +662,9 @@ def search(
             # liste fixe (motif précédent) cassait silencieusement tout
             # champ personnalisé mappé par une source SQL/web (ex: colonne
             # "telephone" de la source "agents", voir sql_sources_config.py)
-            # — jamais renvoyé au navigateur quelle que soit la config des
-            # gabarits d'affichage (display_styles_config.py), sans erreur
-            # visible. "content"/"content_vector" restent exclus (volumineux,
-            # jamais affichés directement dans un résultat de recherche).
+            # — jamais renvoyé au navigateur, sans erreur visible.
+            # "content"/"content_vector" restent exclus (volumineux, jamais
+            # affichés directement dans un résultat de recherche).
             source_excludes=["content", "content_vector"],
             aggs={
                 "by_extension": facet_agg("extension",  10, "extension"),
@@ -1509,7 +1505,7 @@ def admin_set_source_ocr(name: str, body: OcrUpdate, user: str = Depends(require
     """Active/désactive l'OCR (Tesseract via Tika) pour une source
     fichier — n'a de sens que pour les sources fichiers (PDF scannés,
     images), contrairement aux bascules génériques searchable/
-    collectable/display-style : volontairement absente de
+    collectable : volontairement absente de
     _SOURCE_REGISTRIES//admin/all-sources/{name}/... (sql/web n'ont pas
     de notion d'OCR)."""
     try:
@@ -1833,10 +1829,6 @@ class CollectableUpdate(BaseModel):
     collectable: bool
 
 
-class DisplayStyleUpdate(BaseModel):
-    display_style: str
-
-
 _SOURCE_REGISTRIES = {
     "file": file_sources_config,
     "sql":  sql_sources_config,
@@ -1872,7 +1864,6 @@ def _all_sources_status() -> dict:
                 "description": getattr(s, "description", None) or "",
                 "searchable":  s.searchable,
                 "collectable": s.collectable,
-                "display_style": getattr(s, "display_style", "default"),
                 "indexed":     indexed,
                 "size_bytes":  size_bytes,
             }
@@ -1920,29 +1911,6 @@ def admin_set_source_collectable(
         registry.set_collectable(name, body.collectable)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return _all_sources_status()
-
-
-@app.post("/admin/all-sources/{name}/display-style")
-def admin_set_source_display_style(
-    name: str, body: DisplayStyleUpdate,
-    type: str = Query(..., description="file, sql ou web"),
-    user: str = Depends(require_admin),
-):
-    """Change le style d'affichage des résultats d'une source dans
-    l'interface de recherche, quel que soit son type — n'affecte ni
-    l'ingestion ni la recherche elle-même (voir
-    set_display_style() dans chaque registre, et sourceDisplayStyle()/
-    renderResults() côté index.html)."""
-    registry = _SOURCE_REGISTRIES.get(type)
-    if registry is None:
-        raise HTTPException(status_code=400, detail=f"Type de source invalide : '{type}' (attendu file, sql ou web)")
-    try:
-        registry.set_display_style(name, body.display_style)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     return _all_sources_status()
 
 
@@ -2229,48 +2197,6 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
         if body.sources_mount_display is not None:
             config = ui_config.set_text("sources_mount_display", body.sources_mount_display)
         return config
-    except (ValueError, RuntimeError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-# ── Gabarits d'affichage des résultats ──────────────────────────
-# Composition de chaque style nommé (voir DISPLAY_STYLES dans
-# {file,sql,web}_sources_config.py, qui fixe les noms disponibles pour
-# assigner une source à un style — display_styles_config.py définit ce
-# que chaque nom affiche réellement, éditable à chaud sans redémarrage).
-class DisplayStyleDefinitionUpdate(BaseModel):
-    fields: list[str]
-    expandable: bool
-
-
-@app.get("/display-styles")
-def get_display_styles():
-    """Public (pas d'auth) — l'interface de recherche l'appelle pour
-    savoir quels champs composer pour chaque style (voir
-    sourceDisplayStyle()/renderCard() côté index.html)."""
-    return display_styles_config.get_style_definitions()
-
-
-@app.get("/admin/display-styles")
-def admin_get_display_styles(user: str = Depends(require_admin)):
-    """Définitions courantes + catalogue des champs disponibles — permet
-    au panneau admin de savoir quelles cases proposer sans les coder en
-    dur une seconde fois côté UI."""
-    return {
-        "styles":         display_styles_config.get_style_definitions(),
-        "allowed_fields": sorted(display_styles_config.ALLOWED_FIELDS),
-    }
-
-
-@app.post("/admin/display-styles/{style_name}")
-def admin_set_display_style(
-    style_name: str, body: DisplayStyleDefinitionUpdate, user: str = Depends(require_admin),
-):
-    """Change la composition d'un style (quels champs, dépliable ou
-    non) — effectif immédiatement pour toute nouvelle recherche, sans
-    redémarrage d'aucun conteneur."""
-    try:
-        return display_styles_config.set_style_definition(style_name, body.fields, body.expandable)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 

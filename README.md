@@ -35,7 +35,6 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | POST | `/ask` | Assistant conversationnel (RAG), voir `chat.html` |
 | GET  | `/ui-config` | Bascules d'interface publique (lien Assistant IA, pied de page, export...) |
 | GET  | `/is-admin` | Indique si l'utilisateur courant a accès au panneau d'administration |
-| GET  | `/display-styles` | Gabarits d'affichage des résultats, par style nommé |
 | GET  | `/engagement-config` | Bascules de mesure de satisfaction (pouce, NPS, suggestions) |
 | POST | `/feedback`, `/click`, `/nps`, `/suggestions` | Signaux de mesure de satisfaction (voir "Mesure de satisfaction" dans l'admin) |
 
@@ -125,12 +124,11 @@ correspondante : `docsearch-ui/public/admin.html`.
 | `GET/POST/DELETE /admin/sql-sources[/{name}]`, `.../label`, `.../description` | Sources SQL (PostgreSQL/MySQL) |
 | `GET/POST/DELETE /admin/sql-dsns[/{name}]` | DSN chiffrés (Fernet) utilisables par les sources SQL |
 | `GET/POST/DELETE /admin/web-sources[/{name}]`, `.../label`, `.../description`, `.../pause` | Sources web (Elastic Open Web Crawler) |
-| `GET /admin/all-sources`, `POST .../searchable`, `.../collectable`, `.../display-style` | Vue unifiée fichier/SQL/web — bascules "Recherche"/"Collections" et gabarit d'affichage, par source |
+| `GET /admin/all-sources`, `POST .../searchable`, `.../collectable` | Vue unifiée fichier/SQL/web — bascules "Recherche"/"Collections", par source |
 | `GET/POST /admin/filetypes`, `POST .../reset` | Types de fichiers indexés (activation, taille max), par source |
 | `GET/POST /admin/config`, `POST .../reset` | Paramètres opérationnels (limites d'archives, cadences, OCR) |
 | `GET/POST /admin/path-filters`, `.../exclude`, `.../include`, `.../remove` | Inclusion/exclusion de sous-dossiers |
 | `POST /admin/purge-path` | Purger l'index existant selon un motif (dry-run par défaut) |
-| `GET/POST /admin/display-styles[/{style_name}]` | Composition des gabarits d'affichage des résultats (champs visibles, dépliable) |
 | `POST /admin/ui-config` | Bascules d'interface (liens Assistant IA/Administration, export, collections...) — voir `GET /ui-config` public |
 | `POST /admin/engagement-config` | Bascules de mesure de satisfaction (pouce, NPS, suggestions) — voir `GET /engagement-config` public |
 | `GET /admin/nps-summary`, `.../suggestions`, `POST .../suggestions/{id}/status` | Résultats NPS et suggestions utilisateurs |
