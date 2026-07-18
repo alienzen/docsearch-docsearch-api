@@ -91,17 +91,27 @@ DEFAULT_UI_CONFIG = {
                             # (admin.html, stats.html, admin-help.html) et theme-admin.css —
                             # permet par exemple un thème sombre en administration sans l'imposer
                             # aux utilisateurs de la recherche, ou l'inverse.
-    "header_logo_url": "",   # URL d'image personnalisée pour le fond de .fr-logo (bloc "marque"
-                            # de l'en-tête, voir index.html) — vide par défaut, retombe alors sur
-                            # le monogramme générique défini en CSS. Volontairement pas de valeur
-                            # par défaut pointant vers un vrai logo (Marianne ou autre) : ce champ
-                            # est à la discrétion de l'administrateur, pas préconfiguré.
-    "header_logo_text": "Entité fictive",   # texte du bloc .fr-logo (index.html) — appliqué en
-                            # textContent (pas de <br> forcé : la largeur étroite de .fr-logo
-                            # suffit à faire retomber le texte sur 2 lignes naturellement).
+    "header_logo_url": "",   # URL d'image personnalisée pour .header-logo (bloc "marque" de
+                            # l'en-tête, voir index.html) — vide par défaut, retombe alors sur
+                            # le monogramme générique défini en JS (config.js:loadUiConfig).
+                            # Volontairement pas de valeur par défaut pointant vers un vrai logo
+                            # (Marianne ou autre) : ce champ est à la discrétion de
+                            # l'administrateur, pas préconfiguré.
+    "header_logo_text": "DocSearch",   # textContent de .header-title (index.html, à côté de
+                            # .header-logo) — défaut identique au texte historiquement codé en
+                            # dur, pour qu'activer ce réglage ne change rien tant que
+                            # l'administrateur n'a rien saisi.
+    "header_subtitle_text": "Explorez, trouvez, comprenez",   # textContent de .header-subtitle
+                            # (index.html, sous header_logo_text) — même principe : défaut
+                            # identique à l'ancien texte codé en dur.
     "favicon_url": "",   # URL d'icône personnalisée pour l'onglet du navigateur (toutes les
                             # pages qui lisent /ui-config) — vide par défaut, retombe alors sur
                             # /favicon.svg (même monogramme générique que header_logo_url).
+    "footer_text": "DocSearch — Explorez, trouvez, comprenez",   # textContent du <span> dans
+                            # #page-footer (index.html uniquement — admin.html/stats.html/
+                            # admin-help.html gardent chacun leur propre texte de pied de page,
+                            # qui décrit la page plutôt que la marque du site). Défaut identique
+                            # à l'ancien texte codé en dur.
     "sources_mount_display": "",   # remplace, uniquement à l'affichage/copie côté index.html
                             # (copyPathClick), le préfixe SOURCES_MOUNT (ex: "/sources", chemin de
                             # montage interne aux conteneurs) par une valeur utilisable par

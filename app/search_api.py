@@ -2161,7 +2161,9 @@ class UiConfigUpdate(BaseModel):
     theme_admin: str | None = None
     header_logo_url: str | None = None
     header_logo_text: str | None = None
+    header_subtitle_text: str | None = None
     favicon_url: str | None = None
+    footer_text: str | None = None
     sources_mount_display: str | None = None
 
 
@@ -2281,8 +2283,12 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_text("header_logo_url", body.header_logo_url)
         if body.header_logo_text is not None:
             config = ui_config.set_text("header_logo_text", body.header_logo_text)
+        if body.header_subtitle_text is not None:
+            config = ui_config.set_text("header_subtitle_text", body.header_subtitle_text)
         if body.favicon_url is not None:
             config = ui_config.set_text("favicon_url", body.favicon_url)
+        if body.footer_text is not None:
+            config = ui_config.set_text("footer_text", body.footer_text)
         if body.sources_mount_display is not None:
             config = ui_config.set_text("sources_mount_display", body.sources_mount_display)
         return config
