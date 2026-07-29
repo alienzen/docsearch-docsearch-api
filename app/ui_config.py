@@ -71,13 +71,6 @@ DEFAULT_UI_CONFIG = {
                                     # effet pour les visiteurs ayant demandé la réduction des
                                     # animations à leur système : l'UI respecte
                                     # prefers-reduced-motion quel que soit ce flag.
-    "empty_state_force_motion_enabled": False,   # ignore le réglage système "réduire les animations"
-                                    # pour l'animation d'accueil ci-dessus. DÉSACTIVÉ PAR DÉFAUT, et
-                                    # à laisser ainsi hors démonstration : ce réglage existe parce
-                                    # que le mouvement déclenche des troubles vestibulaires chez
-                                    # certaines personnes, et le forcer contrevient au critère RGAA
-                                    # correspondant. Sans effet si empty_state_animation_enabled
-                                    # est désactivé.
     "show_current_user_enabled": True,   # badge "Connecté : <utilisateur> · <groupes>" dans l'en-tête
                                     # de la page de RECHERCHE (voir index.html:current-user) —
                                     # purement un affichage, aucun contrôle d'accès associé : le

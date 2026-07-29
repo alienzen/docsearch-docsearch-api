@@ -2154,7 +2154,6 @@ class UiConfigUpdate(BaseModel):
     alerts_enabled:      bool | None = None
     sort_enabled:        bool | None = None
     empty_state_animation_enabled: bool | None = None
-    empty_state_force_motion_enabled: bool | None = None
     show_current_user_enabled: bool | None = None
     show_current_user_groups_enabled: bool | None = None
     show_current_user_enabled_admin: bool | None = None
@@ -2273,8 +2272,6 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("sort_enabled", body.sort_enabled)
         if body.empty_state_animation_enabled is not None:
             config = ui_config.set_param("empty_state_animation_enabled", body.empty_state_animation_enabled)
-        if body.empty_state_force_motion_enabled is not None:
-            config = ui_config.set_param("empty_state_force_motion_enabled", body.empty_state_force_motion_enabled)
         if body.show_current_user_enabled is not None:
             config = ui_config.set_param("show_current_user_enabled", body.show_current_user_enabled)
         if body.show_current_user_groups_enabled is not None:
