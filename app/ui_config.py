@@ -104,14 +104,26 @@ DEFAULT_UI_CONFIG = {
     "header_subtitle_text": "Explorez, trouvez, comprenez",   # textContent de .header-subtitle
                             # (index.html, sous header_logo_text) — même principe : défaut
                             # identique à l'ancien texte codé en dur.
+    "logo_text": "République\nFrançaise",   # texte du bloc-marque DSFR (.fr-logo), affiché
+                            # en en-tête ET en pied de page de toutes les pages. UNE LIGNE DE
+                            # SAISIE = UNE LIGNE AFFICHÉE : le composant DsfrLogo rend chaque
+                            # ligne séparément, d'où le découpage sur "\n" côté interface. Permet
+                            # à une installation ministérielle d'afficher sa propre marque
+                            # ("Ministère\nde l'Action\net des Comptes publics") à la place de la
+                            # marque générique de l'État.
     "favicon_url": "",   # URL d'icône personnalisée pour l'onglet du navigateur (toutes les
                             # pages qui lisent /ui-config) — vide par défaut, retombe alors sur
-                            # /favicon.svg (même monogramme générique que header_logo_url).
+                            # /favicon.svg (monogramme générique).
     "footer_text": "DocSearch — Explorez, trouvez, comprenez",   # textContent du <span> dans
                             # #page-footer (index.html uniquement — admin.html/stats.html/
                             # admin-help.html gardent chacun leur propre texte de pied de page,
                             # qui décrit la page plutôt que la marque du site). Défaut identique
                             # à l'ancien texte codé en dur.
+    "footer_bottom_text": "",   # mention tout en bas du pied de page (.fr-footer__bottom-copy),
+                            # sous les liens. Vide par défaut => la ligne est masquée. Le lien de
+                            # licence que le composant DSFR accole habituellement à ce texte est
+                            # neutralisé côté interface : seule cette mention libre s'affiche,
+                            # sans « Etalab 2.0 » codé en dur.
     "sources_mount_display": "",   # remplace, uniquement à l'affichage/copie côté index.html
                             # (copyPathClick), le préfixe SOURCES_MOUNT (ex: "/sources", chemin de
                             # montage interne aux conteneurs) par une valeur utilisable par
