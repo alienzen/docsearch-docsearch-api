@@ -2580,7 +2580,8 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
     except Exception as e:
         if "index_not_found" in str(e).lower():
             return {"total_searches": 0, "unique_users": 0, "unique_ips": 0, "by_day": [],
-                     "feedback_up": 0, "feedback_down": 0, "by_group": []}
+                     "feedback_up": 0, "feedback_down": 0,
+                     "by_group": [], "searches_by_group": []}
         raise HTTPException(status_code=500, detail=str(e))
 
     return {
@@ -2593,6 +2594,15 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
         ],
         "feedback_up":   res["aggregations"]["feedback_up"]["doc_count"],
         "feedback_down": res["aggregations"]["feedback_down"]["doc_count"],
+        # Volume de recherches par groupe. Même agrégation que ci-dessous
+        # — inutile d'en lancer une seconde — mais TOUS les lots sont
+        # gardés : un groupe qui cherche beaucoup sans jamais donner son
+        # avis a précisément sa place ici, alors qu'il n'aurait rien à
+        # dire dans un tableau d'avis.
+        "searches_by_group": [
+            {"group": b["key"], "count": b["doc_count"]}
+            for b in res["aggregations"]["by_group"]["buckets"]
+        ],
         # Un utilisateur de deux groupes compte dans les deux : la somme
         # des lots dépasse donc le total global. C'est le propre d'une
         # agrégation par groupe, et c'est écrit sur la page.
