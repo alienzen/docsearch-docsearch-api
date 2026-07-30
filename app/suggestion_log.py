@@ -44,6 +44,7 @@ def _ensure_index(es: Elasticsearch) -> None:
                     "category":  {"type": "keyword"},
                     "text":      {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
                     "username":  {"type": "keyword"},
+                    **_GROUP_PROPERTIES,
                     "status":    {"type": "keyword"},
                 }
             }
@@ -53,11 +54,30 @@ def _ensure_index(es: Elasticsearch) -> None:
         # Index déjà créé par une version antérieure (avant le suivi de
         # statut) — complète son mapping sans y toucher autrement,
         # idempotent (même pattern que search_log.py).
-        es.indices.put_mapping(index=SUGGESTION_LOG_INDEX, properties={"status": {"type": "keyword"}})
+        es.indices.put_mapping(
+            index=SUGGESTION_LOG_INDEX,
+            properties={"status": {"type": "keyword"}, **_GROUP_PROPERTIES},
+        )
     _index_ready = True
 
 
-def log_suggestion(es: Elasticsearch, *, text: str, category: str | None, username: str | None = None) -> None:
+# Groupes de l'auteur — pour agréger les suggestions par service.
+# N'EST RENSEIGNÉ QUE SI `username` l'est : une suggestion anonyme le
+# reste. Un groupe est une donnée identifiante, a fortiori dans un petit
+# service ; l'y attacher reviendrait exactement à « combler discrètement
+# en arrière-plan » l'identité que l'utilisateur a choisi de taire, ce que
+# l'en-tête de ce module interdit.
+_GROUP_PROPERTIES = {"groups": {"type": "keyword"}}
+
+
+def log_suggestion(
+    es: Elasticsearch,
+    *,
+    text: str,
+    category: str | None,
+    username: str | None = None,
+    groups: list[str] | None = None,
+) -> None:
     """Enregistre une suggestion libre. `username` n'est renseigné que si
     l'utilisateur a choisi de ne pas rester anonyme (voir docstring de
     module) — absent sinon, jamais comblé silencieusement. Ne lève jamais
@@ -74,6 +94,10 @@ def log_suggestion(es: Elasticsearch, *, text: str, category: str | None, userna
             doc["category"] = category
         if username:
             doc["username"] = username
+            # Sous le `if` à dessein : voir _GROUP_PROPERTIES. Un appelant
+            # qui passerait des groupes sans nom d'utilisateur les verrait
+            # ignorés, plutôt que de percer l'anonymat par mégarde.
+            doc["groups"] = list(groups or [])
         es.index(index=SUGGESTION_LOG_INDEX, document=doc)
     except Exception as e:
         logger.warning(f"[suggestion_log] Échec d'écriture de la suggestion : {e}")
@@ -101,13 +125,29 @@ def list_suggestions(es: Elasticsearch, *, size: int, from_: int) -> dict:
             sort=[{"timestamp": {"order": "desc"}}],
             size=size,
             from_=from_,
+            # Agrégation sur TOUT l'index, pas sur la page affichée : le
+            # décompte par groupe doit être celui du corpus complet, sinon
+            # il changerait en tournant les pages.
+            aggs={
+                "by_group": {
+                    "terms": {"field": "groups", "size": 50, "missing": "__sans_groupe__"},
+                },
+            },
         )
     except Exception as e:
         if "index_not_found" in str(e).lower():
-            return {"total": 0, "results": []}
+            return {"total": 0, "results": [], "by_group": []}
         raise
 
     return {
         "total":   res["hits"]["total"]["value"],
         "results": [{"id": h["_id"], **h["_source"]} for h in res["hits"]["hits"]],
+        # Le lot « sans groupe » réunit ici DEUX cas très différents : les
+        # suggestions anonymes, dont c'est le principe même, et celles
+        # antérieures à la capture. La page le dit, faute de pouvoir les
+        # distinguer sans percer l'anonymat.
+        "by_group": [
+            {"group": b["key"], "count": b["doc_count"]}
+            for b in res["aggregations"]["by_group"]["buckets"]
+        ],
     }

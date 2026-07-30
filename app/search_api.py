@@ -2477,7 +2477,16 @@ def submit_suggestion(body: SuggestionCreate, x_user: str | None = Header(defaul
     if not text:
         raise HTTPException(status_code=400, detail="La suggestion ne peut pas être vide.")
     username = None if body.anonymous else resolve_user(x_user)
-    suggestion_log.log_suggestion(es, text=text, category=body.category, username=username)
+    # Groupes seulement si l'utilisateur s'est identifié : une suggestion
+    # anonyme ne doit rien porter qui permette de la rattacher à un
+    # service (voir suggestion_log.py).
+    suggestion_log.log_suggestion(
+        es,
+        text=text,
+        category=body.category,
+        username=username,
+        groups=get_user_groups(username) if username else None,
+    )
     return {"status": "ok"}
 
 
@@ -2621,11 +2630,16 @@ def admin_zero_result_searches(user: str = Depends(require_admin), size: int = 5
                         "last_seen": {"max": {"field": "timestamp", "format": "strict_date_optional_time"}},
                     },
                 },
+                # Aucune capture supplémentaire n'est nécessaire : le champ
+                # `groups` est déjà écrit à chaque recherche.
+                "by_group": {
+                    "terms": {"field": "groups", "size": 50, "missing": "__sans_groupe__"},
+                },
             },
         )
     except Exception as e:
         if "index_not_found" in str(e).lower():
-            return {"total_zero_result_searches": 0, "results": []}
+            return {"total_zero_result_searches": 0, "results": [], "by_group": []}
         raise HTTPException(status_code=500, detail=str(e))
 
     return {
@@ -2637,6 +2651,10 @@ def admin_zero_result_searches(user: str = Depends(require_admin), size: int = 5
                 "last_seen": b["last_seen"]["value_as_string"],
             }
             for b in res["aggregations"]["by_query"]["buckets"]
+        ],
+        "by_group": [
+            {"group": b["key"], "count": b["doc_count"]}
+            for b in res["aggregations"]["by_group"]["buckets"]
         ],
     }
 
