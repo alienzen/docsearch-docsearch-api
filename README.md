@@ -161,6 +161,74 @@ doivent rester identiques entre les deux dépôts. Redis reste la seule
 source de vérité partagée, donc pas de risque de désynchronisation des
 *données* — seul le *code* doit être maintenu en parallèle.
 
+## Statistiques par groupe d'utilisateurs
+
+Les journaux enregistrent, **au moment de l'événement**, les groupes
+LDAP de l'utilisateur dans un champ `groups` (`keyword`) :
+
+| Index | Écrit par | Remarque |
+|---|---|---|
+| `search_logs` | `search_log.log_search()` | Écrit dès la recherche, **pas** à l'avis : `POST /feedback` est une mise à jour partielle du même document, y attacher les groupes n'en aurait couvert que les recherches notées |
+| `nps_logs` | `nps_log.log_nps()` | |
+| `suggestions` | `suggestion_log.log_suggestion()` | **Uniquement si un `username` est présent** — une suggestion déposée anonymement ne reçoit pas de groupe, sans quoi l'anonymat choisi par son auteur serait percé |
+
+Le mapping est ajouté par `put_mapping`, qui **fusionne sans écraser** :
+les documents déjà indexés restent en place, simplement dépourvus du
+champ. Ils tombent alors dans un lot `__sans_groupe__`, rendu « Non
+renseigné » à l'écran — jamais ignoré silencieusement, un total par
+groupe qui ne retombe pas sur le total global ferait douter de tout le
+tableau.
+
+**Restitution** — les endpoints existants sont étendus, aucun nouveau :
+`GET /admin/search-logs/summary` (clés `searches_by_group` et
+`by_group`, celle-ci portant avis positifs/négatifs par groupe),
+`.../zero-results`, `GET /admin/nps-summary` (score **recalculé** par
+groupe : `%promoteurs − %détracteurs`, jamais moyenné depuis le score
+global) et `GET /admin/suggestions`.
+
+`GET /admin/search-logs/export` porte une colonne **« Groupes »**,
+juste après « Utilisateur ».
+
+Deux propriétés à connaître avant de lire ces chiffres, rappelées sur
+`stats.html` :
+
+- un utilisateur appartenant à plusieurs groupes compte dans chacun —
+  **la somme des lignes dépasse le total**, c'est correct ;
+- **aucun seuil d'anonymat** n'est appliqué : dans un groupe très
+  restreint, « ce groupe a mis 0 » désigne quelqu'un. Les consultations
+  d'administration sont tracées dans le journal d'audit.
+
+### Rétro-remplir l'historique (opération exceptionnelle)
+
+`backfill_groups.py` complète les documents antérieurs à l'ajout du
+champ, sans quoi le lot « Non renseigné » écrase tous les autres
+pendant des mois :
+
+```bash
+docker exec docsearch-api python3 backfill_groups.py          # simulation
+docker exec docsearch-api python3 backfill_groups.py --apply  # écriture
+```
+
+⚠️ **Sémantique inverse de la capture normale** : le script applique
+l'appartenance LDAP **d'aujourd'hui** à des événements passés. Un agent
+ayant changé de service voit ses anciennes recherches recomptées dans
+son service actuel. Acceptable une fois pour amorcer les statistiques,
+à ne pas transformer en tâche récurrente — rejoué régulièrement, il
+réécrirait l'histoire à chaque mouvement de personnel.
+
+Garde-fous : simulation par défaut ; ne touche **que** les documents
+dépourvus de `groups` (une valeur capturée à l'écriture fait foi et
+n'est jamais écrasée) ; laisse intactes les suggestions anonymes ; et
+n'écrit rien pour un utilisateur introuvable dans LDAP — une liste vide
+masquerait le fait qu'on n'a rien trouvé.
+
+⚠️ Sur les instances déjà en service, l'index `suggestions` peut porter
+un `username` de type `text` : il précède la déclaration en `keyword`
+de `suggestion_log.py`, et Elasticsearch ne change jamais le type d'un
+champ existant. Toute agrégation dessus échoue (« Fielddata is
+disabled ») ; seule une réindexation corrigerait. Le script détecte le
+cas et bascule sur le sous-champ `username.keyword`.
+
 ## Lancer en local (nécessite un ES déjà peuplé)
 
 ```bash

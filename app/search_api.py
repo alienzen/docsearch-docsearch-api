@@ -2762,8 +2762,14 @@ def admin_export_search_logs(
     ws = wb.active
     ws.title = "Historique des recherches"
     ws.append([
-        "Date / heure", "Utilisateur", "Requête", "Champ recherché", "Source(s)",
-        "Extension(s)", "Auteur(s)", "Dossier", "Période début", "Période fin",
+        # « Groupes » colle à « Utilisateur » : c'est sa qualification, pas
+        # un critère de recherche. Les groupes sont ceux capturés AU MOMENT
+        # de la recherche (search_log.log_search), pas l'appartenance
+        # d'aujourd'hui — deux lignes du même utilisateur peuvent donc
+        # légitimement différer s'il a changé de service.
+        "Date / heure", "Utilisateur", "Groupes", "Requête", "Champ recherché",
+        "Source(s)", "Extension(s)", "Auteur(s)", "Dossier",
+        "Période début", "Période fin",
         "Résultats", "Documents retournés", "Avis", "Clics",
     ])
 
@@ -2781,6 +2787,7 @@ def admin_export_search_logs(
             ws.append([
                 s.get("timestamp", ""),
                 s.get("username", ""),
+                _join(s.get("groups")),
                 s.get("query", ""),
                 s.get("search_in", ""),
                 _join(s.get("source")),
@@ -2798,7 +2805,7 @@ def admin_export_search_logs(
         if "index_not_found" not in str(e).lower():
             raise HTTPException(status_code=500, detail=str(e))
 
-    for col_idx, width in enumerate([19, 14, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8], start=1):
+    for col_idx, width in enumerate([19, 14, 28, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8], start=1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
 
     buffer = io.BytesIO()
