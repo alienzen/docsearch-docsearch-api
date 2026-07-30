@@ -64,6 +64,11 @@ DEFAULT_UI_CONFIG = {
                                     # purement une préférence d'affichage, pas de contrôle d'accès
                                     # associé côté API (contrairement à export/collections/alerts) :
                                     # désactivé, la recherche reste triée par pertinence par défaut.
+    "shortcuts_link_enabled": True,   # lien "Raccourcis" dans l'en-tête de recherche, qui ouvre la
+                                    # palette des raccourcis clavier (docsearch-ui-vue uniquement).
+                                    # Désactivé, la palette reste accessible par la touche "?" et
+                                    # les raccourcis continuent de fonctionner : ce flag ne masque
+                                    # que le point d'entrée à la souris.
     "empty_state_animation_enabled": True,   # animation d'accueil affichée sur la page de recherche
                                     # tant qu'aucune recherche n'a été lancée (docsearch-ui-vue
                                     # uniquement) — purement décoratif, aucun contrôle d'accès
