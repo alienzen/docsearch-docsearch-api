@@ -7,6 +7,9 @@
 # filtrage faite là-bas (nouvelle facette, nouveau champ cherché, nouvelle
 # règle ACL) doit être répercutée ici, sinon une alerte pourrait signaler
 # des documents qu'une recherche manuelle ne trouverait pas (ou l'inverse).
+# Exception : field_sets() ci-dessous n'est PAS à recopier — c'est
+# l'inverse, search_api l'importe depuis ici. Les poids étant réglables
+# depuis l'administration, ils ne pouvaient pas rester en trois copies.
 # Volontairement une implémentation séparée plutôt qu'un import direct de
 # search_api : ce dernier charge FastAPI, Kafka, LDAP et toutes les routes
 # /admin au chargement du module — inutilement lourd pour un simple worker
@@ -22,14 +25,44 @@ from ldap_resolver import get_user_groups
 import file_sources_config
 import sql_sources_config
 import web_sources_config
+import runtime_config
 
-FIELD_SETS = {
-    "all":      ["content", "title^4", "filename^6", "author.text", "keywords.text^2"],
-    "title":    ["title"],
-    "author":   ["author.text"],
-    "keywords": ["keywords.text"],
-    "filepath": ["filepath.text"],
-}
+
+def field_sets() -> dict:
+    """Champs interrogés par `search_in`, avec leurs poids.
+
+    SOURCE UNIQUE des trois points d'usage — /search et l'export dans
+    search_api.py, la vérification d'alertes ici. Ces trois-là portaient
+    chacun leur copie littérale, que rien ne tenait synchronisée : un
+    poids modifié d'un seul côté aurait fait diverger silencieusement le
+    classement de l'écran, celui du fichier exporté et celui des alertes.
+
+    Les poids sont relus à chaque appel — c'est ce qui rend le réglage
+    effectif à chaud, sous le TTL du cache de runtime_config (~10 s).
+
+    Les jeux à champ unique n'ont pas de poids : il n'y a rien à
+    pondérer les uns par rapport aux autres. `author` vise le sous-champ
+    analysé `author.text` et non `author`, en keyword — non tokenisé, une
+    recherche en texte libre dessus ne matcherait jamais un nom partiel
+    comme « Dupont » contre « Martin Dupont ».
+    """
+    cfg = runtime_config.get_runtime_config()
+    filename = cfg.get("search_boost_filename", 6)
+    title = cfg.get("search_boost_title", 4)
+    keywords = cfg.get("search_boost_keywords", 2)
+    return {
+        "all": [
+            "content",
+            f"title^{title}",
+            f"filename^{filename}",
+            "author.text",
+            f"keywords.text^{keywords}",
+        ],
+        "title":    ["title"],
+        "author":   ["author.text"],
+        "keywords": ["keywords.text"],
+        "filepath": ["filepath.text"],
+    }
 
 
 def build_acl_filter(username: str) -> dict:
@@ -145,7 +178,8 @@ def build_query_clauses(criteria: dict, username: str) -> dict:
     """
     query_text = (criteria.get("query") or "").strip()
     search_in = criteria.get("search_in") or "all"
-    fields = FIELD_SETS.get(search_in, FIELD_SETS["all"])
+    sets = field_sets()
+    fields = sets.get(search_in, sets["all"])
 
     is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
     if not query_text:

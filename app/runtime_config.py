@@ -1,9 +1,19 @@
-# ⚠️  COPIE SYNCHRONISÉE depuis docsearch-ingestion/app/runtime_config.py — ces
-# deux fichiers doivent rester identiques (même clé Redis, même
-# logique). Toute modification doit être répercutée dans les DEUX
-# dépôts. Dupliqué ici (plutôt qu'importé) car docsearch-api ne peut
-# pas dépendre du code de docsearch-ingestion dans l'architecture
-# multi-dépôts — Redis reste la seule source de vérité partagée.
+# ⚠️  COPIE de docsearch-ingestion/app/runtime_config.py. Ce qui doit rester
+# identique entre les deux dépôts : la CLÉ REDIS et la LOGIQUE (lecture,
+# cache, fusion, écriture). Toute modification de celles-ci est à
+# répercuter dans les deux.
+#
+# DEFAULT_RUNTIME, en revanche, n'a pas à être identique : chaque dépôt y
+# déclare les paramètres dont il est propriétaire, et tous se retrouvent
+# dans la même clé Redis par fusion. Les réglages OCR appartiennent ainsi
+# à l'ingestion, les poids de recherche à l'API — ni l'un ni l'autre n'a
+# de sens de l'autre côté. Conséquence à connaître : set_param() refuse
+# une clé absente du DEFAULT_RUNTIME local, chaque dépôt ne pouvant
+# écrire que ce qu'il déclare.
+#
+# Dupliqué (plutôt qu'importé) car docsearch-api ne peut pas dépendre du
+# code de docsearch-ingestion dans l'architecture multi-dépôts — Redis
+# reste la seule source de vérité partagée.
 
 # runtime_config.py — Paramètres opérationnels modifiables à chaud
 #
@@ -46,7 +56,45 @@ DEFAULT_RUNTIME = {
     "worker_batch_size":         int(os.getenv("WORKER_BATCH_SIZE", "200")),
     "worker_flush_interval":     int(os.getenv("WORKER_FLUSH_INTERVAL", "10")),
     "watcher_poll_interval":     int(os.getenv("WATCHER_POLL_INTERVAL", "10")),
+
+    # Poids des champs dans le score de pertinence (voir field_sets() dans
+    # search_query.py). Le bon réglage dépend entièrement du corpus : des
+    # noms de fichiers parlants justifient un poids élevé, des mots-clés
+    # bien renseignés aussi — d'où un réglage à chaud plutôt qu'en dur.
+    #
+    # DÉCLARÉS EN FLOAT à dessein : set_param() coerce via
+    # type(DEFAULT_RUNTIME[key]), un défaut entier interdirait donc de
+    # saisir 2.5.
+    #
+    # Ce sont des MULTIPLICATEURS du score BM25 du champ, pas des
+    # pourcentages : le champ garde par ailleurs l'avantage que lui donne
+    # sa brièveté (BM25 favorise les correspondances dans les champs
+    # courts), ce qui explique qu'un titre ressorte déjà sans son ×4.
+    # `content` et `author` restent à 1, non réglables : ce sont les
+    # références auxquelles les autres se comparent.
+    "search_boost_filename":     float(os.getenv("SEARCH_BOOST_FILENAME", "6")),
+    "search_boost_title":        float(os.getenv("SEARCH_BOOST_TITLE", "4")),
+    "search_boost_keywords":     float(os.getenv("SEARCH_BOOST_KEYWORDS", "2")),
+
+    # Réglages OCR (Tesseract via Tika, voir indexer.py:_ocr_headers) —
+    # GLOBAUX et non par source : le pack linguistique Tesseract est figé
+    # dans l'image Tika pour tout le cluster, une langue par source
+    # n'aurait donc pas de sens. L'ACTIVATION de l'OCR, elle, se fait par
+    # source (voir file_sources_config.py:Source.ocr_enabled).
+    # Type str (pas bool) : set_param() coerce via type(DEFAULT_RUNTIME[k]),
+    # et bool("false") vaut True en Python — un piège qu'on évite en
+    # gardant ces réglages en chaînes plutôt qu'en booléens.
+    # Déclarés ici ALORS QUE l'ingestion en est propriétaire : sans cela,
+    # set_param() les refuse et ils restent inaccessibles depuis le
+    # panneau d'administration, que seule l'API sert.
+    "ocr_languages":             os.getenv("OCR_LANGUAGES", "fra"),
+    "ocr_strategy":              os.getenv("OCR_STRATEGY", "auto"),
 }
+
+# Bornes des poids de pertinence. Un poids nul ou négatif produirait un
+# classement absurde — et silencieusement, le moteur acceptant la requête.
+BOOST_MIN = 0.1
+BOOST_MAX = 100.0
 
 _cache: dict = {}
 _cache_time: float = 0.0
@@ -144,6 +192,18 @@ def set_param(key: str, value) -> dict:
         config[key] = original_type(value)
     except (TypeError, ValueError):
         config[key] = value
+
+    # Les poids de pertinence sont bornés : hors de cet intervalle, la
+    # requête reste valide pour Elasticsearch mais le classement n'a plus
+    # de sens. Mieux vaut un refus explicite qu'un moteur qui semble
+    # obéir tout en renvoyant n'importe quoi.
+    if key.startswith("search_boost_"):
+        boost = config[key]
+        if not isinstance(boost, (int, float)) or not (BOOST_MIN <= boost <= BOOST_MAX):
+            raise ValueError(
+                f"Poids invalide pour '{key}' : {value!r} — attendu un nombre "
+                f"entre {BOOST_MIN} et {BOOST_MAX}."
+            )
 
     client.set(RUNTIME_CONFIG_KEY, json.dumps(config))
 

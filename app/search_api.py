@@ -28,6 +28,7 @@ import cluster_status
 import admin_scan
 import filetype_config
 import runtime_config
+import search_query
 import path_filter
 import search_log
 import nps_log
@@ -507,19 +508,12 @@ def search(
     username   = resolve_user(x_user)
     acl_filter = build_acl_filter(username)
 
-    # search_in restreint la recherche à un seul champ plutôt que tous
-    # ("Tout" par défaut). "author" utilise le sous-champ analysé
-    # author.text (pas le "author" brut, en keyword — non tokenisé,
-    # une recherche en texte libre dessus ne matcherait jamais un nom
-    # partiel comme "Dupont" contre "Martin Dupont").
-    FIELD_SETS = {
-        "all":      ["content", "title^4", "filename^6", "author.text", "keywords.text^2"],
-        "title":    ["title"],
-        "author":   ["author.text"],
-        "keywords": ["keywords.text"],
-        "filepath": ["filepath.text"],
-    }
-    fields = FIELD_SETS.get(req.search_in, FIELD_SETS["all"])
+    # Champs et poids : source unique dans search_query.field_sets(),
+    # partagée avec la vérification d'alertes. Les poids étant réglables
+    # depuis l'administration, une copie littérale ici divergerait du
+    # classement affiché dès le premier réglage.
+    sets = search_query.field_sets()
+    fields = sets.get(req.search_in, sets["all"])
 
     # Convention habituelle des moteurs de recherche : entourer les
     # termes de guillemets ("terme exact") force une correspondance
@@ -794,14 +788,12 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
     à /search, sans objet pour un export).
     """
     acl_filter = build_acl_filter(username)
-    FIELD_SETS = {
-        "all":      ["content", "title^4", "filename^6", "author.text", "keywords.text^2"],
-        "title":    ["title"],
-        "author":   ["author.text"],
-        "keywords": ["keywords.text"],
-        "filepath": ["filepath.text"],
-    }
-    fields = FIELD_SETS.get(req.search_in, FIELD_SETS["all"])
+    # Champs et poids : source unique dans search_query.field_sets(),
+    # partagée avec la vérification d'alertes. Les poids étant réglables
+    # depuis l'administration, une copie littérale ici divergerait du
+    # classement affiché dès le premier réglage.
+    sets = search_query.field_sets()
+    fields = sets.get(req.search_in, sets["all"])
 
     query_text = req.query.strip()
     is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
