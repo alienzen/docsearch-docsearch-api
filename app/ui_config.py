@@ -64,6 +64,12 @@ DEFAULT_UI_CONFIG = {
                                     # purement une préférence d'affichage, pas de contrôle d'accès
                                     # associé côté API (contrairement à export/collections/alerts) :
                                     # désactivé, la recherche reste triée par pertinence par défaut.
+    "acl_visible_enabled": True,   # section "Droits d'accès" de la fiche détail (propriétaire,
+                                    # groupes autorisés) visible des utilisateurs NON administrateurs.
+                                    # Désactivé, elle n'apparaît plus que pour les membres d'ADMIN_GROUP.
+                                    # Purement un affichage : le filtrage ACL des résultats ne dépend
+                                    # pas de ce flag, et la donnée reste dans la réponse /document/{id}
+                                    # — masquer une section d'écran n'est pas un contrôle d'accès.
     "shortcuts_link_enabled": True,   # lien "Raccourcis" dans l'en-tête de recherche, qui ouvre la
                                     # palette des raccourcis clavier (docsearch-ui-vue uniquement).
                                     # Désactivé, la palette reste accessible par la touche "?" et

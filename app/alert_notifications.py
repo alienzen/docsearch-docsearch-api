@@ -130,3 +130,26 @@ def mark_all_seen(username: str) -> list[dict]:
         n["seen"] = True
     client.set(KEY_PREFIX + username, json.dumps(notifications))
     return sorted(notifications, key=lambda n: n["checked_at"], reverse=True)
+
+
+def purge(username: str) -> list[dict]:
+    """Efface TOUTES les notifications de l'utilisateur.
+
+    Distinct de mark_all_seen() : celui-ci ne fait que retirer le badge,
+    la liste restant consultable. La purge, elle, vide la corbeille — un
+    utilisateur qui a traité ses alertes n'a pas à faire défiler des mois
+    d'historique pour retrouver la dernière.
+
+    STRICTEMENT PERSONNEL : la clé Redis est indexée par nom
+    d'utilisateur, un appelant ne peut donc effacer que la sienne. Rien
+    n'est perdu côté recherches enregistrées — seules les notifications
+    déjà émises disparaissent, et le worker en redéposera à la prochaine
+    vérification positive.
+
+    Idempotent : purger une liste déjà vide ne lève pas d'erreur.
+    """
+    client = _get_redis_client()
+    if client is None:
+        return []
+    client.delete(KEY_PREFIX + username)
+    return []

@@ -444,7 +444,20 @@ def get_searchable_sources(x_user: str | None = Header(default=None)):
             result.append({"name": name, "label": s.label or name, "type": "file", "collectable": s.collectable})
     for name, s in sql_sources_config.get_sources().items():
         if s.searchable and _visible_to(s, user_groups):
-            result.append({"name": name, "label": s.label or name, "type": "sql", "collectable": s.collectable})
+            # card_fields : {champ ES: libellé} pour la carte de résultat.
+            # Valeur None = « libellé à dériver du nom », "" = « masquer »,
+            # texte = ce libellé. À défaut de card_label, on retombe sur
+            # facet_label, déjà saisi pour les colonnes en facette : sans
+            # cela, une source configurée avant cette évolution perdrait
+            # ses beaux libellés dans la carte.
+            card_fields = {
+                f.es_field: (f.card_label if f.card_label is not None else f.facet_label)
+                for f in s.fields
+            }
+            result.append({
+                "name": name, "label": s.label or name, "type": "sql",
+                "collectable": s.collectable, "card_fields": card_fields,
+            })
     for name, s in web_sources_config.get_sources().items():
         if s.searchable and _visible_to(s, user_groups):
             result.append({"name": name, "label": s.label or name, "type": "web", "collectable": s.collectable})
@@ -739,8 +752,14 @@ def search(
         "search_id": search_id,
         "results": [
             {
-                "id":        h["_id"],
                 **h["_source"],
+                # APRÈS le dépaquetage, jamais avant : une source SQL qui
+                # projette sa colonne "id" dans un champ ES du même nom
+                # écrasait sinon l'identifiant Elasticsearch par la clé
+                # primaire SQL. Tout ce qui s'appuie ensuite sur cet
+                # identifiant — /document/{id}, les collections, le suivi
+                # de clic — visait alors un document inexistant.
+                "id":        h["_id"],
                 "score":     round(h["_score"], 4),
                 "highlight": h.get("highlight", {}).get("content", []),
             }
@@ -1045,6 +1064,23 @@ def mark_all_alerts_seen(x_user: str | None = Header(default=None)):
     return alert_notifications.mark_all_seen(username)
 
 
+@app.delete("/alerts")
+def purge_alerts(x_user: str | None = Header(default=None)):
+    """Efface toutes les notifications de l'utilisateur courant.
+
+    DELETE et non POST : l'opération est une suppression, et elle est
+    idempotente — la rejouer sur une liste déjà vide donne le même
+    résultat.
+
+    Chacun ne peut purger que ses propres notifications : la clé Redis
+    est indexée par nom d'utilisateur résolu depuis l'en-tête X-User, il
+    n'existe aucun moyen d'en désigner une autre.
+    """
+    _require_alerts_enabled()
+    username = resolve_user(x_user)
+    return alert_notifications.purge(username)
+
+
 # ── Collections de documents ──────────────────────────────────────────
 # Strictement personnel (voir saved_collections.py) — entièrement
 # suspendable depuis l'admin (ui_config.collections_enabled) : désactivé,
@@ -1130,6 +1166,29 @@ def remove_collection_document(collection_id: str, doc_id: str, x_user: str | No
         raise HTTPException(status_code=503, detail=str(e))
 
 
+def _doc_acl(doc: dict) -> dict:
+    """Normalise l'ACL d'un document, quelle que soit sa forme.
+
+    Les documents issus de l'ingestion fichier portent un objet imbriqué
+    ({"acl": {"public": true, ...}}). Une source SQL, elle, projette ses
+    colonnes vers des noms de champs ES écrits en toutes lettres : le
+    mapping "acl.public" produit une clé PLATE "acl.public" dans le
+    _source. Elasticsearch traite les deux pareil dans une requête (c'est
+    un chemin de champ), mais un accès Python par doc["acl"] ne trouvait
+    rien — et tout document SQL était donc refusé par le contrôle
+    ci-dessous, y compris public.
+
+    On ne lit que les quatre clés attendues : une clé plate inconnue ne
+    peut pas s'inviter dans l'ACL.
+    """
+    acl = dict(doc.get("acl") or {})
+    for clef in ("public", "owner", "users", "groups"):
+        plat = f"acl.{clef}"
+        if plat in doc and clef not in acl:
+            acl[clef] = doc[plat]
+    return acl
+
+
 def _check_doc_access(doc: dict, username: str) -> bool:
     """Même règle ACL que build_acl_filter() (public/propriétaire/partagé
     utilisateur ou groupe), mais évaluée sur un document déjà récupéré
@@ -1140,7 +1199,7 @@ def _check_doc_access(doc: dict, username: str) -> bool:
     allowed_groups) : un accès direct par doc_id doit respecter la même
     restriction qu'une recherche, sinon un doc_id connu (partagé,
     deviné...) contournerait la restriction de source."""
-    acl         = doc.get("acl", {})
+    acl         = _doc_acl(doc)
     user_groups = get_user_groups(username)
 
     source_name = doc.get("source")
@@ -1175,7 +1234,16 @@ def get_document(
     if not _check_doc_access(doc, username):
         raise HTTPException(status_code=403, detail="Accès refusé")
 
-    return doc
+    # Même précaution que dans /search : le champ "id" du document (une
+    # source SQL y projette souvent sa clé primaire) ne doit pas passer
+    # pour l'identifiant Elasticsearch, seul utilisable pour redemander
+    # ce document.
+    #
+    # "acl" est normalisé au passage : un document SQL porte des clés
+    # plates ("acl.public"), que l'affichage des droits d'accès côté
+    # interface ne sait pas lire. Mieux vaut une forme unique ici que la
+    # même gymnastique répétée chez chaque consommateur.
+    return {**doc, "acl": _doc_acl(doc), "id": doc_id}
 
 
 # ── Mots-clés personnalisés ────────────────────────────────────
@@ -1402,6 +1470,11 @@ class SqlFieldMapping(BaseModel):
     analyzer: str | None = None
     facet: bool = False
     facet_label: str | None = None
+    # Libellé du champ dans la carte de résultat — voir FieldMapping dans
+    # sql_sources_config.py. None = affiché sous un libellé dérivé,
+    # "" = masqué, texte = ce libellé. La distinction None / "" doit
+    # survivre à la sérialisation : ne pas remplacer par `str = ""`.
+    card_label: str | None = None
 
 
 class SqlSourceCreate(BaseModel):
@@ -1630,6 +1703,11 @@ def admin_get_sql_sources(user: str = Depends(require_admin)):
                 {
                     "column": f.column, "es_field": f.es_field, "es_type": f.es_type, "analyzer": f.analyzer,
                     "facet": f.facet, "facet_label": f.facet_label,
+                    # Indispensable au formulaire d'édition : ce qu'il ne
+                    # LIT pas ici, il le renvoie vide au prochain
+                    # enregistrement — un aller-retour par cet écran
+                    # effacerait donc les libellés de carte.
+                    "card_label": f.card_label,
                 }
                 for f in s.fields
             ],
@@ -2145,6 +2223,7 @@ class UiConfigUpdate(BaseModel):
     custom_keywords_enabled: bool | None = None
     alerts_enabled:      bool | None = None
     sort_enabled:        bool | None = None
+    acl_visible_enabled: bool | None = None
     shortcuts_link_enabled: bool | None = None
     empty_state_animation_enabled: bool | None = None
     show_current_user_enabled: bool | None = None
@@ -2263,6 +2342,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("alerts_enabled", body.alerts_enabled)
         if body.sort_enabled is not None:
             config = ui_config.set_param("sort_enabled", body.sort_enabled)
+        if body.acl_visible_enabled is not None:
+            config = ui_config.set_param("acl_visible_enabled", body.acl_visible_enabled)
         if body.shortcuts_link_enabled is not None:
             config = ui_config.set_param("shortcuts_link_enabled", body.shortcuts_link_enabled)
         if body.empty_state_animation_enabled is not None:
@@ -2579,7 +2660,9 @@ def admin_search_logs(
 
     return {
         "total":   res["hits"]["total"]["value"],
-        "results": [{"id": h["_id"], **h["_source"]} for h in res["hits"]["hits"]],
+        # Même précaution que dans /search : l'identifiant ES doit
+        # l'emporter sur un éventuel champ "id" du document.
+        "results": [{**h["_source"], "id": h["_id"]} for h in res["hits"]["hits"]],
     }
 
 

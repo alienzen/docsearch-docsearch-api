@@ -87,6 +87,21 @@ class FieldMapping:
     # Redis.
     facet: bool = False
     facet_label: str | None = None
+    # card_label : libellé du champ dans la CARTE DE RÉSULTAT (voir
+    # extraFields.ts côté UI). Trois états, comme footer_bottom_text
+    # ailleurs dans le produit :
+    #   None (absent) → affiché, sous un libellé dérivé du nom de champ
+    #                   (« numero_piece » → « Numero piece ») ;
+    #   "Texte"       → affiché sous ce libellé, accents compris ;
+    #   ""            → MASQUÉ de la carte.
+    # Un seul attribut règle donc à la fois « faut-il l'afficher » et
+    # « sous quel nom » — un second attribut booléen aurait permis des
+    # combinaisons contradictoires (masqué ET libellé).
+    #
+    # Même remarque que facet/facet_label : ne concerne QUE docsearch-api,
+    # pas la copie docsearch-ingestion — sql_indexer.py n'indexe que
+    # column/es_field/es_type/analyzer et ignore les clés inconnues.
+    card_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +185,10 @@ def _to_source(name: str, entry: dict) -> SqlSource:
             column=f["column"], es_field=f["es_field"], es_type=f["es_type"],
             analyzer=f.get("analyzer"),
             facet=f.get("facet", False), facet_label=f.get("facet_label"),
+            # .get() sans défaut : une clé absente vaut None (« affiché,
+            # libellé dérivé »), une chaîne vide vaut « masqué ». Les
+            # deux doivent rester distinguables.
+            card_label=f.get("card_label"),
         )
         for f in entry.get("fields", [])
     )
