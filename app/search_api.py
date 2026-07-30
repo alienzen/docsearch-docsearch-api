@@ -732,6 +732,9 @@ def search(
     search_id = search_log.log_search(
         es,
         username=username,
+        # get_user_groups est en @lru_cache : cet appel à chaque recherche
+        # ne déclenche pas un aller-retour LDAP à chaque fois.
+        groups=get_user_groups(username),
         ip=get_client_ip(request),
         query=req.query,
         search_in=req.search_in,
@@ -2458,7 +2461,7 @@ def submit_nps(body: NpsCreate, x_user: str | None = Header(default=None)):
     if not engagement_config.get_config()["nps_enabled"]:
         raise HTTPException(status_code=403, detail="Le NPS est désactivé.")
     username = resolve_user(x_user)
-    nps_log.log_nps(es, username=username, score=body.score)
+    nps_log.log_nps(es, username=username, score=body.score, groups=get_user_groups(username))
     return {"status": "ok"}
 
 
@@ -2551,12 +2554,24 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
                 },
                 "feedback_up":   {"filter": {"term": {"feedback": "up"}}},
                 "feedback_down": {"filter": {"term": {"feedback": "down"}}},
+                # Avis par groupe. `missing` donne un lot explicite aux
+                # documents sans groupe — historique d'avant la capture,
+                # ou utilisateur sans appartenance : sans lui, la somme
+                # des lots ne retomberait pas sur le total global et
+                # ferait douter de tout le tableau.
+                "by_group": {
+                    "terms": {"field": "groups", "size": 50, "missing": "__sans_groupe__"},
+                    "aggs": {
+                        "feedback_up":   {"filter": {"term": {"feedback": "up"}}},
+                        "feedback_down": {"filter": {"term": {"feedback": "down"}}},
+                    },
+                },
             },
         )
     except Exception as e:
         if "index_not_found" in str(e).lower():
             return {"total_searches": 0, "unique_users": 0, "unique_ips": 0, "by_day": [],
-                     "feedback_up": 0, "feedback_down": 0}
+                     "feedback_up": 0, "feedback_down": 0, "by_group": []}
         raise HTTPException(status_code=500, detail=str(e))
 
     return {
@@ -2569,6 +2584,22 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
         ],
         "feedback_up":   res["aggregations"]["feedback_up"]["doc_count"],
         "feedback_down": res["aggregations"]["feedback_down"]["doc_count"],
+        # Un utilisateur de deux groupes compte dans les deux : la somme
+        # des lots dépasse donc le total global. C'est le propre d'une
+        # agrégation par groupe, et c'est écrit sur la page.
+        "by_group": [
+            {
+                "group":         b["key"],
+                "searches":      b["doc_count"],
+                "feedback_up":   b["feedback_up"]["doc_count"],
+                "feedback_down": b["feedback_down"]["doc_count"],
+            }
+            for b in res["aggregations"]["by_group"]["buckets"]
+            # Les groupes sans le moindre avis n'apprennent rien sur la
+            # satisfaction : ils encombreraient un tableau qui ne parle
+            # que de ça.
+            if b["feedback_up"]["doc_count"] or b["feedback_down"]["doc_count"]
+        ],
     }
 
 

@@ -46,6 +46,18 @@ _CRITERIA_PROPERTIES = {
     "date_to":   {"type": "keyword"},
 }
 
+# Groupes LDAP de l'utilisateur AU MOMENT de la recherche — pour agréger
+# les avis par service (voir /admin/search-logs/summary). Ajoutés là et
+# non à la réception de l'avis : /feedback ne fait qu'une mise à jour
+# partielle du document, seules les recherches AYANT REÇU un avis en
+# porteraient alors. Écrits dès la recherche, tous les documents en ont,
+# et la donnée servira à d'autres découpages (recherches par service,
+# taux de résultats nuls par groupe).
+#
+# Enregistrés plutôt que résolus à l'affichage : la valeur reflète ainsi
+# l'appartenance de l'époque, pas celle du jour de la consultation.
+_GROUP_PROPERTIES = {"groups": {"type": "keyword"}}
+
 
 def _ensure_index(es: Elasticsearch) -> None:
     global _index_ready
@@ -65,6 +77,7 @@ def _ensure_index(es: Elasticsearch) -> None:
                     "result_files":  {"type": "keyword"},
                     **_ENGAGEMENT_PROPERTIES,
                     **_CRITERIA_PROPERTIES,
+                    **_GROUP_PROPERTIES,
                 }
             }
         })
@@ -73,7 +86,10 @@ def _ensure_index(es: Elasticsearch) -> None:
         # Index déjà créé par une version antérieure (avant l'ajout du
         # feedback/tracking de clic/critères) — complète son mapping sans
         # y toucher autrement. Idempotent, appelable à chaque démarrage.
-        es.indices.put_mapping(index=SEARCH_LOG_INDEX, properties={**_ENGAGEMENT_PROPERTIES, **_CRITERIA_PROPERTIES})
+        es.indices.put_mapping(
+            index=SEARCH_LOG_INDEX,
+            properties={**_ENGAGEMENT_PROPERTIES, **_CRITERIA_PROPERTIES, **_GROUP_PROPERTIES},
+        )
     _index_ready = True
 
 
@@ -81,6 +97,7 @@ def log_search(
     es: Elasticsearch,
     *,
     username: str,
+    groups: list[str] | None = None,
     ip: str | None,
     query: str,
     search_in: str,
@@ -120,6 +137,7 @@ def log_search(
         doc = {
             "timestamp":     datetime.now(timezone.utc).isoformat(),
             "username":      username,
+            "groups":        list(groups or []),
             "query":         query,
             "search_in":     search_in,
             "total_results": total_results,
