@@ -8,7 +8,7 @@ aperçu de documents. Fait partie de l'écosystème DocSearch :
 | [docsearch-ingestion](../docsearch-ingestion) | Extraction, ACL, indexation |
 | **docsearch-api** (ce dépôt) | API de recherche |
 | [docsearch-ui](../docsearch-ui) | Interface web statique |
-| [docsearch-infra](../docsearch-infra) | Orchestration Docker Compose |
+| [docsearch-infra](../docsearch-infra) | Orchestration podman + systemd (Quadlet) |
 | [docsearch-docs](../docsearch-docs) | Documents commerciaux |
 | [docsearch-dataset-generator](../docsearch-dataset-generator) | Génération de jeux de test |
 
@@ -62,7 +62,7 @@ cherchables par ce biais.
 Une recherche enregistrée (`saved_searches.py`) peut être marquée
 "alerte" (`PATCH /saved-searches/{id}/alert`, fréquence quotidienne ou
 hebdomadaire). Un worker séparé, `alert_worker.py` — conteneur
-`alert-worker` dans `docsearch-infra/docker-compose.yml`, même image que
+`docsearch-alert-worker` (unité Quadlet de `docsearch-infra`), même image que
 `api` mais aucune route HTTP exposée — rejoue périodiquement les
 critères de chaque recherche marquée, restreints aux documents dont
 `indexed_at` (date d'entrée dans l'index, pas `date_modified`) est
@@ -135,7 +135,7 @@ correspondante : `docsearch-ui/public/admin.html`.
 | `GET /admin/search-logs[...]`, `.../summary`, `.../zero-results`, `.../export`, `GET /admin/audit-log` | Journaux de recherche et d'audit — alimentent `stats.html` |
 | `POST /admin/scan` | Déclencher un scan d'indexation (en arrière-plan) |
 
-**Aucune de ces routes n'a besoin d'un accès Docker** : l'état est
+**Aucune de ces routes n'a besoin d'accéder au moteur de conteneurs** : l'état est
 vérifié via le réseau applicatif normal (HTTP, Redis, Kafka — comme
 un client classique), et le déclenchement de scan publie simplement
 sur Kafka (les workers déjà actifs font le travail). Piloter le nombre
@@ -205,8 +205,8 @@ champ, sans quoi le lot « Non renseigné » écrase tous les autres
 pendant des mois :
 
 ```bash
-docker exec docsearch-api python3 backfill_groups.py          # simulation
-docker exec docsearch-api python3 backfill_groups.py --apply  # écriture
+sudo podman exec docsearch-api python3 backfill_groups.py          # simulation
+sudo podman exec docsearch-api python3 backfill_groups.py --apply  # écriture
 ```
 
 ⚠️ **Sémantique inverse de la capture normale** : le script applique
@@ -232,11 +232,10 @@ cas et bascule sur le sous-champ `username.keyword`.
 ## Lancer en local (nécessite un ES déjà peuplé)
 
 ```bash
-cp .env.example .env
-docker build -t docsearch-api .
-docker run -p 8000:8000 --env-file .env \
-  --network docsearch-infra_docsearch-net \
-  docsearch-api
+podman build -t localhost/docsearch/api:latest .
+podman run -p 8000:8000 --env-file /etc/docsearch/docsearch.env \
+  --network docsearch-net \
+  localhost/docsearch/api:latest
 
 curl http://localhost:8000/health
 open http://localhost:8000/docs   # Swagger UI
