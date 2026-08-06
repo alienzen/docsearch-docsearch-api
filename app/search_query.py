@@ -21,7 +21,7 @@
 # compter des nouveaux résultats) — voir SavedSearchCreate dans
 # search_api.py pour le schéma des critères stockés.
 
-from ldap_resolver import get_user_groups
+from auth.directory import get_effective_groups
 import file_sources_config
 import sql_sources_config
 import web_sources_config
@@ -68,7 +68,7 @@ def field_sets() -> dict:
 def build_acl_filter(username: str) -> dict:
     """Identique à build_acl_filter() dans search_api.py — voir
     l'avertissement de cohérence en tête de fichier."""
-    user_groups = get_user_groups(username)
+    user_groups = get_effective_groups(username)
     return {
         "bool": {
             "should": [
@@ -92,7 +92,7 @@ def _visible_to(s, user_groups: list[str]) -> bool:
 def _searchable_source_names(username: str) -> list[str]:
     """Identique à _searchable_source_names() dans search_api.py — voir
     l'avertissement de cohérence en tête de fichier."""
-    user_groups = get_user_groups(username)
+    user_groups = get_effective_groups(username)
     names = []
     for name, s in file_sources_config.get_sources().items():
         if s.searchable and _visible_to(s, user_groups):
@@ -148,8 +148,20 @@ def _folder_filter(folder: str | list[str] | None) -> dict | None:
     return {"bool": {"should": should, "minimum_should_match": 1}}
 
 
+def _keywords_filter(keywords) -> dict | None:
+    """Identique à _keywords_filter() dans search_api.py — voir
+    l'avertissement de cohérence en tête de fichier. Combinaison en ET
+    (un document doit porter TOUS les mots-clés) et non en OU : une
+    alerte doit signaler exactement ce qu'une recherche manuelle avec
+    les mêmes critères afficherait."""
+    if not keywords:
+        return None
+    kws = keywords if isinstance(keywords, list) else [keywords]
+    return {"bool": {"filter": [{"term": {"keywords": k}} for k in kws]}}
+
+
 def _active_custom_facets(source_names: list[str], username: str) -> dict[str, str]:
-    user_groups = get_user_groups(username)
+    user_groups = get_effective_groups(username)
     names = source_names or [
         name for name, s in sql_sources_config.get_sources().items()
         if s.searchable and _visible_to(s, user_groups)
@@ -222,9 +234,9 @@ def build_query_clauses(criteria: dict, username: str) -> dict:
     if author:
         filters.append({"terms": {"author": author if isinstance(author, list) else [author]}})
 
-    keywords = criteria.get("keywords")
-    if keywords:
-        filters.append({"terms": {"keywords": keywords if isinstance(keywords, list) else [keywords]}})
+    keywords_filter = _keywords_filter(criteria.get("keywords"))
+    if keywords_filter:
+        filters.append(keywords_filter)
 
     folder_filter = _folder_filter(criteria.get("folder"))
     if folder_filter:

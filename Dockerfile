@@ -1,6 +1,6 @@
 # ── docsearch-api — Image Python ──────────────────────────────
 # API REST de recherche (FastAPI) avec filtrage ACL
-# Python 3.12 · LibreOffice (conversion aperçu Office → PDF)
+# Python 3.12 · LibreOffice (conversion aperçu Office → PDF) · Kerberos
 #
 # Image de base pleinement qualifiée (docker.io/library/...) : podman
 # n'a pas de registre implicite, un nom court dépend de la liste
@@ -14,15 +14,44 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Conversion Office → PDF pour l'aperçu des documents
     libreoffice \
     curl \
+    # Bibliothèques Kerberos d'EXÉCUTION, pour `gssapi` (connexion
+    # automatique SPNEGO, voir app/auth/kerberos.py) : elles restent dans
+    # l'image. krb5-user fournit klist/kinit, indispensables pour
+    # diagnostiquer un keytab depuis le conteneur ("klist -k") — le premier
+    # geste quand le SSO refuse un ticket sans dire pourquoi.
+    libgssapi-krb5-2 \
+    krb5-user \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# `gssapi` n'a pas de roue précompilée : elle se compile contre les
+# en-têtes krb5. Les outils de compilation sont installés ET RETIRÉS dans
+# la MÊME couche — une couche qui les purgerait plus loin les laisserait
+# malgré tout dans l'image, un compilateur C embarqué en production pour
+# rien.
+#
+# La construction reste une opération connectée : sur les serveurs isolés,
+# l'image arrive déjà construite par "podman load"
+# (HOWTO-deploiement-hors-ligne.md). Rien de nouveau n'est téléchargé à
+# l'exécution — gssapi ne parle qu'au KDC du domaine, sur l'intranet.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        python3-dev \
+        libkrb5-dev \
+        krb5-config \
+    && pip install --no-cache-dir -r requirements.txt \
+    && apt-get purge -y --auto-remove gcc python3-dev libkrb5-dev krb5-config \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY app/ .
+# Génération des clés RS256 et gestion des comptes de secours locaux —
+# jamais des routes HTTP, voir leur en-tête.
+COPY scripts/ ./scripts/
 
 # UID de l'utilisateur du conteneur — doit correspondre au propriétaire
 # des volumes montés depuis l'hôte. Renommé depuis DOCKER_UID avec le
@@ -33,4 +62,15 @@ RUN useradd -m -u ${APP_UID} appuser 2>/dev/null || useradd -m appuser && \
 USER appuser
 
 EXPOSE 8000
-CMD ["uvicorn", "search_api:app", "--host", "0.0.0.0", "--port", "8000"]
+# --h11-max-incomplete-event-size : plafond, en octets, de la requête tant
+# que ses en-têtes ne sont pas complets. Le défaut de h11 (16 Ko) est
+# INSUFFISANT pour un ticket Kerberos d'Active Directory : le PAC y
+# transporte tous les SID de groupes du compte, et l'en-tête
+# "Authorization: Negotiate" dépasse couramment 8 Ko sur un utilisateur à
+# nombreux groupes. Au-delà du plafond, uvicorn coupe la connexion SANS
+# RIEN JOURNALISER — le piège le plus coûteux à diagnostiquer de tout le
+# SPNEGO. Doit être relevé DE PAIR avec large_client_header_buffers côté
+# Nginx (les deux étages plafonnent la même chose, le plus bas gagne) et
+# répété dans l'unité Quadlet, qui redéfinit Exec=.
+CMD ["uvicorn", "search_api:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--h11-max-incomplete-event-size", "65536"]

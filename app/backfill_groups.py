@@ -34,7 +34,7 @@ import sys
 
 from elasticsearch import Elasticsearch
 
-from ldap_resolver import get_user_groups
+from auth.directory import get_effective_groups
 
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
 
@@ -105,7 +105,7 @@ def traiter(es: Elasticsearch, index: str, exige_username: bool, appliquer: bool
 
     modifies = sans_groupe = 0
     for username in utilisateurs:
-        groupes = get_user_groups(username)
+        groupes = get_effective_groups(username)
         if not groupes:
             # Un utilisateur sans groupe resterait de toute façon dans le
             # lot « non renseigné » : écrire une liste vide n'apporte

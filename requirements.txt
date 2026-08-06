@@ -36,5 +36,23 @@ openpyxl==3.1.5
 python-docx==1.1.2
 
 # Chiffrement symétrique des DSN SQL enregistrés depuis le panneau
-# d'administration (sql_dsn_registry.py) — jamais stockés en clair dans Redis
+# d'administration (sql_dsn_registry.py) — jamais stockés en clair dans Redis.
+# Porte aussi les clés RS256 qui signent les jetons de session (auth/tokens.py).
 cryptography==49.0.0
+
+# ── Authentification (voir app/auth/) ────────────────────────
+# Jetons de session RS256 + JWKS. L'extra [crypto] tire l'implémentation
+# asymétrique — sans lui, PyJWT ne sait signer qu'en HMAC.
+pyjwt[crypto]==2.10.1
+
+# Hachage des mots de passe des comptes de secours locaux. Argon2id
+# uniquement, jamais bcrypt. Roue précompilée, aucun compilateur requis.
+argon2-cffi==25.1.0
+
+# Acceptation des tickets Kerberos (SPNEGO) pour la connexion automatique.
+# ⚠️  Pas de roue précompilée : se compile contre libkrb5-dev, installé puis
+# purgé dans la même couche du Dockerfile. C'est pourquoi cette ligne ne
+# s'installe PAS dans un environnement virtuel d'hôte sans les en-têtes
+# krb5 — auth/kerberos.py importe donc gssapi tardivement, pour rester
+# importable (et testable) là où la bibliothèque manque.
+gssapi==1.9.0

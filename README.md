@@ -88,13 +88,75 @@ filtrage faite dans `search_api.py` doit être répercutée dans
 `search_query.py`, sinon une alerte pourrait signaler des documents
 qu'une recherche manuelle ne trouverait pas (ou l'inverse).
 
-## Authentification / ACL
+## Authentification
 
-L'identité de l'utilisateur est lue depuis le header `X-User`, injecté par
-Nginx après validation SSO (AgentConnect, Keycloak…). En développement,
-`DEV_USER` dans `.env` simule un utilisateur sans SSO.
+**Tout vit dans [`app/auth/`](app/auth/)** — architecture reprise de
+`charlie/app-api-auth` ; les écarts et leur justification sont dans
+`docsearch-infra/PLAN-AUTH-SSO.md`.
 
-Chaque requête de recherche est filtrée automatiquement :
+L'identité vient d'un **jeton RS256 signé par cette application**, posé en
+cookie `httpOnly` à la connexion et vérifié à chaque requête
+(`app/auth/deps.py::current_user`). Elle ne vient plus de l'en-tête
+`X-User` : celui-ci était censé être injecté par Nginx après validation
+SSO, mais le SSO n'a jamais été branché et l'API publiant son port,
+`curl -H "X-User: alice.admin" …/admin/status` répondait `200`. `X-User`
+subsiste comme harnais de développement, sous `TRUST_X_USER_HEADER`, et
+l'API **refuse de démarrer** s'il est armé avec `API_ENV=production`.
+
+| Route | Rôle |
+|---|---|
+| `POST /auth/login` | `{identifiant, mot_de_passe}` → cookies de session. Le **serveur** choisit le fournisseur : l'existence d'un compte de secours local est le discriminant, et il n'y a aucun repli de l'un vers l'autre |
+| `GET /auth/login/kerberos` | Connexion automatique par ticket SPNEGO (voir plus bas) |
+| `POST /auth/refresh` | Renouvelle le jeton d'accès. Le jeton de rafraîchissement ne sert **qu'une fois** |
+| `POST /auth/logout` | Révoque la session côté Redis — sans quoi « se déconnecter » n'effacerait qu'un cookie recollable |
+| `GET /auth/me` | Identité, groupes effectifs, `is_admin` |
+| `GET /auth/check-access`, `/auth/check-admin` | Cibles internes du `auth_request` de Nginx, qui garde chaque page |
+| `GET /auth/.well-known/jwks.json` | Clé publique (RFC 7517) |
+
+Régimes d'erreur, constants : `401` identifiants refusés (message
+générique unique, jamais de variation qui dirait lequel des deux est en
+cause), `403` authentifié mais hors du groupe requis, `429` trop de
+tentatives, `501` SSO désactivé, `503` annuaire / Redis / keytab / clés
+indisponibles. **Un 503 n'est jamais présenté comme un 401** : une panne
+déguisée en mot de passe faux envoie chercher au mauvais endroit.
+
+Prérequis, une fois : `scripts/generer-cles.py` (les clés vivent hors du
+dépôt et hors de l'image). Le dossier étant monté **en lecture seule**
+dans le service, la génération passe par un conteneur jetable :
+
+```bash
+sudo install -d -o 1000 -g 1000 -m 700 /etc/docsearch/jwt
+sudo podman run --rm -v /etc/docsearch/jwt:/etc/docsearch/jwt:Z \\
+     localhost/docsearch/api:latest python scripts/generer-cles.py
+```
+
+### Comptes de secours locaux
+
+`scripts/gerer-comptes-locaux.py`, jamais une route HTTP. Ce **n'est pas**
+une gestion d'utilisateurs : sans annuaire, `require_access` refuse tout
+le monde, administration comprise — ces comptes sont la porte de secours,
+et ils **portent leurs propres groupes**, sans quoi ils se feraient
+refuser par le contrôle qu'ils sont censés contourner.
+
+### Connexion automatique Kerberos / SPNEGO
+
+`app/auth/kerberos.py`, transposé de `charlie/app-api-auth`. Désactivé par
+défaut (réglage à chaud `sso_kerberos_enabled`, panneau
+d'administration) : sans interrupteur, une installation sans keytab
+répondrait un défi que personne ne peut relever, à chaque chargement de
+page.
+
+Ce qui décide du succès n'est pas le code : un FQDN (le navigateur dérive
+le SPN du nom d'hôte — il ne tente **rien** contre une IP littérale), un
+SPN `HTTP/<fqdn>`, un keytab, un certificat au même nom, et une stratégie
+de parc autorisant les navigateurs à envoyer un ticket. Voir
+`PLAN-AUTH-SSO.md` §2.5.
+
+## ACL
+
+Chaque requête de recherche est filtrée automatiquement, à partir des
+**groupes effectifs** (annuaire ∪ compte de secours,
+`app/auth/directory.py::get_effective_groups` — point unique de vérité) :
 
 ```python
 acl_filter = {
@@ -142,17 +204,19 @@ sur Kafka (les workers déjà actifs font le travail). Piloter le nombre
 de workers ou démarrer/arrêter des conteneurs reste réservé à
 `manage.sh` en CLI (`docsearch-infra`).
 
-### Tester sans authentification
+### Tester sans annuaire
 
-`ADMIN_AUTH_DISABLED=true` contourne tout contrôle d'accès sur
-`/admin/*` (y compris la vérification du header `X-User`) — utile pour
-tester le panneau localement sans SSO/LDAP configurés.
+`ADMIN_AUTH_DISABLED=true` contourne le contrôle de **groupe** sur
+`/admin/*`. Il ne dispense plus d'être authentifié — c'est la différence
+avec son comportement précédent, où il ouvrait aussi le panneau à un
+anonyme complet.
 
-⚠️ **Jamais en production** : n'importe qui peut alors modifier la
-configuration, purger l'index ou déclencher des scans sans la moindre
-vérification. Le contournement est volontairement bruyant (bannière
-au démarrage + log à chaque requête `/admin/*`) pour qu'un oubli soit
-impossible à manquer dans les logs.
+⚠️ **Jamais en production**, et ce n'est plus une simple recommandation :
+avec `API_ENV=production`, l'API **refuse de démarrer** si ce drapeau (ou
+l'un des quatre autres harnais) est armé, plutôt que de l'ignorer — voir
+`app/auth/guardrails.py` et `docsearch-infra/HOWTO-simuler-utilisateur.md`.
+Hors production, un encadré s'affiche au démarrage et chaque usage laisse
+une ligne de log.
 
 **Modules dupliqués depuis `docsearch-ingestion`** (architecture
 multi-dépôts : impossible d'importer le code d'un autre dépôt au
@@ -246,11 +310,41 @@ open http://localhost:8000/docs   # Swagger UI
 ```bash
 # Dans .env
 LDAP_ENABLED=true
-LDAP_HOST=ldap://votre-dc.domaine.gouv.fr
+LDAP_HOST=ldaps://votre-dc.domaine.gouv.fr
 LDAP_BASE=dc=domaine,dc=gouv,dc=fr
 LDAP_BINDDN=cn=svc-docsearch,ou=services,dc=domaine,dc=gouv,dc=fr
 LDAP_PASS=...
 ```
 
+**`ldaps://` et non `ldap://`** : le bind en clair est désormais refusé,
+sauf dérogation explicite `LDAP_ALLOW_PLAINTEXT_INSECURE=true`, qui reste
+possible (beaucoup d'annuaires internes n'exposent pas LDAPS, et en faire
+une erreur fatale couperait l'application au lieu de la sécuriser) mais
+journalise un `WARNING` à chaque connexion. **Une installation existante
+qui bindait en clair doit poser ce drapeau au moment de la mise à jour**,
+sinon plus personne ne se connecte.
+
 `ldap3` est une implémentation Python pure — aucune dépendance système
 (pas besoin de `libldap-dev`).
+
+## Tests
+
+```bash
+python -m pytest
+```
+
+Les tests LDAP tapent le **vrai** annuaire de dev de la VM
+(`~/ldap-test-stack`) et se sautent proprement s'il est arrêté — ou si
+ses deux mots de passe ne sont pas dans l'environnement, car ils ne sont
+délibérément pas écrits dans le dépôt :
+
+```bash
+export DOCSEARCH_TEST_LDAP_BIND_PASSWORD=...   # cn=admin, voir son docker-compose.yml
+export DOCSEARCH_TEST_LDAP_USER_PASSWORD=...   # alice.admin / bob.user, voir 03-users.ldif
+```
+
+Sans eux, 91 tests passent et 9 se sautent (`requires_ldap`) ; ceux de session tapent le **vrai** Redis
+(`requires_redis`), sous le préfixe `docsearch:auth:` uniquement, nettoyé
+avant et après chaque test. `requires_kerberos` marque le seul chemin
+qu'aucune machine de ce projet ne peut exercer : l'acceptation d'un ticket
+authentique, qui attend un KDC.

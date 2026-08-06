@@ -4,7 +4,6 @@
 import os
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-DEV_USER = os.getenv("DEV_USER", "")
 LDAP_ENABLED = os.getenv("LDAP_ENABLED", "false").lower() == "true"
 
 import subprocess
@@ -21,9 +20,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan as es_scan
-from ldap_resolver import get_user_groups
-from admin_auth import require_admin, is_admin
-from access_auth import require_access
+from auth.deps import current_user, optional_user, require_access, require_admin, is_admin
+from auth.directory import get_effective_groups
+from auth.router import router as auth_router
 import cluster_status
 import admin_scan
 import filetype_config
@@ -50,11 +49,18 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="DocSearch API", version="2.1.0")
 
+# Routes /auth/* — connexion, session, SSO Kerberos, et les deux cibles
+# internes du auth_request de Nginx (/auth/check-access, /auth/check-admin).
+# Voir app/auth/router.py.
+app.include_router(auth_router)
+
 ES_HOST = ES_HOST
 es = Elasticsearch(ES_HOST, retry_on_timeout=True, max_retries=3, request_timeout=60)
 
-# Utilisateur anonyme de secours (dev uniquement — désactiver en prod)
-DEV_USER = DEV_USER
+# Nombre de termes que chaque shard remonte pour une agrégation de
+# facette — voir facet_agg() dans search(), qui explique pourquoi le
+# défaut d'Elasticsearch fausse les comptes affichés.
+FACET_SHARD_SIZE = 500
 
 
 @app.middleware("http")
@@ -98,7 +104,11 @@ async def audit_log_middleware(request: Request, call_next):
             body = {}
         audit_log.log_action(
             es,
-            username=resolve_user(request.headers.get("x-user")),
+            # La route a déjà exigé require_admin : l'identité est celle du
+            # jeton, jamais celle d'un en-tête. Le middleware ne peut pas
+            # utiliser Depends (il tourne hors du routage), d'où cette
+            # résolution directe — même code, même vérification.
+            username=optional_user(request, request.headers.get("x-user")) or "inconnu",
             method=request.method,
             path=path_template,
             path_params=dict(request.path_params),
@@ -197,7 +207,7 @@ def build_acl_filter(username: str) -> dict:
       - documents partagés explicitement avec lui
       - documents partagés avec un de ses groupes (POSIX ou AD)
     """
-    user_groups = get_user_groups(username)
+    user_groups = get_effective_groups(username)
 
     return {
         "bool": {
@@ -231,17 +241,27 @@ def _folder_filter(folder: str | list[str] | None) -> dict | None:
     return {"bool": {"should": should, "minimum_should_match": 1}}
 
 
-def resolve_user(x_user: str | None) -> str:
+def _keywords_filter(keywords: str | list[str] | None) -> dict | None:
     """
-    Résout l'identité de l'utilisateur.
-    En production : header X-User injecté par Nginx après validation SSO.
-    En développement : variable DEV_USER ou 'anonymous'.
+    Filtre ES pour la facette "Mots-clés" — sélection cumulative en ET :
+    un document doit porter TOUS les mots-clés demandés, donc chaque clic
+    RESTREINT le résultat. C'est la seule facette dans ce cas : un
+    `{"terms": {...}}` unique, utilisé partout ailleurs, est un OU, et
+    cocher un second mot-clé ajoutait des résultats au lieu d'en retirer.
+
+    Le ET n'a de sens ici que parce que `keywords` est multi-valué
+    (indexer.py: get_keywords() renvoie une liste). extension/author/
+    folder/source et les facettes SQL ne portent qu'une valeur par
+    document — un ET n'y matcherait jamais rien, d'où le OU conservé.
+
+    Toute évolution ici est à répercuter dans search_query.py, qui en
+    tient une copie pour le worker d'alertes (voir son en-tête).
     """
-    if x_user:
-        return x_user.lower()
-    if DEV_USER:
-        return DEV_USER.lower()
-    return "anonymous"
+    if not keywords:
+        return None
+    kws = keywords if isinstance(keywords, list) else [keywords]
+    return {"bool": {"filter": [{"term": {"keywords": k}} for k in kws]}}
+
 
 
 def get_client_ip(request: Request) -> str | None:
@@ -340,7 +360,7 @@ def _searchable_source_names(username: str) -> list[str]:
     source désactivée ou hors groupe reste invisible même si elle est
     explicitement demandée via `source`.
     """
-    user_groups = get_user_groups(username)
+    user_groups = get_effective_groups(username)
     names = []
     for name, s in file_sources_config.get_sources().items():
         if s.searchable and _visible_to(s, user_groups):
@@ -375,7 +395,7 @@ def _active_custom_facets(source_names: list[str], username: str | None = None) 
     /search/export le passent pour ne jamais exposer le nom d'une
     facette d'une source hors des groupes autorisés de l'utilisateur.
     """
-    user_groups = get_user_groups(username) if username else None
+    user_groups = get_effective_groups(username) if username else None
     fallback_sources = sql_sources_config.get_sources().items()
     names = source_names or [
         name for name, s in fallback_sources
@@ -417,7 +437,7 @@ def _collectable_source_names() -> set[str]:
 
 
 @app.get("/searchable-sources")
-def get_searchable_sources(x_user: str | None = Header(default=None)):
+def get_searchable_sources(user: str = Depends(current_user)):
     """
     Pas d'admin requis (n'importe quel utilisateur identifié peut lister
     les sources qui LUI sont ouvertes) — liste des sources actuellement
@@ -436,8 +456,8 @@ def get_searchable_sources(x_user: str | None = Header(default=None)):
     n'apparaît pas ici, cohérent avec le fait qu'elle ne renverra de
     toute façon jamais de résultat pour lui dans /search.
     """
-    username = resolve_user(x_user)
-    user_groups = get_user_groups(username)
+    username = user
+    user_groups = get_effective_groups(username)
     result = []
     for name, s in file_sources_config.get_sources().items():
         if s.searchable and _visible_to(s, user_groups):
@@ -465,9 +485,9 @@ def get_searchable_sources(x_user: str | None = Header(default=None)):
 
 
 @app.get("/custom-facets")
-def get_custom_facets():
+def get_custom_facets(user: str = Depends(current_user)):
     """
-    Public (pas d'auth) — {es_field: label} de TOUTES les facettes SQL
+    Exige une session (comme tout le reste), mais aucun droit particulier — {es_field: label} de TOUTES les facettes SQL
     personnalisées actives, toutes sources cherchables confondues
     (`_active_custom_facets([])`, même fonction que `/search`, sans
     filtre de source). Contrairement aux facettes renvoyées par
@@ -515,10 +535,10 @@ def _resolve_doc_source(doc_id: str) -> str | None:
 def search(
     req: SearchQuery,
     request: Request,
-    x_user: str | None = Header(default=None),
+    user: str = Depends(current_user),
 ):
     _ensure_index_exists()
-    username   = resolve_user(x_user)
+    username   = user
     acl_filter = build_acl_filter(username)
 
     # Champs et poids : source unique dans search_query.field_sets(),
@@ -581,7 +601,9 @@ def search(
 
     # Filtres "de facette" : chacun correspond à une agrégation affichée
     # dans la barre latérale (extension/auteur/dossier/source), à
-    # sélection cumulative. Construits à part des base_filters pour
+    # sélection cumulative en OU — sauf les mots-clés, seule facette
+    # multi-valuée, combinée en ET (voir _keywords_filter).
+    # Construits à part des base_filters pour
     # pouvoir, plus bas, calculer le compte de chaque facette en
     # EXCLUANT le filtre de cette facette elle-même — sinon, sélectionner
     # un premier auteur ferait disparaître tous les autres de la liste
@@ -602,10 +624,8 @@ def search(
         authors = req.author if isinstance(req.author, list) else [req.author]
         author_filter = {"terms": {"author": authors}}
 
-    keywords_filter = None
-    if req.keywords:
-        keywords = req.keywords if isinstance(req.keywords, list) else [req.keywords]
-        keywords_filter = {"terms": {"keywords": keywords}}
+    # Seule facette combinée en ET (intersection) — voir _keywords_filter.
+    keywords_filter = _keywords_filter(req.keywords)
 
     folder_filter = _folder_filter(req.folder)
 
@@ -636,15 +656,35 @@ def search(
     }
     active_facet_filters = [f for f in facet_filters.values() if f]
 
-    def facet_agg(field: str, size: int, exclude: str) -> dict:
+    def facet_agg(field: str, size: int, exclude: str | None) -> dict:
         """Agrégation de facette qui exclut son propre filtre (voir plus
         haut) mais applique tous les AUTRES filtres de facette actifs —
         cocher un auteur ne doit réduire que les dossiers/sources/
-        extensions affichés, jamais la liste des autres auteurs."""
+        extensions affichés, jamais la liste des autres auteurs.
+
+        exclude=None n'exclut rien, donc TOUS les filtres actifs
+        s'appliquent : réservé aux mots-clés, combinés en ET. Là, le
+        compte affiché à côté d'une valeur est exactement le nombre de
+        résultats obtenu en la cochant, et les valeurs qui mèneraient à
+        zéro disparaissent au lieu d'être proposées en vain."""
         others = [f for name, f in facet_filters.items() if f and name != exclude]
         return {
             "filter": {"bool": {"filter": others}} if others else {"match_all": {}},
-            "aggs":   {"values": {"terms": {"field": field, "size": size}}},
+            "aggs":   {"values": {"terms": {
+                "field": field,
+                "size":  size,
+                # Sans shard_size explicite, ES ne remonte que ses
+                # ~40 premiers termes PAR SHARD (22 ici) et additionne :
+                # une valeur absente du haut de tableau d'un shard voit
+                # sa part perdue, donc un compte SOUS-ESTIMÉ (mesuré :
+                # 30 affichés pour 37 documents réels). Inacceptable
+                # pour les mots-clés, dont le compte annonce désormais
+                # le nombre de résultats après clic — et trompeur
+                # ailleurs. 500 ramène doc_count_error_upper_bound à 0
+                # sur le corpus actuel, pour un coût mémoire négligeable
+                # (22 × 500 termes agrégés).
+                "shard_size": FACET_SHARD_SIZE,
+            }}},
         }
 
     sort_clause = (
@@ -710,7 +750,9 @@ def search(
             aggs={
                 "by_extension": facet_agg("extension",  10, "extension"),
                 "by_author":    facet_agg("author",     10, "author"),
-                "by_keywords":  facet_agg("keywords",   20, "keywords"),
+                # Seule facette sans auto-exclusion : en ET, les valeurs
+                # utiles sont celles qui CO-OCCURRENT avec la sélection.
+                "by_keywords":  facet_agg("keywords",   20, None),
                 "by_folder":    facet_agg("folder_top", 10, "folder"),
                 "by_source":    facet_agg("source",     20, "source"),
                 **{
@@ -734,7 +776,7 @@ def search(
         username=username,
         # get_user_groups est en @lru_cache : cet appel à chaque recherche
         # ne déclenche pas un aller-retour LDAP à chaque fois.
-        groups=get_user_groups(username),
+        groups=get_effective_groups(username),
         ip=get_client_ip(request),
         query=req.query,
         search_in=req.search_in,
@@ -843,9 +885,9 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
     if req.author:
         authors = req.author if isinstance(req.author, list) else [req.author]
         filters.append({"terms": {"author": authors}})
-    if req.keywords:
-        keywords = req.keywords if isinstance(req.keywords, list) else [req.keywords]
-        filters.append({"terms": {"keywords": keywords}})
+    keywords_filter = _keywords_filter(req.keywords)   # ET, pas OU — voir le helper
+    if keywords_filter:
+        filters.append(keywords_filter)
     folder_filter = _folder_filter(req.folder)
     if folder_filter:
         filters.append(folder_filter)
@@ -938,7 +980,7 @@ def _export_results_docx(query_text: str, hits: list) -> StreamingResponse:
 
 
 @app.post("/search/export")
-def export_search_results(req: SearchExportQuery, x_user: str | None = Header(default=None)):
+def export_search_results(req: SearchExportQuery, user: str = Depends(current_user)):
     """
     Export XLSX ou DOCX des résultats d'une recherche — mêmes critères
     que POST /search (même corps de requête, avec juste "format" en
@@ -948,7 +990,7 @@ def export_search_results(req: SearchExportQuery, x_user: str | None = Header(de
     if not ui_config.get_config().get("export_enabled", True):
         raise HTTPException(status_code=403, detail="L'export des résultats est désactivé.")
     _ensure_index_exists()
-    username = resolve_user(x_user)
+    username = user
     query = _build_search_query(req, username)
 
     sort_clause = (
@@ -995,14 +1037,14 @@ def export_search_results(req: SearchExportQuery, x_user: str | None = Header(de
 
 # ── Recherches sauvegardées ─────────────────────────────────────
 @app.get("/saved-searches")
-def list_saved_searches(x_user: str | None = Header(default=None)):
-    username = resolve_user(x_user)
+def list_saved_searches(user: str = Depends(current_user)):
+    username = user
     return saved_searches.list_saved(username)
 
 
 @app.post("/saved-searches")
-def create_saved_search(body: SavedSearchCreate, x_user: str | None = Header(default=None)):
-    username = resolve_user(x_user)
+def create_saved_search(body: SavedSearchCreate, user: str = Depends(current_user)):
+    username = user
     if not body.name.strip():
         raise HTTPException(status_code=400, detail="Le nom de la recherche ne peut pas être vide")
     try:
@@ -1012,8 +1054,8 @@ def create_saved_search(body: SavedSearchCreate, x_user: str | None = Header(def
 
 
 @app.delete("/saved-searches/{search_id}")
-def remove_saved_search(search_id: str, x_user: str | None = Header(default=None)):
-    username = resolve_user(x_user)
+def remove_saved_search(search_id: str, user: str = Depends(current_user)):
+    username = user
     try:
         return saved_searches.delete_saved(username, search_id)
     except RuntimeError as e:
@@ -1031,9 +1073,9 @@ def _require_alerts_enabled() -> None:
 
 
 @app.patch("/saved-searches/{search_id}/alert")
-def update_saved_search_alert(search_id: str, body: SavedSearchAlertUpdate, x_user: str | None = Header(default=None)):
+def update_saved_search_alert(search_id: str, body: SavedSearchAlertUpdate, user: str = Depends(current_user)):
     _require_alerts_enabled()
-    username = resolve_user(x_user)
+    username = user
     if body.frequency not in ("daily", "weekly"):
         raise HTTPException(status_code=400, detail="frequency doit être 'daily' ou 'weekly'")
     try:
@@ -1045,30 +1087,30 @@ def update_saved_search_alert(search_id: str, body: SavedSearchAlertUpdate, x_us
 
 
 @app.get("/alerts")
-def list_alerts(x_user: str | None = Header(default=None)):
+def list_alerts(user: str = Depends(current_user)):
     """Notifications in-app de l'utilisateur (voir alert_worker.py, qui
     les dépose en arrière-plan) — la plus récente en premier."""
     _require_alerts_enabled()
-    username = resolve_user(x_user)
+    username = user
     return alert_notifications.list_notifications(username)
 
 
 @app.post("/alerts/{notif_id}/seen")
-def mark_alert_seen(notif_id: str, x_user: str | None = Header(default=None)):
+def mark_alert_seen(notif_id: str, user: str = Depends(current_user)):
     _require_alerts_enabled()
-    username = resolve_user(x_user)
+    username = user
     return alert_notifications.mark_seen(username, notif_id)
 
 
 @app.post("/alerts/mark-all-seen")
-def mark_all_alerts_seen(x_user: str | None = Header(default=None)):
+def mark_all_alerts_seen(user: str = Depends(current_user)):
     _require_alerts_enabled()
-    username = resolve_user(x_user)
+    username = user
     return alert_notifications.mark_all_seen(username)
 
 
 @app.delete("/alerts")
-def purge_alerts(x_user: str | None = Header(default=None)):
+def purge_alerts(user: str = Depends(current_user)):
     """Efface toutes les notifications de l'utilisateur courant.
 
     DELETE et non POST : l'opération est une suppression, et elle est
@@ -1080,7 +1122,7 @@ def purge_alerts(x_user: str | None = Header(default=None)):
     n'existe aucun moyen d'en désigner une autre.
     """
     _require_alerts_enabled()
-    username = resolve_user(x_user)
+    username = user
     return alert_notifications.purge(username)
 
 
@@ -1097,16 +1139,16 @@ def _require_collections_enabled() -> None:
 
 
 @app.get("/collections")
-def get_collections(x_user: str | None = Header(default=None)):
+def get_collections(user: str = Depends(current_user)):
     _require_collections_enabled()
-    username = resolve_user(x_user)
+    username = user
     return saved_collections.list_collections(es, username)
 
 
 @app.post("/collections")
-def create_collection(body: SavedCollectionCreate, x_user: str | None = Header(default=None)):
+def create_collection(body: SavedCollectionCreate, user: str = Depends(current_user)):
     _require_collections_enabled()
-    username = resolve_user(x_user)
+    username = user
     try:
         return saved_collections.create_collection(es, username, body.name)
     except ValueError as e:
@@ -1116,9 +1158,9 @@ def create_collection(body: SavedCollectionCreate, x_user: str | None = Header(d
 
 
 @app.delete("/collections/{collection_id}")
-def remove_collection(collection_id: str, x_user: str | None = Header(default=None)):
+def remove_collection(collection_id: str, user: str = Depends(current_user)):
     _require_collections_enabled()
-    username = resolve_user(x_user)
+    username = user
     try:
         return saved_collections.delete_collection(es, username, collection_id)
     except RuntimeError as e:
@@ -1126,9 +1168,9 @@ def remove_collection(collection_id: str, x_user: str | None = Header(default=No
 
 
 @app.post("/collections/{collection_id}/rename")
-def rename_collection(collection_id: str, body: SavedCollectionRename, x_user: str | None = Header(default=None)):
+def rename_collection(collection_id: str, body: SavedCollectionRename, user: str = Depends(current_user)):
     _require_collections_enabled()
-    username = resolve_user(x_user)
+    username = user
     try:
         return saved_collections.rename_collection(es, username, collection_id, body.name)
     except KeyError as e:
@@ -1140,9 +1182,9 @@ def rename_collection(collection_id: str, body: SavedCollectionRename, x_user: s
 
 
 @app.post("/collections/{collection_id}/documents")
-def add_collection_document(collection_id: str, body: SavedCollectionDocumentAdd, x_user: str | None = Header(default=None)):
+def add_collection_document(collection_id: str, body: SavedCollectionDocumentAdd, user: str = Depends(current_user)):
     _require_collections_enabled()
-    username = resolve_user(x_user)
+    username = user
     source_name = _resolve_doc_source(body.doc_id)
     if source_name is not None and source_name not in _collectable_source_names():
         raise HTTPException(
@@ -1158,9 +1200,9 @@ def add_collection_document(collection_id: str, body: SavedCollectionDocumentAdd
 
 
 @app.delete("/collections/{collection_id}/documents/{doc_id}")
-def remove_collection_document(collection_id: str, doc_id: str, x_user: str | None = Header(default=None)):
+def remove_collection_document(collection_id: str, doc_id: str, user: str = Depends(current_user)):
     _require_collections_enabled()
-    username = resolve_user(x_user)
+    username = user
     try:
         return saved_collections.remove_document(es, username, collection_id, doc_id)
     except KeyError as e:
@@ -1203,7 +1245,7 @@ def _check_doc_access(doc: dict, username: str) -> bool:
     restriction qu'une recherche, sinon un doc_id connu (partagé,
     deviné...) contournerait la restriction de source."""
     acl         = _doc_acl(doc)
-    user_groups = get_user_groups(username)
+    user_groups = get_effective_groups(username)
 
     source_name = doc.get("source")
     source = _get_any_source(source_name) if source_name else None
@@ -1222,9 +1264,9 @@ def _check_doc_access(doc: dict, username: str) -> bool:
 @app.get("/document/{doc_id}")
 def get_document(
     doc_id: str,
-    x_user: str | None = Header(default=None),
+    user: str = Depends(current_user),
 ):
-    username = resolve_user(x_user)
+    username = user
 
     doc_index = _resolve_doc_index(doc_id)
     try:
@@ -1289,9 +1331,9 @@ def _load_doc_for_keyword_edit(doc_id: str, username: str) -> tuple[str, dict]:
 
 
 @app.post("/document/{doc_id}/keywords")
-def add_document_keyword(doc_id: str, body: DocumentKeywordBody, x_user: str | None = Header(default=None)):
+def add_document_keyword(doc_id: str, body: DocumentKeywordBody, user: str = Depends(current_user)):
     _require_custom_keywords_enabled()
-    username = resolve_user(x_user)
+    username = user
     keyword = body.keyword.strip()
     if not keyword:
         raise HTTPException(status_code=400, detail="Mot-clé vide.")
@@ -1322,9 +1364,9 @@ def add_document_keyword(doc_id: str, body: DocumentKeywordBody, x_user: str | N
 
 
 @app.delete("/document/{doc_id}/keywords/{keyword}")
-def remove_document_keyword(doc_id: str, keyword: str, x_user: str | None = Header(default=None)):
+def remove_document_keyword(doc_id: str, keyword: str, user: str = Depends(current_user)):
     _require_custom_keywords_enabled()
-    username = resolve_user(x_user)
+    username = user
 
     doc_index, doc = _load_doc_for_keyword_edit(doc_id, username)
     try:
@@ -1343,10 +1385,10 @@ def remove_document_keyword(doc_id: str, keyword: str, x_user: str | None = Head
 @app.get("/api/preview/{doc_id}")
 def preview_document(
     doc_id: str,
-    x_user: str | None = Header(default=None),
+    user: str = Depends(current_user),
 ):
     # Vérification ACL via get_document (lève 403 si refusé)
-    doc      = get_document(doc_id, x_user=x_user)
+    doc      = get_document(doc_id, user=user)
     filepath = doc["filepath"]
     ext      = doc["extension"]
 
@@ -1390,7 +1432,7 @@ def _convert_to_pdf(filepath: str) -> StreamingResponse:
 
 # ── Métriques ─────────────────────────────────────────────────
 @app.get("/metrics")
-def get_metrics():
+def get_metrics(user: str = Depends(current_user)):
     """Métriques agrégées sur TOUTES les sources (via l'alias fédéré) —
     voir /admin/status pour une ventilation par source individuelle."""
     _ensure_index_exists()
@@ -2054,7 +2096,7 @@ def admin_set_source_groups(
     file_sources_config.py pour le détail). Les noms de groupes ne sont
     PAS vérifiés contre l'annuaire LDAP (ce module n'a pas de fonction
     "lister tous les groupes" — même limite que ACCESS_GROUP/ADMIN_GROUP,
-    voir access_auth.py/admin_auth.py) : une faute de frappe rend
+    voir auth/deps.py) : une faute de frappe rend
     silencieusement la source invisible à tout le monde plutôt que de
     lever une erreur, à l'admin de vérifier l'orthographe exacte du CN AD."""
     registry = _SOURCE_REGISTRIES.get(type)
@@ -2247,8 +2289,14 @@ class UiConfigUpdate(BaseModel):
 
 @app.get("/ui-config")
 def get_ui_config():
-    """Public (pas d'auth) — l'interface de recherche l'appelle pour
-    savoir si le lien "Assistant IA" doit être affiché dans l'en-tête.
+    """**Volontairement PUBLIQUE**, avec /health et /is-admin — et ce
+    n'est pas un reliquat : la page de connexion, qui est justement celle
+    qu'on atteint SANS session, l'appelle pour son bloc-marque et son
+    titre. L'exiger authentifiée donnerait un écran de connexion sans
+    identité visuelle. Elle ne porte que des bascules d'affichage.
+
+    L'interface de recherche l'appelle pour savoir si le lien "Assistant
+    IA" doit être affiché dans l'en-tête.
 
     Ajoute "sources_mount" (préfixe réel des chemins stockés dans ES,
     ex: "/sources") en lecture seule à côté des champs persistés dans
@@ -2262,60 +2310,27 @@ def get_ui_config():
 
 
 @app.get("/is-admin")
-def get_is_admin(x_user: str | None = Header(default=None)):
+def get_is_admin(user: str | None = Depends(optional_user)):
     """
-    Public (jamais de 401/403 — voir is_admin(), version non levante de
-    require_admin()) : l'interface de recherche l'appelle pour savoir si
-    les liens "Administration"/"Statistiques" doivent être affichés —
-    ces pages échoueraient de toute façon avec un 403 pour un
-    utilisateur non admin, autant ne pas les proposer.
+    Route PUBLIQUE, et la seule à l'être avec /health : elle ne renvoie
+    jamais 401/403. L'interface l'appelle pour savoir si les liens
+    "Administration"/"Statistiques" doivent être affichés — une page qui
+    échouerait de toute façon en 403 n'a pas à être proposée — et pour
+    afficher l'identité connectée dans l'en-tête.
 
-    `user` (résolu via resolve_user(), même logique que le reste de
-    l'API : X-User, sinon DEV_USER, sinon "anonymous") permet à
-    l'interface d'afficher l'identité de l'utilisateur connecté.
+    D'où `optional_user` et non `current_user` : un visiteur sans session
+    doit recevoir `{"is_admin": false, "user": null}` et être renvoyé vers
+    la page de connexion par l'interface, pas se voir opposer un 401 que
+    l'en-tête ne saurait pas afficher.
 
-    `groups` vient directement de get_user_groups() sur le X-User brut
-    (pas le repli DEV_USER/anonymous : les groupes LDAP n'ont de sens
-    que pour un utilisateur réellement authentifié) — liste vide si
-    LDAP est désactivé ou si l'utilisateur n'a été trouvé dans aucun
-    groupe.
+    `groups` sont les groupes EFFECTIFS (annuaire ∪ compte de secours),
+    liste vide si personne n'est authentifié.
     """
-    groups = get_user_groups(x_user.lower()) if x_user else []
-    return {"is_admin": is_admin(x_user), "user": resolve_user(x_user), "groups": groups}
-
-
-@app.get("/auth/check-access", include_in_schema=False)
-def check_access(user: str = Depends(require_access)):
-    """
-    Cible interne pour Nginx (auth_request sur chaque page — voir
-    location /_access_check dans docsearch-ui/nginx.conf). Seul le
-    code HTTP compte (200/401/403) ; le corps de la réponse est
-    ignoré par Nginx.
-    """
-    return {"user": user}
-
-
-@app.get("/auth/check-admin", include_in_schema=False)
-def check_admin(x_user: str | None = Header(default=None)):
-    """
-    Cible interne pour Nginx (auth_request sur location = /admin — voir
-    location /_admin_check dans docsearch-ui/nginx.conf). Rejette au
-    niveau HTTP les utilisateurs hors du groupe ADMIN_GROUP avant même
-    de charger admin.html, plutôt que de laisser la page s'afficher
-    (200) et échouer visuellement une fois les appels /admin/* résolus
-    (voir refresh() dans admin.html).
-
-    Toujours 401 en cas de refus, jamais 403 : contrairement à
-    require_admin() (utilisé tel quel par les routes /admin/* pour
-    leurs réponses JSON), ce endpoint ne sert qu'à Nginx et doit
-    bloquer la page à l'identique, qu'on soit anonyme ou simplement
-    pas membre du groupe admin.
-    """
-    try:
-        user = require_admin(x_user)
-    except HTTPException:
-        raise HTTPException(status_code=401, detail="Authentification requise (groupe administrateur)")
-    return {"user": user}
+    return {
+        "is_admin": is_admin(user),
+        "user": user,
+        "groups": get_effective_groups(user) if user else [],
+    }
 
 
 @app.post("/admin/ui-config")
@@ -2385,9 +2400,9 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
 
 
 @app.get("/engagement-config")
-def get_engagement_config():
+def get_engagement_config(user: str = Depends(current_user)):
     """
-    Public (pas d'auth) — l'interface de recherche l'appelle pour savoir
+    Exige une session, aucun droit particulier — l'interface de recherche l'appelle pour savoir
     si le pouce et le NPS doivent être affichés. Ne PAS confondre avec
     /admin/engagement-config (même donnée, réservé à l'admin pour
     modification) : cette route-ci n'expose rien de sensible.
@@ -2396,7 +2411,7 @@ def get_engagement_config():
 
 
 @app.post("/feedback")
-def submit_feedback(body: FeedbackCreate, request: Request, x_user: str | None = Header(default=None)):
+def submit_feedback(body: FeedbackCreate, request: Request, user: str = Depends(current_user)):
     """
     Enregistre un pouce haut/bas pour une recherche précise (search_id
     renvoyé par POST /search). Simple mise à jour partielle du document
@@ -2418,7 +2433,7 @@ def submit_feedback(body: FeedbackCreate, request: Request, x_user: str | None =
 
 
 @app.post("/click")
-def submit_click(body: ClickCreate):
+def submit_click(body: ClickCreate, user: str = Depends(current_user)):
     """
     Enregistre le clic sur UN résultat d'une recherche précise (position
     dans la liste, 0-indexée) — signal toujours actif, pas de flag
@@ -2455,18 +2470,18 @@ def submit_click(body: ClickCreate):
 
 
 @app.post("/nps")
-def submit_nps(body: NpsCreate, x_user: str | None = Header(default=None)):
+def submit_nps(body: NpsCreate, user: str = Depends(current_user)):
     """Enregistre une réponse NPS (0-10), indépendamment de toute
     recherche précise — voir nps_log.py."""
     if not engagement_config.get_config()["nps_enabled"]:
         raise HTTPException(status_code=403, detail="Le NPS est désactivé.")
-    username = resolve_user(x_user)
-    nps_log.log_nps(es, username=username, score=body.score, groups=get_user_groups(username))
+    username = user
+    nps_log.log_nps(es, username=username, score=body.score, groups=get_effective_groups(username))
     return {"status": "ok"}
 
 
 @app.post("/suggestions")
-def submit_suggestion(body: SuggestionCreate, x_user: str | None = Header(default=None)):
+def submit_suggestion(body: SuggestionCreate, user: str = Depends(current_user)):
     """Enregistre une suggestion libre, indépendamment de toute recherche
     précise — voir suggestion_log.py. Anonyme par défaut ; l'identité
     n'est résolue via X-User que si l'utilisateur a explicitement décoché
@@ -2476,7 +2491,7 @@ def submit_suggestion(body: SuggestionCreate, x_user: str | None = Header(defaul
     text = body.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="La suggestion ne peut pas être vide.")
-    username = None if body.anonymous else resolve_user(x_user)
+    username = None if body.anonymous else user
     # Groupes seulement si l'utilisateur s'est identifié : une suggestion
     # anonyme ne doit rien porter qui permette de la rattacher à un
     # service (voir suggestion_log.py).
@@ -2485,7 +2500,7 @@ def submit_suggestion(body: SuggestionCreate, x_user: str | None = Header(defaul
         text=text,
         category=body.category,
         username=username,
-        groups=get_user_groups(username) if username else None,
+        groups=get_effective_groups(username) if username else None,
     )
     return {"status": "ok"}
 

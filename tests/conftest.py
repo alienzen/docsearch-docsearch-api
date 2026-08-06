@@ -1,0 +1,259 @@
+# tests/conftest.py — Fixtures communes
+#
+# docsearch-api n'avait aucun test : la CI ne faisait que `ruff` et
+# `docker build`. Ce répertoire naît avec l'authentification, parce qu'un
+# contrôle d'accès sans test est une intention, pas un mécanisme.
+#
+# Trois principes, repris de charlie/app-api-auth :
+#
+# 1. **Pas de test qui ne teste que des mocks.** Les tests LDAP tapent le
+#    VRAI annuaire de dev de cette VM (~/ldap-test-stack) et se sautent
+#    proprement s'il est injoignable ; les tests de session tapent le VRAI
+#    Redis. Un fournisseur intégralement bouchonné ne prouverait rien.
+# 2. **Ne jamais salir l'environnement partagé.** Les clés Redis créées
+#    sont toutes sous `docsearch:auth:` et effacées avant ET après chaque
+#    test — jamais un `FLUSHDB`, ce Redis porte la configuration de
+#    l'installation de dev.
+# 3. **Les clés RS256 sont éphémères**, générées dans un répertoire
+#    temporaire : aucun test ne dépend d'une clé déployée, et aucun ne
+#    laisse traîner de clé privée.
+#
+# ⚠️  auth/config.py lit l'environnement À L'IMPORT, comme tout le reste de
+# docsearch-api. Les tests ne modifient donc pas os.environ (trop tard),
+# mais les attributs du module `config` — ce que fait la fixture
+# `env_auth`.
+
+import os
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+APP_DIR = Path(__file__).resolve().parent.parent / "app"
+sys.path.insert(0, str(APP_DIR))
+
+# Import APRÈS l'ajout de `app/` au chemin, forcément : les modules de
+# l'API sont à plat, pas dans un paquet installable (COPY app/ . dans le
+# Dockerfile).
+from auth import accounts, config, directory, events, store, tokens  # noqa: E402
+
+# Annuaire de dev de la VM (~/ldap-test-stack) : OpenLDAP, base
+# dc=docsearch,dc=test, port 389 EN CLAIR — LDAPS/636 et STARTTLS n'y sont
+# pas configurés. D'où la dérogation ci-dessous, qui n'est acceptable que
+# parce que cet annuaire ne contient que des comptes de test.
+#
+# ⚠️  Les DEUX mots de passe viennent de l'environnement et n'ont pas de
+# valeur par défaut. Ils sont sans valeur hors de cette VM — un conteneur
+# jetable, en clair, sur un réseau de test — mais les écrire ici ferait
+# entrer un mot de passe de bind dans le dépôt, ce que la convention du
+# projet interdit sans exception, et ce que les HOWTO respectent déjà
+# (« mot de passe : voir userPassword dans bootstrap-ldifs/03-users.ldif,
+# pas reproduit ici »). Absents, les tests annuaire se sautent — comme si
+# l'annuaire était arrêté.
+#
+#   export DOCSEARCH_TEST_LDAP_BIND_PASSWORD=...   # cn=admin, voir docker-compose.yml
+#   export DOCSEARCH_TEST_LDAP_USER_PASSWORD=...   # alice.admin / bob.user, voir 03-users.ldif
+LDAP_DEV = {
+    "LDAP_ENABLED": True,
+    "LDAP_HOST": "127.0.0.1",
+    "LDAP_PORT": 389,
+    "LDAP_USE_SSL": False,
+    "LDAP_USE_STARTTLS": False,
+    "LDAP_ALLOW_PLAINTEXT_INSECURE": True,
+    "LDAP_BINDDN": "cn=admin,dc=docsearch,dc=test",
+    "LDAP_PASS": os.getenv("DOCSEARCH_TEST_LDAP_BIND_PASSWORD", ""),
+    "LDAP_BASE": "dc=docsearch,dc=test",
+    "LDAP_USER_SEARCH_BASE": "ou=people,dc=docsearch,dc=test",
+    "ACCESS_GROUP": "docsearch-users",
+    "ADMIN_GROUP": "docsearch-admins",
+}
+
+# Comptes de l'annuaire de dev — voir bootstrap-ldifs/03-users.ldif.
+ALICE = "alice.admin"      # docsearch-admins + docsearch-users
+BOB = "bob.user"           # docsearch-users
+LDAP_PASSWORD = os.getenv("DOCSEARCH_TEST_LDAP_USER_PASSWORD", "")
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "requires_ldap: exige l'annuaire de dev (~/ldap-test-stack)")
+    config.addinivalue_line("markers", "requires_redis: exige un Redis joignable")
+    config.addinivalue_line("markers", "requires_kerberos: exige un KDC — aucun sur cette VM")
+
+
+def _redis_reachable() -> bool:
+    store.reset_client()
+    return store.get_client() is not None
+
+
+def _ldap_reachable() -> bool:
+    import socket
+    try:
+        with socket.create_connection((LDAP_DEV["LDAP_HOST"], LDAP_DEV["LDAP_PORT"]), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _skip_by_marker(request):
+    if request.node.get_closest_marker("requires_redis") and not _redis_reachable():
+        pytest.skip("Redis injoignable")
+    if request.node.get_closest_marker("requires_ldap"):
+        if not (LDAP_DEV["LDAP_PASS"] and LDAP_PASSWORD):
+            pytest.skip(
+                "Mots de passe de l'annuaire de test absents — exporter "
+                "DOCSEARCH_TEST_LDAP_BIND_PASSWORD et "
+                "DOCSEARCH_TEST_LDAP_USER_PASSWORD (voir l'en-tête de ce fichier)"
+            )
+        if not _ldap_reachable():
+            pytest.skip("Annuaire de dev injoignable (~/ldap-test-stack)")
+    if request.node.get_closest_marker("requires_kerberos"):
+        pytest.skip("Aucun KDC sur cette VM — voir PLAN-AUTH-SSO.md, « À trancher »")
+
+
+@pytest.fixture(scope="session")
+def rsa_keys(tmp_path_factory):
+    """Paire RS256 éphémère. Le script scripts/generer-cles.py fait la même
+    chose pour de vrai ; on ne l'appelle pas ici pour ne pas dépendre de son
+    chemin de sortie par défaut (/etc/docsearch)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    dossier = tmp_path_factory.mktemp("jwt")
+    # 2048 et non 3072 : ces clés ne protègent rien et sont régénérées à
+    # chaque session de test — autant ne pas payer la génération.
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    privee = dossier / "private.pem"
+    privee.write_bytes(key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ))
+    publique = dossier / "public.pem"
+    publique.write_bytes(key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ))
+    return {"private": str(privee), "public": str(publique), "kid": "test-kid"}
+
+
+@pytest.fixture
+def env_auth(monkeypatch, rsa_keys):
+    """Configuration d'authentification complète et cohérente.
+
+    Patche les attributs du module `config` plutôt que os.environ : le
+    module les a lus à l'import, bien avant qu'un test ne s'exécute."""
+    monkeypatch.setattr(config, "JWT_PRIVATE_KEY_PATH", rsa_keys["private"])
+    monkeypatch.setattr(config, "JWT_PUBLIC_KEY_PATH", rsa_keys["public"])
+    monkeypatch.setattr(config, "JWT_ACTIVE_KID", rsa_keys["kid"])
+    monkeypatch.setattr(config, "IS_PRODUCTION", False)
+    monkeypatch.setattr(config, "API_ENV", "test")
+    monkeypatch.setattr(config, "COOKIE_SECURE", False)
+    monkeypatch.setattr(config, "TRUST_X_USER_HEADER", False)
+    monkeypatch.setattr(config, "DEV_USER", "")
+    monkeypatch.setattr(config, "KERBEROS_DEV_PRINCIPAL", "")
+    monkeypatch.setattr(config, "ACCESS_AUTH_DISABLED", False)
+    monkeypatch.setattr(config, "ADMIN_AUTH_DISABLED", False)
+    # Les groupes d'autorisation font partie d'une configuration COHÉRENTE :
+    # vides, le contrôle d'accès refuse tout le monde (refus par défaut), et
+    # tous les tests de connexion échoueraient en 403 pour une raison qui
+    # n'a rien à voir avec ce qu'ils vérifient.
+    monkeypatch.setattr(config, "ACCESS_GROUP", "docsearch-users")
+    monkeypatch.setattr(config, "ADMIN_GROUP", "docsearch-admins")
+    tokens.reset_keys()
+    directory.invalidate_cache()
+    yield
+    tokens.reset_keys()
+    directory.invalidate_cache()
+
+
+@pytest.fixture
+def env_ldap(monkeypatch, env_auth):
+    """Ajoute l'annuaire de dev à la configuration."""
+    for key, value in LDAP_DEV.items():
+        monkeypatch.setattr(config, key, value)
+    monkeypatch.setattr(directory, "LDAP_ENABLED", True)
+    directory.invalidate_cache()
+    yield
+
+
+@pytest.fixture(autouse=True)
+def clean_auth_keys():
+    """Efface les clés `docsearch:auth:*` avant et après chaque test.
+
+    Jamais de FLUSHDB : ce Redis porte aussi la configuration de
+    l'installation de développement (sources, réglages à chaud, recherches
+    enregistrées)."""
+    def _purge():
+        client = store.get_client()
+        if client is None:
+            return
+        keys = list(client.scan_iter(match=f"{store.KEY_PREFIX}*", count=200))
+        if keys:
+            client.delete(*keys)
+
+    _purge()
+    yield
+    _purge()
+
+
+@pytest.fixture(autouse=True)
+def journal_hors_ligne(monkeypatch):
+    """Le journal des connexions n'écrit PAS dans l'Elasticsearch partagé.
+
+    Corrige un défaut de la première version de ces tests : `_open_session`
+    appelle `events.record`, qui indexait pour de bon dans le cluster de
+    l'installation de développement — la suite y a créé l'index
+    `login_events` et l'a rempli de connexions fictives. Même principe que
+    pour Redis : on tape le vrai service quand c'est lui qu'on teste, jamais
+    en passant.
+
+    Les deux tests qui portent SUR le journal remplacent eux-mêmes
+    `events._client` dans leur corps, donc après cette fixture : ce sont eux
+    qui gagnent."""
+    class _FauxEs:
+        def __init__(self):
+            self.documents: list[dict] = []
+
+        def index(self, index, document):  # noqa: A002 — signature d'Elasticsearch
+            self.documents.append(document)
+
+    faux = _FauxEs()
+    monkeypatch.setattr(events, "_client", lambda: faux)
+    # Court-circuite _ensure_index : aucun index n'est créé nulle part.
+    # (Une fenêtre de vérification qui vient de s'ouvrir vaut « déjà
+    # vérifié » — voir events.INDEX_CHECK_TTL_SECONDS.)
+    monkeypatch.setattr(events, "_index_verifie_a", time.monotonic())
+    return faux
+
+
+@pytest.fixture
+def client(env_auth):
+    """Client HTTP sur l'application complète.
+
+    Importé tardivement : search_api tire tout le reste de l'API, et une
+    erreur d'import y ferait échouer même les tests qui n'en dépendent
+    pas."""
+    import search_api
+    from fastapi.testclient import TestClient
+
+    return TestClient(search_api.app, raise_server_exceptions=False)
+
+
+@pytest.fixture
+def compte_secours():
+    """Crée un compte de secours local, et le retire à la fin."""
+    created = []
+
+    def _create(login: str, password: str, groups: list[str]):
+        accounts.set_account(login, password=password, groups=groups)
+        created.append(login)
+        return login
+
+    yield _create
+    for login in created:
+        try:
+            accounts.delete_account(login)
+        except Exception:
+            pass

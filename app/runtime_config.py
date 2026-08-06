@@ -89,6 +89,15 @@ DEFAULT_RUNTIME = {
     # panneau d'administration, que seule l'API sert.
     "ocr_languages":             os.getenv("OCR_LANGUAGES", "fra"),
     "ocr_strategy":              os.getenv("OCR_STRATEGY", "auto"),
+
+    # Connexion automatique par ticket Kerberos/SPNEGO (voir
+    # app/auth/kerberos.py). DÉSACTIVÉE par défaut, et l'interrupteur est
+    # indispensable : sans lui, une installation sans keytab répondrait un
+    # défi Negotiate que personne ne peut relever, à chaque chargement de
+    # page. Type str et non bool, comme les réglages OCR ci-dessus —
+    # set_param() coerce via type(DEFAULT_RUNTIME[k]) et bool("false")
+    # vaut True en Python.
+    "sso_kerberos_enabled":      os.getenv("SSO_KERBEROS_ENABLED", "false"),
 }
 
 # Bornes des poids de pertinence. Un poids nul ou négatif produirait un

@@ -85,7 +85,7 @@ DEFAULT_UI_CONFIG = {
     "show_current_user_enabled": True,   # badge "Connecté : <utilisateur> · <groupes>" dans l'en-tête
                                     # de la page de RECHERCHE (voir index.html:current-user) —
                                     # purement un affichage, aucun contrôle d'accès associé : le
-                                    # contrôle d'accès réel se fait via access_auth.py/ACCESS_GROUP,
+                                    # contrôle d'accès réel se fait via auth/deps.py/ACCESS_GROUP,
                                     # pas ici. Indépendant de show_current_user_enabled_admin
                                     # ci-dessous, qui couvre le même badge sur admin.html.
     "show_current_user_groups_enabled": True,   # inclut " · <groupes>" dans ce même badge (recherche) —

@@ -14,9 +14,41 @@ jobs:
       - run: pip install ruff
       - run: ruff check app/ --output-format=github
 
+  test:
+    runs-on: ubuntu-latest
+    # Redis réel : les sessions et les compteurs de tentatives n'ont aucun
+    # sens simulés (voir tests/conftest.py). L'annuaire LDAP et le KDC,
+    # eux, n'existent pas ici — les tests qui les exigent se sautent
+    # proprement par leurs marqueurs `requires_ldap` / `requires_kerberos`.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      REDIS_HOST: 127.0.0.1
+      # Elasticsearch n'est pas démarré : le journal des connexions échoue
+      # à écrire et le dit en warning, sans jamais faire échouer une
+      # connexion — c'est précisément ce que vérifie l'un des tests.
+      ES_HOST: http://127.0.0.1:9200
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      # gssapi (Kerberos) se compile contre les en-têtes krb5 : mêmes
+      # paquets que dans le Dockerfile. Sans eux, `pip install` échoue sur
+      # cette seule ligne de requirements.txt.
+      - run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest
+
   build:
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t docsearch-api:ci .

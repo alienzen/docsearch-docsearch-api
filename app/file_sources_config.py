@@ -104,7 +104,7 @@ class Source:
     # par défaut car coûteux en CPU, à activer explicitement pour les
     # sources qui en ont réellement besoin (voir set_ocr_enabled()).
     ocr_enabled: bool = False
-    # Groupes AD/LDAP (voir ldap_resolver.get_user_groups) autorisés à VOIR
+    # Groupes AD/LDAP (voir auth/directory.py) autorisés à VOIR
     # cette source dans /search — vide (défaut) = aucune restriction,
     # accessible à tout utilisateur passant le filtre ACL par document
     # habituel (build_acl_filter). Restriction au niveau SOURCE entière,
