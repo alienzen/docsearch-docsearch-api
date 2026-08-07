@@ -2295,6 +2295,11 @@ class UiConfigUpdate(BaseModel):
     favicon_url: str | None = None
     footer_text: str | None = None
     footer_bottom_text: str | None = None
+    # Page de connexion — voir ui_config.py pour le détail (URL vide =
+    # lien masqué, ProConnect = jalon désactivé).
+    login_inscription_url: str | None = None
+    login_mot_de_passe_oublie_url: str | None = None
+    login_proconnect_enabled: bool | None = None
     sources_mount_display: str | None = None
 
 
@@ -2403,6 +2408,12 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_text("footer_text", body.footer_text)
         if body.footer_bottom_text is not None:
             config = ui_config.set_text("footer_bottom_text", body.footer_bottom_text)
+        if body.login_inscription_url is not None:
+            config = ui_config.set_text("login_inscription_url", body.login_inscription_url)
+        if body.login_mot_de_passe_oublie_url is not None:
+            config = ui_config.set_text("login_mot_de_passe_oublie_url", body.login_mot_de_passe_oublie_url)
+        if body.login_proconnect_enabled is not None:
+            config = ui_config.set_param("login_proconnect_enabled", body.login_proconnect_enabled)
         if body.sources_mount_display is not None:
             config = ui_config.set_text("sources_mount_display", body.sources_mount_display)
         return config
