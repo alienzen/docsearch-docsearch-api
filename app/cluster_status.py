@@ -127,18 +127,61 @@ def check_watcher_heartbeat() -> dict:
         data = json.loads(raw)
         age = time.time() - data["ts"]
         alive = age < HEARTBEAT_STALE_AFTER
-        return {"alive": alive, "last_seen_seconds_ago": round(age, 1)}
+        return {
+            "alive": alive,
+            "last_seen_seconds_ago": round(age, 1),
+            # Identité de l'image d'ingestion, écrite dans le battement
+            # par watcher.py. Absente d'un battement laissé par une
+            # version antérieure du watcher, d'où les .get().
+            "version":    data.get("version"),
+            "commit":     data.get("commit"),
+            "build_date": data.get("build_date"),
+        }
     except Exception as e:
         return {"alive": False, "error": str(e)}
 
 
+def check_versions(watcher: dict) -> dict:
+    """Identité des composants DocSearch déployés.
+
+    L'API se décrit elle-même ; l'ingestion passe par le battement de
+    cœur du watcher, seul processus d'ingestion dont l'API lise déjà
+    l'état. Le TTL de 120 s du battement a un effet appréciable ici : la
+    version affichée est nécessairement celle d'un processus VIVANT, un
+    composant arrêté n'affiche rien plutôt qu'une valeur périmée.
+
+    ⚠️  Portée réelle de la ligne « ingestion » : le watcher ne tourne que
+    sur ingest-1 (voir quadlet/install-units.sh, --with-singletons). Les
+    workers Kafka d'ingest-2 et ingest-3 partagent la même image mais se
+    mettent à jour machine par machine : pendant une mise à jour rolling,
+    cette ligne ne dit rien de leur version. L'interface le signale.
+
+    L'interface web ne figure pas ici : elle n'a pas d'exécution côté
+    serveur, sa version est figée dans son bundle au build et c'est elle
+    qui la rapporte (voir docsearch-ui-vue/vite.config.ts).
+    """
+    import version
+
+    composants = {"api": version.infos()}
+    if watcher.get("version"):
+        composants["ingestion"] = {
+            "version":    watcher["version"],
+            "commit":     watcher.get("commit"),
+            "build_date": watcher.get("build_date"),
+            "source":     "watcher (ingest-1)",
+        }
+    return composants
+
+
 def get_full_status() -> dict:
     """Agrège l'état de tous les composants en un seul appel."""
+    watcher = check_watcher_heartbeat()
     return {
         "elasticsearch": check_elasticsearch(),
         "redis":         check_redis(),
         "tika":          check_tika(),
         "kafka":         check_kafka_broker(),
         "workers":       check_workers_and_progress(),
-        "watcher":       check_watcher_heartbeat(),
+        "watcher":       watcher,
+        "versions":      check_versions(watcher),
     }

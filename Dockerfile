@@ -53,6 +53,33 @@ COPY app/ .
 # jamais des routes HTTP, voir leur en-tête.
 COPY scripts/ ./scripts/
 
+# ── Identité de la livraison ──────────────────────────────────
+# Le fichier VERSION porte la version PRODUIT, la même dans les trois
+# dépôts construits en images. Il est copié dans l'image pour servir de
+# repli à app/version.py : une image construite sans les --build-arg
+# ci-dessous affiche encore la bonne version produit, seule l'estampille
+# de build manque.
+COPY VERSION .
+
+# Estampille de build, injectée par ./manage.sh build depuis git (voir
+# docsearch-infra/manage.sh, build_one). Le dépôt .git n'est pas — et ne
+# doit pas être — copié dans l'image : la machine de construction est le
+# seul endroit qui connaisse le commit.
+ARG DOCSEARCH_VERSION=inconnu
+ARG DOCSEARCH_COMMIT=inconnu
+ARG DOCSEARCH_BUILD_DATE=inconnu
+ENV DOCSEARCH_VERSION=${DOCSEARCH_VERSION} \
+    DOCSEARCH_COMMIT=${DOCSEARCH_COMMIT} \
+    DOCSEARCH_BUILD_DATE=${DOCSEARCH_BUILD_DATE}
+# Labels OCI en plus des variables d'environnement : ils se lisent par
+# `podman inspect` SANS démarrer le conteneur, ce qui est le seul moyen
+# d'identifier une archive fraîchement chargée par `podman load` sur un
+# serveur isolé (voir HOWTO-deploiement-hors-ligne.md).
+LABEL org.opencontainers.image.title="docsearch-api" \
+      org.opencontainers.image.version=${DOCSEARCH_VERSION} \
+      org.opencontainers.image.revision=${DOCSEARCH_COMMIT} \
+      org.opencontainers.image.created=${DOCSEARCH_BUILD_DATE}
+
 # UID de l'utilisateur du conteneur — doit correspondre au propriétaire
 # des volumes montés depuis l'hôte. Renommé depuis DOCKER_UID avec le
 # passage à podman ; se règle par ./manage.sh build (APP_UID=... ).
