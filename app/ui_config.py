@@ -142,6 +142,31 @@ DEFAULT_UI_CONFIG = {
                             # licence que le composant DSFR accole habituellement à ce texte est
                             # neutralisé côté interface : seule cette mention libre s'affiche,
                             # sans « Etalab 2.0 » codé en dur.
+    # ── Page de connexion ────────────────────────────────────────────
+    # Les trois réglages ci-dessous ajoutent, sous le formulaire, les
+    # éléments que charlie/app-front affiche au même endroit (voir
+    # LoginView.vue). Tous NEUTRES par défaut : une installation qui n'y
+    # touche pas garde l'écran de connexion actuel, formulaire seul.
+    #
+    # DocSearch n'a ni comptes locaux ni réinitialisation de mot de passe
+    # (l'API n'expose que /auth/login, /login/kerberos, /refresh, /logout,
+    # /me) : ces deux liens ne peuvent donc pas pointer vers une page
+    # interne. D'où une URL à saisir plutôt qu'une simple bascule — c'est
+    # l'administrateur qui désigne la destination (formulaire intranet de
+    # demande de compte, portail de réinitialisation de l'annuaire…), et
+    # une URL vide masque le lien. Un simple oui/non aurait affiché un
+    # lien mort.
+    "login_inscription_url": "",   # lien « Pas encore de compte ? Faire une demande
+                            # d'inscription » sous le bouton de connexion. Vide = masqué.
+    "login_mot_de_passe_oublie_url": "",   # lien « Mot de passe oublié ? ». Vide = masqué.
+    "login_proconnect_enabled": False,   # bouton « Se connecter avec ProConnect (bientôt
+                            # disponible) ». VOLONTAIREMENT une bascule et non une URL :
+                            # ProConnect est un flux OpenID Connect, pas un lien, et rien
+                            # ne l'implémente côté API. Le bouton s'affiche donc DÉSACTIVÉ,
+                            # à l'identique de celui de charlie — un jalon visible pour les
+                            # installations qui l'attendent, jamais un bouton qui échoue.
+                            # Désactivé par défaut : inutile d'annoncer ce qui n'existe pas
+                            # sur une installation qui n'a pas prévu ProConnect.
     "sources_mount_display": "",   # remplace, uniquement à l'affichage/copie côté index.html
                             # (copyPathClick), le préfixe SOURCES_MOUNT (ex: "/sources", chemin de
                             # montage interne aux conteneurs) par une valeur utilisable par
