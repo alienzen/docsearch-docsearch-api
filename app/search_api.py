@@ -23,6 +23,7 @@ from elasticsearch.helpers import scan as es_scan
 from auth.deps import current_user, optional_user, require_access, require_admin, is_admin
 from auth.directory import get_effective_groups
 from auth.router import router as auth_router
+import version
 import cluster_status
 import admin_scan
 import filetype_config
@@ -47,7 +48,9 @@ import web_sources_config
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="DocSearch API", version="2.1.0")
+# La version vient du fichier VERSION du dépôt via version.py — plus de
+# valeur en dur ici, qui restait figée à chaque livraison.
+app = FastAPI(title="DocSearch API", version=version.VERSION)
 
 # Routes /auth/* — connexion, session, SSO Kerberos, et les deux cibles
 # internes du auth_request de Nginx (/auth/check-access, /auth/check-admin).
@@ -125,6 +128,14 @@ def health():
         info = es.info()
         return {
             "status":       "ok",
+            # Version de DocSearch, à ne pas confondre avec "es_version"
+            # juste en dessous. Exposée ici parce que c'est la route que
+            # l'exploitation interroge au curl, sans session — même
+            # niveau de divulgation que le nom du cluster et la version
+            # d'Elasticsearch, déjà publics sur cette route.
+            "version":      version.VERSION,
+            "commit":       version.COMMIT,
+            "build_date":   version.BUILD_DATE,
             "es_version":   info["version"]["number"],
             "cluster":      info["cluster_name"],
             "acl_enabled":  True,
