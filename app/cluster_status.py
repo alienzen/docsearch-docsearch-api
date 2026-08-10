@@ -175,6 +175,8 @@ def check_versions(watcher: dict) -> dict:
 
 def get_full_status() -> dict:
     """Agrège l'état de tous les composants en un seul appel."""
+    import search_log
+
     watcher = check_watcher_heartbeat()
     return {
         "elasticsearch": check_elasticsearch(),
@@ -183,5 +185,10 @@ def get_full_status() -> dict:
         "kafka":         check_kafka_broker(),
         "workers":       check_workers_and_progress(),
         "watcher":       watcher,
+        # Ne se déduit d'aucune des lignes ci-dessus : un cluster « green »
+        # peut parfaitement refuser toute écriture (blocage read-only sur
+        # dépassement du flood-stage watermark), et c'est justement le cas
+        # qui a motivé cette carte. Voir search_log.health().
+        "search_log":    search_log.health(),
         "versions":      check_versions(watcher),
     }
