@@ -7,10 +7,10 @@ aperçu de documents. Fait partie de l'écosystème DocSearch :
 |---|---|
 | [docsearch-ingestion](../docsearch-ingestion) | Extraction, ACL, indexation |
 | **docsearch-api** (ce dépôt) | API de recherche |
-| [docsearch-ui](../docsearch-ui) | Interface web statique |
+| [docsearch-ui-vue](../docsearch-ui-vue) | Interface web (Vue 3 + DSFR) |
 | [docsearch-infra](../docsearch-infra) | Orchestration podman + systemd (Quadlet) |
 | [docsearch-docs](../docsearch-docs) | Documents commerciaux |
-| [docsearch-dataset-generator](../docsearch-dataset-generator) | Génération de jeux de test |
+| `docsearch-dataset-generator` | Génération de jeux de test (cloné à la demande) |
 
 Ce dépôt ne dépend d'aucun autre : il lit uniquement un index Elasticsearch
 déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
@@ -176,7 +176,7 @@ acl_filter = {
 
 Routes protégées par appartenance à un groupe LDAP/AD (`ADMIN_GROUP`,
 nécessite `LDAP_ENABLED=true`) — voir `admin_auth.py`. Interface web
-correspondante : `docsearch-ui/public/admin.html`.
+correspondante : `docsearch-ui-vue/admin.html` (+ `src/pages/admin/`).
 
 | Route | Rôle |
 |---|---|
