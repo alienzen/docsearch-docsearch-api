@@ -60,6 +60,16 @@ DEFAULT_UI_CONFIG = {
                                     # notifications déjà déposées restent lisibles nulle part
                                     # tant que le flag est désactivé (l'UI qui les affiche est
                                     # elle-même masquée).
+    "search_history_enabled": False,  # entrée "Mes recherches récentes" dans la barre de navigation
+                                    # (GET /me/searches) — restitue à l'utilisateur SES propres
+                                    # recherches, lues dans l'index search_logs déjà écrit à chaque
+                                    # recherche. Désactivé, la route renvoie 403. False par défaut
+                                    # pour la même raison que search_time_enabled ci-dessous : elle
+                                    # AJOUTE un élément à l'écran, elle ne masque rien d'existant.
+    "autocomplete_enabled": False,  # suggestions sous la barre de recherche (GET /suggest) : les
+                                    # recherches passées de l'utilisateur, puis les auteurs et
+                                    # mots-clés du corpus qu'il a le droit de voir. Désactivé, la
+                                    # route renvoie 403. False par défaut, même raison.
     "sort_enabled":        True,   # sélecteur "Trier par" au-dessus des résultats de recherche —
                                     # purement une préférence d'affichage, pas de contrôle d'accès
                                     # associé côté API (contrairement à export/collections/alerts) :

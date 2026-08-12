@@ -32,6 +32,7 @@ import runtime_config
 import search_query
 import path_filter
 import search_log
+import user_history
 import nps_log
 import suggestion_log
 import engagement_config
@@ -1177,6 +1178,99 @@ def remove_saved_search(search_id: str, user: str = Depends(current_user)):
         return saved_searches.delete_saved(username, search_id)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+# ── Mon activité : historique et autocomplétion ──────────────────────
+#
+# Les deux lisent l'index search_logs, écrit à chaque recherche depuis
+# toujours — aucune collecte nouvelle, seulement une restitution à
+# l'intéressé de ce qui n'allait jusqu'ici qu'aux statistiques
+# d'administration. Le détail (et les deux gisements écartés) est dans
+# user_history.py.
+#
+# Les deux bascules démarrent à FALSE, contrairement aux plus anciennes :
+# elles ajoutent un élément à l'écran, et la règle du dépôt veut qu'une
+# telle bascule s'allume à la demande d'un administrateur plutôt que
+# d'apparaître d'elle-même après une mise à jour.
+def _require_search_history_enabled() -> None:
+    if not ui_config.get_config().get("search_history_enabled", False):
+        raise HTTPException(status_code=403, detail="L'historique de recherche est désactivé.")
+
+
+def _require_autocomplete_enabled() -> None:
+    if not ui_config.get_config().get("autocomplete_enabled", False):
+        raise HTTPException(status_code=403, detail="L'autocomplétion est désactivée.")
+
+
+@app.get("/me/searches")
+def get_my_searches(limit: int = 10, user: str = Depends(current_user)):
+    """Les dernières recherches de l'utilisateur courant.
+
+    « De l'utilisateur courant » n'est pas un paramètre : il n'existe
+    aucune route permettant de lire l'historique de quelqu'un d'autre —
+    la ventilation par utilisateur, c'est /admin/search-logs, et elle
+    est réservée aux administrateurs et tracée au journal d'audit.
+    """
+    _require_search_history_enabled()
+    borne = max(1, min(limit, 50))
+    try:
+        return {"searches": user_history.recent_queries(es, user, borne)}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Historique indisponible : {e}") from e
+
+
+@app.get("/search/suggest")
+def suggest(q: str = "", limit: int = 8, user: str = Depends(current_user)):
+    """Suggestions de saisie : ses propres recherches d'abord, puis les
+    auteurs et mots-clés du corpus QU'IL PEUT VOIR.
+
+    Sous `/search/` et non à la racine, pour deux raisons : le préfixe est
+    déjà proxifié par les deux Nginx et par le proxy de développement
+    (comme `/search/export`), et une route `/suggest` voisinerait avec
+    `/suggestions`, qui est tout autre chose — le recueil des suggestions
+    d'amélioration des utilisateurs. Deux routes à une lettre d'écart sont
+    un piège pour qui relira.
+
+    Meilleur effort de bout en bout : moins de deux caractères, une panne
+    d'Elasticsearch ou un dépassement du délai renvoient la liste
+    (éventuellement partielle) constituée jusque-là, jamais une erreur.
+    Une barre de recherche qui affiche « 503 » sous les doigts de
+    l'utilisateur serait pire que pas de suggestion du tout.
+    """
+    _require_autocomplete_enabled()
+    saisie = q.strip()
+    if len(saisie) < 2:
+        return {"suggestions": []}
+    borne = max(1, min(limit, 20))
+
+    propositions: list[dict] = []
+    try:
+        propositions += [
+            {"text": entree["query"], "kind": "history", "count": entree["count"]}
+            for entree in user_history.matching_queries(es, user, saisie, borne)
+        ]
+    except Exception as e:
+        logger.warning(f"[suggest] Historique indisponible pour {user} : {e}")
+
+    if len(propositions) < borne:
+        try:
+            # Exactement les filtres de /search : l'ACL de l'appelant et
+            # les sources réellement cherchables. Une agrégation divulgue
+            # autant qu'un résultat de recherche.
+            filtres = [
+                build_acl_filter(user),
+                {"terms": {"source": _searchable_source_names(user)}},
+            ]
+            deja_vu = {p["text"].casefold() for p in propositions}
+            for proposition in user_history.corpus_terms(
+                es, ES_SEARCH_ALIAS, filtres, saisie, borne - len(propositions)
+            ):
+                if proposition["text"].casefold() not in deja_vu:
+                    propositions.append(proposition)
+        except Exception as e:
+            logger.warning(f"[suggest] Corpus indisponible pour « {saisie} » : {e}")
+
+    return {"suggestions": propositions[:borne]}
 
 
 # ── Alertes sur recherches sauvegardées ──────────────────────────────
@@ -2384,6 +2478,8 @@ class UiConfigUpdate(BaseModel):
     collections_enabled: bool | None = None
     custom_keywords_enabled: bool | None = None
     alerts_enabled:      bool | None = None
+    search_history_enabled: bool | None = None
+    autocomplete_enabled: bool | None = None
     sort_enabled:        bool | None = None
     search_time_enabled: bool | None = None
     acl_visible_enabled: bool | None = None
@@ -2481,6 +2577,10 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("custom_keywords_enabled", body.custom_keywords_enabled)
         if body.alerts_enabled is not None:
             config = ui_config.set_param("alerts_enabled", body.alerts_enabled)
+        if body.search_history_enabled is not None:
+            config = ui_config.set_param("search_history_enabled", body.search_history_enabled)
+        if body.autocomplete_enabled is not None:
+            config = ui_config.set_param("autocomplete_enabled", body.autocomplete_enabled)
         if body.sort_enabled is not None:
             config = ui_config.set_param("sort_enabled", body.sort_enabled)
         if body.search_time_enabled is not None:

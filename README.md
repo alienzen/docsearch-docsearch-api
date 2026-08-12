@@ -29,6 +29,8 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | PATCH | `/saved-searches/{id}/alert` | Active/désactive l'alerte d'une recherche enregistrée (fréquence quotidienne/hebdomadaire) |
 | GET  | `/alerts` | Notifications in-app de l'utilisateur (nouveaux résultats détectés par `alert_worker.py`) |
 | POST | `/alerts/{id}/seen`, `/alerts/mark-all-seen` | Marque une/toutes les notifications comme lues |
+| GET  | `/me/searches` | Historique de recherche de l'utilisateur courant (le sien, et rien d'autre) |
+| GET  | `/search/suggest` | Suggestions de saisie : ses recherches passées, puis auteurs et mots-clés visibles |
 | GET  | `/searchable-sources` | Sources cherchables, pour la présélection avant recherche |
 | GET/POST/DELETE | `/collections` | Collections de documents personnelles ("📋 Mes collections") |
 | POST | `/collections/{id}/rename`, `/collections/{id}/documents`, `/collections/{id}/documents/{doc_id}` | Gestion du contenu d'une collection |
@@ -115,6 +117,59 @@ uvicorn : ses loggers ne propagent pas.
 L'affichage de la durée côté interface est une bascule d'administration
 (`search_time_enabled`), désactivée par défaut, doublée d'une préférence
 par poste. La mesure, elle, a lieu quel que soit ce réglage.
+
+## Historique personnel et autocomplétion
+
+`GET /me/searches` et `GET /search/suggest` (voir `user_history.py`) lisent
+l'index `search_logs`, écrit à chaque recherche depuis toujours :
+**aucune collecte nouvelle**, seulement la restitution à l'intéressé de
+ce qui n'allait jusqu'ici qu'aux statistiques d'administration.
+
+**Le nom d'utilisateur n'est jamais un paramètre** : il vient du jeton de
+session. Il n'existe aucune route permettant de lire l'historique de
+quelqu'un d'autre — la ventilation par utilisateur, c'est
+`/admin/search-logs`, réservée aux administrateurs et tracée au journal
+d'audit.
+
+⚠️ **Les requêtes des autres utilisateurs ne sont jamais suggérées**, et
+ce n'est pas un manque à combler : « les recherches les plus fréquentes »
+est la variante tentante et fuyante de la même fonctionnalité. Une
+requête porte régulièrement le nom d'un dossier, d'une affaire ou d'une
+personne que son auteur est seul à connaître.
+
+Les suggestions du corpus (`/search/suggest`) portent sur **l'auteur et les
+mots-clés**, filtrés par l'ACL de l'appelant et les sources cherchables —
+exactement les filtres de `/search`, passés à `user_history.py` par
+l'appelant plutôt que reconstruits, pour qu'il n'existe qu'une seule
+définition de « ce que cet utilisateur a le droit de voir ». Une
+agrégation divulgue autant qu'un résultat de recherche.
+
+**Pourquoi pas le nom de fichier ni le titre** — mesuré le 2026-08-12 sur
+la pile de développement (23 016 documents) : le coût d'un `include`
+régex tient au balayage du dictionnaire de termes, donc à la
+**cardinalité** du champ. 151 auteurs et 102 mots-clés distincts, contre
+22 494 noms de fichier, soit un par document. Les deux premiers restent
+bornés quand le corpus grandit, le troisième croît avec lui. Suggérer des
+noms de fichier suppose un champ dédié (`search_as_you_type` ou
+`completion`), donc une réindexation — voir
+`docsearch-infra/PLAN-EVOLUTIONS.md`.
+
+`/search/suggest` est **du meilleur effort de bout en bout** : moins de deux
+caractères, panne d'Elasticsearch ou dépassement du délai (300 ms)
+renvoient la liste constituée jusque-là, jamais une erreur. Une barre de
+recherche qui affiche « 503 » sous les doigts serait pire que pas de
+suggestion.
+
+Les deux fonctionnalités sont suspendables depuis l'administration
+(`search_history_enabled`, `autocomplete_enabled`) et **démarrent
+désactivées** — comme `search_time_enabled`, et pour la même raison :
+elles ajoutent un élément à l'écran, elles ne masquent rien d'existant.
+Désactivées, les routes renvoient 403.
+
+Une recherche **sans texte libre** (filtres seuls) n'entre pas dans
+l'historique : elle s'y afficherait comme une ligne vide, et le format
+n'en porte pas de quoi la rejouer — `search_logs` enregistre les critères
+à titre informatif, mais pas les facettes personnalisées des sources SQL.
 
 ## Alertes sur recherches sauvegardées
 
