@@ -327,6 +327,35 @@ sinon plus personne ne se connecte.
 `ldap3` est une implémentation Python pure — aucune dépendance système
 (pas besoin de `libldap-dev`).
 
+## Linter
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt   # une fois
+.venv/bin/ruff check .                          # signale
+.venv/bin/ruff check --fix .                    # corrige ce qui est sûr
+```
+
+`ruff` tournait déjà ici : `.github/workflows/ci.yml` lance `ruff check app/`
+depuis toujours. Ce qui a changé le 2026-08-12, c'est qu'il a désormais un
+`ruff.toml` — jusque-là il tournait sur ses seules règles par défaut (E4, E7,
+E9, F), sans que ce choix soit écrit nulle part. Le fichier le rend explicite,
+ajoute `B`, `C4` et `SIM`, étend l'analyse à `tests/`, et argumente règle par
+règle ce qui reste écarté :
+
+- **`E402`** — les constantes d'environnement se lisent délibérément ENTRE les
+  imports (`ES_HOST`, `REDIS_HOST`, `LDAP_ENABLED` en tête de `app/search_api.py`),
+  et `auth/config.py` lit l'environnement à l'import, ce dont `tests/conftest.py`
+  dépend. 39 signalements pour un parti pris assumé.
+- **`E701`** — les tables de correspondance alignées de `app/admin_scan.py`.
+- **`B904`** — `raise HTTPException(...)` sans `from err` : 80 occurrences, un
+  lot à traiter pour lui-même.
+- **`E501`** — 383 signalements pour un 95e centile réel à 84 caractères. Aucun
+  formateur n'est en place, et le dépôt n'en a jamais eu.
+
+La version est **épinglée à l'identique dans `requirements-dev.txt` et dans la
+CI** : un linter dont la version flotte finit par échouer en CI sur une règle
+que personne n'a choisie.
+
 ## Tests
 
 ```bash

@@ -1,0 +1,79 @@
+# ── Linter Python : ruff ─────────────────────────────────────
+# Configuration posée le 2026-08-12.
+#
+#   .venv/bin/ruff check .          # signale
+#   .venv/bin/ruff check --fix .    # corrige ce qui est sûr
+#
+# ruff tournait DÉJÀ dans ce dépôt : .github/workflows/ci.yml lance
+# `ruff check app/` depuis toujours, mais sans fichier de configuration —
+# donc sur les seules règles par défaut (E4, E7, E9, F) et sur `app/`
+# seulement. Ce fichier rend ce choix explicite, l'élargit un peu, et
+# l'étend à tests/.
+#
+# Le formateur (`ruff format`) n'est PAS activé : le dépôt n'a jamais été
+# formaté automatiquement, et le faire d'un coup réécrirait tout pour zéro
+# défaut corrigé.
+
+line-length = 120
+
+# L'image est en `FROM python:3.12-slim` et la CI aussi, alors que la VM de
+# développement est en 3.14. C'est le plus PETIT des deux qui compte : c'est
+# lui qui décide de ce que le code a le droit d'écrire.
+target-version = "py312"
+
+[lint]
+# Au-delà des règles par défaut (E4/E7/E9 + F) :
+#   B    bugbear — pièges réels (mutable par défaut, zip non strict…)
+#   C4   comprehensions inutiles
+#   SIM  simplifications sûres
+#
+# E501 (ligne trop longue) reste dehors : 383 signalements pour un 95e
+# centile réel à 84 caractères. `line-length` ci-dessus est la cible si on
+# l'active un jour.
+select = ["E4", "E7", "E9", "F", "B", "C4", "SIM"]
+
+ignore = [
+    # try/except/pass → contextlib.suppress. Préférence de style, pas un
+    # défaut : 4 occurrences.
+    "SIM105",
+
+    # Imports non regroupés en tête de module. Ce dépôt lit délibérément
+    # ses constantes d'environnement ENTRE les imports (ES_HOST, REDIS_HOST,
+    # LDAP_ENABLED en tête de app/search_api.py) — et auth/config.py lit
+    # l'environnement à l'import, ce dont tests/conftest.py dépend. 39
+    # signalements pour un parti pris assumé.
+    "E402",
+
+    # Plusieurs instructions sur une ligne : les tables de correspondance
+    # alignées de app/admin_scan.py (`if name.endswith(".tar.gz"): return
+    # "tar.gz"`), plus lisibles en colonnes qu'étalées. 20 signalements,
+    # aucun défaut.
+    "E701",
+
+    # `raise HTTPException(...)` dans un `except` sans `from err`. 80
+    # occurrences. La règle est légitime — elle préserve la cause d'origine
+    # dans la trace — mais 80 réécritures à la main ne sont pas un effet de
+    # bord acceptable de l'installation d'un linter. Lot à part, à retirer
+    # d'ici une fois traité.
+    "B904",
+]
+
+[lint.per-file-ignores]
+# `assert False, "message"` est une façon normale de forcer l'échec d'un
+# test. B011 vise le code de production, que `python -O` déasserterait.
+"tests/**" = ["B011"]
+
+[lint.flake8-bugbear]
+# `def f(x = Depends(...))` est LA façon d'écrire une dépendance FastAPI.
+# Sans cette liste, B008 signale chaque route de l'API.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
+]

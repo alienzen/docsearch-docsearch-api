@@ -15,12 +15,12 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Header, Depends, Request, Query
+from fastapi import FastAPI, HTTPException, Depends, Request, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan as es_scan
-from auth.deps import current_user, optional_user, require_access, require_admin, is_admin
+from auth.deps import current_user, optional_user, require_admin, is_admin
 from auth.directory import get_effective_groups
 from auth.router import router as auth_router
 import version
@@ -1433,7 +1433,7 @@ def _convert_to_pdf(filepath: str) -> StreamingResponse:
             check=True, timeout=30
         )
         pdf_name = Path(filepath).stem + ".pdf"
-        content  = open(os.path.join(tmpdir, pdf_name), "rb").read()
+        content  = Path(tmpdir, pdf_name).read_bytes()
     return StreamingResponse(
         iter([content]),
         media_type="application/pdf",
