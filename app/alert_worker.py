@@ -1,5 +1,15 @@
-# alert_worker.py — Vérification périodique des recherches sauvegardées
-# marquées "alerte" (voir saved_searches.py : alert_enabled/alert_frequency)
+# alert_worker.py — Les deux travaux de fond de docsearch-api :
+# vérification des alertes sur recherches sauvegardées, et purge des
+# journaux expirés (log_retention.py, une fois par jour).
+#
+# Le second est ici et non dans un conteneur de plus pour la raison qui a
+# déjà décidé du premier, ci-dessous : ce processus tourne, il porte la
+# même image, et le dépôt a tranché contre l'ordonnanceur externe.
+#
+# ── Alertes ──────────────────────────────────────────────────
+#
+# Vérification périodique des recherches sauvegardées marquées "alerte"
+# (voir saved_searches.py : alert_enabled/alert_frequency)
 #
 # Rejoue, pour chaque recherche sauvegardée avec alerte active, les mêmes
 # critères qu'une recherche manuelle (search_query.py — voir son
@@ -32,6 +42,7 @@ from elasticsearch import Elasticsearch
 
 import saved_searches
 import alert_notifications
+import log_retention
 from search_query import build_query_clauses
 from file_sources_config import ES_SEARCH_ALIAS
 
@@ -93,6 +104,28 @@ def run_tick() -> None:
                 _check_one(username, entry)
 
 
+def run_retention() -> None:
+    """Purge des journaux expirés (log_retention.py), au plus une fois par
+    jour.
+
+    Ici et non dans un conteneur de plus : ce processus tourne déjà, porte
+    la même image, et le dépôt a déjà tranché contre l'ordonnanceur
+    externe (voir l'en-tête de ce fichier). `passage_du()` pose un verrou
+    Redis dont la durée de vie EST l'intervalle — plusieurs exemplaires du
+    worker ne purgent donc pas cinq fois.
+
+    Le tick d'alertes ne doit jamais dépendre de celui-ci : la purge est
+    bornée par passage (voir MAX_DOCS_PAR_PASSAGE) et ses erreurs sont
+    rattrapées ici même.
+    """
+    if not log_retention.passage_du():
+        return
+    logger.info("[retention] Passage quotidien")
+    for ligne in log_retention.purger(es):
+        if "erreur" in ligne:
+            logger.error(f"[retention] {ligne['libelle']} : {ligne['erreur']}")
+
+
 if __name__ == "__main__":
     logger.info(f"Démarrage du worker d'alertes (tick={TICK_SECONDS}s)")
     while True:
@@ -100,4 +133,10 @@ if __name__ == "__main__":
             run_tick()
         except Exception as e:
             logger.error(f"[alert_worker] Erreur de tick : {e}")
+        # try séparé : une purge qui échoue ne doit pas emporter la
+        # vérification des alertes, ni l'inverse.
+        try:
+            run_retention()
+        except Exception as e:
+            logger.error(f"[retention] Erreur de passage : {e}")
         time.sleep(TICK_SECONDS)

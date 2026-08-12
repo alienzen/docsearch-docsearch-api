@@ -98,6 +98,22 @@ DEFAULT_RUNTIME = {
     # set_param() coerce via type(DEFAULT_RUNTIME[k]) et bool("false")
     # vaut True en Python.
     "sso_kerberos_enabled":      os.getenv("SSO_KERBEROS_ENABLED", "false"),
+
+    # Durée de conservation des journaux, en jours (voir log_retention.py,
+    # appelé une fois par jour par alert_worker.py). 0 = conservation
+    # illimitée, et c'est écrit tel quel dans le panneau d'administration.
+    #
+    # Ces cinq index grandissaient jusqu'ici sans limite. Les défauts ne
+    # sont pas uniformes, parce que ces journaux ne servent pas à la même
+    # chose : douze mois permettent une comparaison d'une année sur
+    # l'autre, deux ans donnent une tendance de satisfaction, et le
+    # journal d'audit — la trace qui protège l'administrateur — se garde
+    # plus longtemps que ce qu'il trace.
+    "retention_search_logs_days":   int(os.getenv("RETENTION_SEARCH_LOGS_DAYS", "365")),
+    "retention_login_events_days":  int(os.getenv("RETENTION_LOGIN_EVENTS_DAYS", "365")),
+    "retention_audit_log_days":     int(os.getenv("RETENTION_AUDIT_LOG_DAYS", "1095")),
+    "retention_nps_days":           int(os.getenv("RETENTION_NPS_DAYS", "730")),
+    "retention_suggestions_days":   int(os.getenv("RETENTION_SUGGESTIONS_DAYS", "730")),
 }
 
 # Bornes des poids de pertinence. Un poids nul ou négatif produirait un

@@ -33,6 +33,7 @@ import search_query
 import path_filter
 import search_log
 import user_history
+import log_retention
 import nps_log
 import suggestion_log
 import engagement_config
@@ -605,6 +606,154 @@ def _journaliser_temps(
 
 
 # ── Recherche ────────────────────────────────────────────────
+# ── Aide au zéro résultat ───────────────────────────────────────
+#
+# L'administration disposait déjà de la liste des recherches
+# infructueuses (voir /admin/search-logs/zero-results) ; l'utilisateur,
+# lui, avait un écran vide et une phrase. Le diagnostic existait, l'aide
+# non.
+#
+# Trois pistes, dans l'ordre où elles servent : la correction
+# orthographique, le relâchement d'un filtre (« 12 résultats sans le
+# filtre .pdf »), et les autres sources.
+#
+# ⚠️ Deux règles gouvernent tout ce qui suit :
+#
+# 1. **Chaque compte annoncé doit être atteignable.** Les filtres ACL et
+#    de sources cherchables ne sont JAMAIS relâchés : annoncer « 12
+#    résultats » puis afficher une liste vide après le clic coûte plus de
+#    confiance qu'un écran vide honnête.
+# 2. **Rien de tout ceci ne s'exécute sur le chemin nominal.** Une
+#    recherche qui trouve quelque chose ne paie pas un millième de
+#    seconde pour ce code.
+
+# Au-delà, l'écran devient une liste de courses plutôt qu'une aide.
+MAX_RELACHEMENTS = 6
+
+
+def _corriger_requete(texte: str, entrees: list) -> str | None:
+    """Rebâtit la requête à partir des corrections proposées par
+    Elasticsearch, en respectant les positions qu'il rapporte — un
+    remplacement naïf par `str.replace` toucherait aussi les occurrences
+    d'un mot dans un autre."""
+    morceaux, curseur = [], 0
+    for entree in entrees:
+        options = entree.get("options") or []
+        if not options:
+            continue
+        debut, longueur = entree["offset"], entree["length"]
+        morceaux.append(texte[curseur:debut])
+        morceaux.append(options[0]["text"])
+        curseur = debut + longueur
+    if not morceaux:
+        return None
+    morceaux.append(texte[curseur:])
+    corrigee = "".join(morceaux).strip()
+    return corrigee if corrigee.casefold() != texte.casefold() else None
+
+
+def _aide_zero_resultat(
+    *, must: list, obligatoires: list, relachables: dict,
+    facet_filters: dict, fields: list, query_text: str,
+) -> dict:
+    """Ce qu'on peut proposer à quelqu'un dont la recherche n'a rien
+    donné. Meilleur effort : toute panne d'Elasticsearch ici rend un
+    objet vide, l'écran retombant sur le message d'origine."""
+    droppables = {nom: f for nom, f in {**facet_filters, **relachables}.items() if f}
+
+    recherches: list[dict] = []
+    plans: list[str] = []
+
+    def ajouter(plan: str, corps: dict) -> None:
+        plans.append(plan)
+        recherches.append({})
+        recherches.append(corps)
+
+    def compter(filtres: list) -> dict:
+        return {"size": 0, "query": {"bool": {"must": must, "filter": filtres}}}
+
+    for nom in list(droppables)[:MAX_RELACHEMENTS]:
+        autres = [f for autre, f in droppables.items() if autre != nom]
+        ajouter(f"sans:{nom}", compter(obligatoires + autres))
+
+    # « Sans aucun filtre » n'a de sens qu'à partir de deux : avec un
+    # seul, cette ligne dirait exactement la même chose que la précédente.
+    if len(droppables) > 1:
+        ajouter("sans:__all__", compter(obligatoires))
+
+    if "source" in droppables:
+        autres = [f for autre, f in droppables.items() if autre != "source"]
+        corps = compter(obligatoires + autres)
+        corps["aggs"] = {"sources": {"terms": {"field": "source", "size": 10}}}
+        ajouter("sources", corps)
+
+    if query_text:
+        ajouter("suggestion", {
+            "size": 0,
+            "suggest": {
+                "texte": {
+                    "text": query_text,
+                    # "popular" : ne propose qu'un terme PLUS fréquent que
+                    # celui tapé. Sans ça, le correcteur propose volontiers
+                    # une variante aussi rare que l'original, ce qui ne
+                    # corrige rien.
+                    "term": {"field": "content", "suggest_mode": "popular", "size": 1},
+                }
+            },
+        })
+
+    if not recherches:
+        return {}
+
+    try:
+        reponses = es.msearch(index=ES_SEARCH_ALIAS, searches=recherches)["responses"]
+    except Exception as e:
+        logger.warning(f"[zero-result] Aide indisponible pour « {query_text} » : {e}")
+        return {}
+
+    aide: dict = {"relaxations": [], "sources": [], "suggestion": None}
+    # strict=False : Elasticsearch renvoie une réponse par recherche
+    # envoyée, mais une aide au zéro résultat n'a pas à faire échouer la
+    # recherche elle-même si cette invariante venait à bouger.
+    for plan, reponse in zip(plans, reponses, strict=False):
+        if reponse.get("error"):
+            continue
+        if plan.startswith("sans:"):
+            total = reponse["hits"]["total"]["value"]
+            if total:
+                aide["relaxations"].append({"field": plan[5:], "count": total})
+        elif plan == "sources":
+            aide["sources"] = reponse.get("aggregations", {}).get("sources", {}).get("buckets", [])
+        elif plan == "suggestion":
+            entrees = reponse.get("suggest", {}).get("texte", [])
+            aide["suggestion"] = _corriger_requete(query_text, entrees)
+
+    # ⚠️ Le correcteur travaille sur le dictionnaire de termes de l'index,
+    # que l'ACL ne filtre pas : un mot tiré d'un document interdit
+    # pourrait être proposé. On ne rend donc la correction que si elle
+    # donne des résultats VISIBLES PAR CET UTILISATEUR — ce qui la
+    # débarrasse du même coup des corrections qui ne mènent nulle part.
+    if aide["suggestion"]:
+        try:
+            visibles = es.count(
+                index=ES_SEARCH_ALIAS,
+                query={
+                    "bool": {
+                        "must": [{"multi_match": {
+                            "query": aide["suggestion"], "fields": fields, "fuzziness": "AUTO",
+                        }}],
+                        "filter": obligatoires,
+                    }
+                },
+            )["count"]
+        except Exception:
+            visibles = 0
+        if not visibles:
+            aide["suggestion"] = None
+
+    return aide if (aide["suggestion"] or aide["relaxations"] or aide["sources"]) else {}
+
+
 @app.post("/search")
 def search(
     req: SearchQuery,
@@ -668,17 +817,28 @@ def search(
     # false" (voir set_searchable()) est retirée ICI, en amont de tout —
     # donc invisible même si explicitement demandée via `source` : la
     # désactivation est absolue, pas seulement "absente par défaut".
-    base_filters = [
+    # Les deux premiers ne se relâchent JAMAIS : ils disent ce que cet
+    # utilisateur a le droit de voir, et l'aide au zéro résultat (plus
+    # bas) doit rester dedans — proposer « 12 résultats sans ce filtre »
+    # pour des documents qu'il ne pourra pas ouvrir coûte plus de
+    # confiance qu'un écran vide honnête.
+    filtres_obligatoires = [
         acl_filter,   # ACL en premier — mis en cache par ES
         {"terms": {"source": _searchable_source_names(username)}},
     ]
+    # Ceux-là s'appliquent aussi à toute recherche, mais viennent d'un
+    # choix de l'utilisateur : ils peuvent donc être proposés au
+    # relâchement quand la recherche ne donne rien.
+    filtres_relachables = {}
     if req.has_attachments:
-        base_filters.append({"term": {"has_attachments": True}})
+        filtres_relachables["has_attachments"] = {"term": {"has_attachments": True}}
     if req.date_from or req.date_to:
         r = {}
         if req.date_from: r["gte"] = req.date_from
         if req.date_to:   r["lte"] = req.date_to
-        base_filters.append({"range": {"date_modified": r}})
+        filtres_relachables["date"] = {"range": {"date_modified": r}}
+
+    base_filters = filtres_obligatoires + list(filtres_relachables.values())
 
     # Filtres "de facette" : chacun correspond à une agrégation affichée
     # dans la barre latérale (extension/auteur/dossier/source), à
@@ -902,10 +1062,25 @@ def search(
         duration_ms=duration_ms,
     )
 
+    # Uniquement quand la recherche n'a rien donné : le chemin nominal ne
+    # paie rien pour cette aide (voir _aide_zero_resultat).
+    aide = _aide_zero_resultat(
+        must=must,
+        obligatoires=filtres_obligatoires,
+        relachables=filtres_relachables,
+        facet_filters=facet_filters,
+        fields=fields,
+        query_text=query_text[1:-1].strip() if is_exact_phrase else query_text,
+    ) if total == 0 else {}
+
     return {
         "total":     total,
         "username":  username,
         "search_id": search_id,
+        # Absent tant qu'il y a des résultats, et absent aussi quand on
+        # n'a rien à proposer : l'interface n'affiche ce bloc que s'il
+        # existe.
+        **({"zero_result": aide} if aide else {}),
         # Un sous-objet plutôt que deux clés à plat : l'interface n'a
         # qu'une seule chose à tester pour savoir si elle a une mesure à
         # afficher, et les deux durées restent visiblement solidaires.
@@ -2365,6 +2540,20 @@ def admin_set_config(key: str, body: ConfigUpdate, user: str = Depends(require_a
         return runtime_config.set_param(key, body.value)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+@app.get("/admin/retention")
+def admin_get_retention(user: str = Depends(require_admin)):
+    """Ce que la purge quotidienne des journaux emporterait, journal par
+    journal — sans rien supprimer.
+
+    Les durées elles-mêmes se règlent dans les paramètres opérationnels
+    (`retention_*_days`, voir `/admin/config`), comme le reste : cette
+    route ne fait que montrer leur effet. Un réglage destructeur qu'on ne
+    peut pas prévisualiser ne se règle jamais, ou se règle une fois de
+    trop.
+    """
+    return {"journaux": log_retention.apercu(es)}
 
 
 @app.get("/admin/path-filters")

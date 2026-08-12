@@ -25,6 +25,7 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | GET  | `/document/{id}/similar` | Documents similaires (More Like This) |
 | GET  | `/api/preview/{id}` | Aperçu PDF (conversion LibreOffice si besoin) |
 | GET  | `/metrics` | Statistiques d'indexation |
+| GET  | `/admin/retention` | Ce que la purge quotidienne des journaux emporterait, sans rien supprimer |
 | GET/POST/DELETE | `/saved-searches` | Recherches enregistrées par utilisateur |
 | PATCH | `/saved-searches/{id}/alert` | Active/désactive l'alerte d'une recherche enregistrée (fréquence quotidienne/hebdomadaire) |
 | GET  | `/alerts` | Notifications in-app de l'utilisateur (nouveaux résultats détectés par `alert_worker.py`) |
@@ -166,10 +167,104 @@ désactivées** — comme `search_time_enabled`, et pour la même raison :
 elles ajoutent un élément à l'écran, elles ne masquent rien d'existant.
 Désactivées, les routes renvoient 403.
 
+⚠️ L'historique est borné par la **conservation des journaux** (voir plus
+bas) : une recherche vieille de plus de `retention_search_logs_days` a
+disparu de l'index, donc de l'historique de son auteur. C'est cohérent —
+c'est la même donnée — mais ça se dit.
+
 Une recherche **sans texte libre** (filtres seuls) n'entre pas dans
 l'historique : elle s'y afficherait comme une ligne vide, et le format
 n'en porte pas de quoi la rejouer — `search_logs` enregistre les critères
 à titre informatif, mais pas les facettes personnalisées des sources SQL.
+
+## Aide au zéro résultat
+
+Quand `/search` ne renvoie **aucun** résultat, sa réponse gagne un bloc
+`zero_result` — absent dans tous les autres cas, y compris quand il n'y a
+rien à proposer :
+
+```json
+"zero_result": {
+  "suggestion": "rapport annuel",
+  "relaxations": [{"field": "extension", "count": 12}, {"field": "__all__", "count": 40}],
+  "sources": [{"key": "archives", "doc_count": 7}]
+}
+```
+
+- **`suggestion`** : la requête corrigée (`term suggester` sur `content`,
+  en `suggest_mode: popular` — ne propose qu'un terme plus fréquent que
+  celui tapé). Les positions rapportées par Elasticsearch sont respectées
+  pour reconstruire la phrase : un `str.replace` toucherait aussi les
+  occurrences d'un mot à l'intérieur d'un autre.
+- **`relaxations`** : ce que donnerait le retrait d'UN filtre, un par
+  entrée, plus `__all__` pour « tous les filtres » (proposé seulement à
+  partir de deux). `field` vaut une dimension de facette, `custom:<champ>`,
+  `date` ou `has_attachments`.
+- **`sources`** : les sources non sélectionnées où il y a quelque chose.
+
+⚠️ **Chaque compte annoncé est atteignable.** Les filtres ACL et de
+sources cherchables ne sont jamais relâchés : annoncer « 12 résultats »
+puis afficher une liste vide après le clic coûterait plus de confiance
+qu'un écran vide honnête.
+
+⚠️ **La correction ne fuit pas.** Le correcteur d'Elasticsearch travaille
+sur le dictionnaire de termes de l'index, que l'ACL ne filtre pas : un mot
+tiré d'un document interdit pourrait être proposé. La correction n'est
+donc rendue que si elle donne des résultats **visibles par cet
+utilisateur** — ce qui la débarrasse du même coup des corrections qui ne
+mènent nulle part.
+
+Tout ceci tient dans un seul `msearch`, exécuté **uniquement** quand le
+total est nul : une recherche qui trouve quelque chose ne paie rien pour
+cette aide. Une panne d'Elasticsearch pendant ce calcul rend un bloc
+absent, pas une erreur — l'écran retombe alors sur son message d'origine.
+
+## Conservation des journaux
+
+Cinq index de journalisation grandissaient sans aucune limite :
+`search_logs`, `login_events`, `admin_audit_log`, `nps_responses` et
+`suggestions`. `log_retention.py` les purge **une fois par jour**, depuis
+le tick d'`alert_worker.py` — pas de conteneur de plus, pas
+d'ordonnanceur système : ce processus tourne déjà et porte la même image.
+
+Deux raisons, et la seconde est la plus importante : au-delà du
+flood-stage watermark (95 % de disque), Elasticsearch passe ses index en
+lecture seule pendant que le cluster reste « green » et que les voyants
+d'administration restent au vert (c'est arrivé le 2026-08-10) ; et sur un
+service de l'État, la durée de conservation de données personnelles —
+identifiant, texte des recherches, adresse IP — est une décision qui se
+prend et se tient, pas une conséquence de la taille du disque.
+
+| Paramètre (`/admin/config`) | Défaut | Pourquoi |
+|---|---|---|
+| `retention_search_logs_days` | 365 | comparaison d'une année sur l'autre |
+| `retention_login_events_days` | 365 | trace de sécurité |
+| `retention_audit_log_days` | 1095 | la trace qui protège l'administrateur se garde plus longtemps que ce qu'elle trace |
+| `retention_nps_days` | 730 | tendance de satisfaction |
+| `retention_suggestions_days` | 730 | porte un `username` quand la suggestion n'est pas anonyme |
+
+`0` signifie **conservation illimitée**, et une valeur illisible vaut
+`0` : sur un mécanisme qui supprime, le doute profite à la conservation.
+`GET /admin/retention` montre, journal par journal, ce que la purge
+emporterait — un réglage destructeur qu'on ne peut pas prévisualiser ne
+se règle jamais, ou se règle une fois de trop.
+
+**Ce qui n'est jamais touché** : `custom_keywords` et `saved_collections`
+sont des données utilisateur, pas des traces. La liste est explicite et
+close — jamais un motif du genre `*_logs`, qui emporterait un jour l'index
+de quelqu'un d'autre.
+
+Chaque passage est borné (`RETENTION_MAX_DOCS`, 100 000 par journal) et
+bridé (`RETENTION_REQUESTS_PER_SECOND`) : une première purge sur une
+installation ancienne ne doit pas occuper le cluster pendant des heures,
+le reliquat partant le lendemain. Le nombre de documents supprimés va dans
+le journal du service, et **la purge du journal d'audit s'inscrit
+elle-même dans le journal d'audit**.
+
+⚠️ `delete_by_query` ne rend pas le disque immédiatement : les segments ne
+sont réécrits qu'à la fusion. Aucun `_forcemerge` n'est déclenché
+automatiquement — c'est une opération lourde, qui reste une décision
+d'exploitation.
 
 ## Alertes sur recherches sauvegardées
 
