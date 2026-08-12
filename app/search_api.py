@@ -34,6 +34,8 @@ import path_filter
 import search_log
 import user_history
 import log_retention
+import duplicates
+import synonyms
 import nps_log
 import suggestion_log
 import engagement_config
@@ -349,7 +351,14 @@ def _get_any_source(name: str):
     """Cherche `name` dans les trois registres (fichiers, SQL, web),
     dans cet ordre, et retourne le premier trouvé — None si absent des
     trois. Utile là où on a juste besoin de l'objet Source/SqlSource/
-    WebSource sans savoir a priori son type (ex: _check_doc_access)."""
+    WebSource sans savoir a priori son type (routes d'administration
+    ciblant une source par son nom).
+
+    ⚠️ À ne pas employer pour décider d'un ACCÈS : un nom absent des
+    registres y rend None, ce qui se lit trop facilement comme « aucune
+    restriction » alors que ça veut dire « source inconnue » (voir
+    _check_doc_access, qui est passé à _searchable_source_names pour
+    cette raison)."""
     for registry in (file_sources_config, sql_sources_config, web_sources_config):
         try:
             return registry.get_source(name)
@@ -358,23 +367,36 @@ def _get_any_source(name: str):
     return None
 
 
-def _validate_source_names(source_names: str | list[str] | None) -> list[str]:
+def _requested_source_names(
+    source_names: str | list[str] | None, username: str,
+) -> list[str] | None:
     """
-    Vérifie que chaque nom de source demandé existe bien dans l'UN des
-    trois registres (fichiers, SQL, web) — évite qu'un nom mal
-    orthographié matche silencieusement zéro document plutôt que de
-    signaler l'erreur. Retourne la liste normalisée (vide si rien demandé).
+    Sources demandées par la requête, restreintes à celles que CET
+    utilisateur peut chercher (_searchable_source_names : ni désactivée,
+    ni hors de ses groupes, ni absente des registres).
+
+    Retourne None quand rien n'est demandé — « aucun filtre de source »,
+    à ne pas confondre avec la liste VIDE, qui dit « tout ce qui était
+    demandé a été écarté » et doit alors filtrer sur rien. Sans cette
+    distinction, un permalien nommant une source interdite ÉLARGIRAIT la
+    recherche à toutes les autres au lieu de ne rien rendre.
+
+    Un nom écarté l'est SILENCIEUSEMENT, et un nom inexistant est traité
+    exactement pareil. C'était l'inverse jusqu'ici : 400 « Source
+    inconnue » pour un nom absent des trois registres, 200 avec zéro
+    résultat pour une source existante mais interdite ou désactivée. La
+    différence entre ces deux réponses disait à n'importe quel
+    utilisateur si un nom de source existait — un lien profond bricolé à
+    la main (`?source=rh-confidentiel`) suffisait à énumérer les sources
+    qu'on lui cache. Le prix payé est la détection de faute de frappe,
+    que l'aide au zéro résultat rend de toute façon (« sans le filtre
+    source : N résultats »).
     """
     if not source_names:
-        return []
+        return None
     names = source_names if isinstance(source_names, list) else [source_names]
-    for name in names:
-        if _get_any_source(name) is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Source inconnue : '{name}' (fichier, SQL et web confondus).",
-            )
-    return names
+    autorisees = set(_searchable_source_names(username))
+    return [name for name in names if name in autorisees]
 
 
 def _visible_to(s, user_groups: list[str]) -> bool:
@@ -391,16 +413,22 @@ def _searchable_source_names(username: str) -> list[str]:
     restrictions indépendantes :
       - "searchable" (voir set_searchable() dans chaque registre) : une
         source peut continuer d'être indexée normalement (watcher/
-        sql-worker/web-worker) tout en étant exclue de /search.
+        sql-worker/web-worker) tout en étant retirée de la consultation.
       - "allowed_groups" (voir set_allowed_groups()) : restreint la
         visibilité de la source aux membres d'un des groupes AD/LDAP
         listés, vide = aucune restriction. Orthogonal à l'ACL par
         document (build_acl_filter) : ceci masque la source en bloc,
         celle-là filtre les documents individuels d'une source par
         ailleurs visible.
-    Utilisé pour restreindre CHAQUE recherche, fédérée ou non : une
-    source désactivée ou hors groupe reste invisible même si elle est
-    explicitement demandée via `source`.
+    Cette liste est LA définition de « ce que cet utilisateur peut
+    atteindre », et les deux chemins d'accès s'y réfèrent :
+      - la recherche, fédérée ou non — une source désactivée ou hors
+        groupe reste invisible même si elle est explicitement demandée
+        via `source` (voir _requested_source_names) ;
+      - l'accès direct par doc_id — /document, /api/preview, mots-clés
+        personnalisés (voir _check_doc_access).
+    Les deux doivent le rester : une restriction que seule la recherche
+    applique n'est pas une restriction, juste un tri par défaut.
     """
     user_groups = get_effective_groups(username)
     names = []
@@ -436,6 +464,12 @@ def _active_custom_facets(source_names: list[str], username: str | None = None) 
     absence d'authentification) ; les appels depuis /search et
     /search/export le passent pour ne jamais exposer le nom d'une
     facette d'une source hors des groupes autorisés de l'utilisateur.
+
+    ⚠️ Ce `username` ne filtre QUE la liste de repli ci-dessous. Une
+    liste `source_names` explicite est prise telle quelle : c'est à
+    l'appelant de l'avoir déjà restreinte — ce que fait
+    _requested_source_names(), seul chemin par lequel /search et
+    /search/export la construisent.
     """
     user_groups = get_effective_groups(username) if username else None
     fallback_sources = sql_sources_config.get_sources().items()
@@ -448,7 +482,7 @@ def _active_custom_facets(source_names: list[str], username: str | None = None) 
         try:
             source = sql_sources_config.get_source(name)
         except KeyError:
-            continue   # source fichier/web, ou nom déjà rejeté par _validate_source_names
+            continue   # source fichier/web, ou nom déjà écarté par _requested_source_names
         for f in source.fields:
             if f.facet:
                 result[f.es_field] = f.facet_label or f.es_field
@@ -870,8 +904,12 @@ def search(
 
     folder_filter = _folder_filter(req.folder)
 
-    source_names  = _validate_source_names(req.source)
-    source_filter = {"terms": {"source": source_names}} if source_names else None
+    # None = aucune source demandée ; liste vide = tout ce qui était
+    # demandé a été écarté, et le filtre doit alors ne rien matcher (voir
+    # _requested_source_names) — d'où le test sur None et non sur la
+    # vacuité.
+    source_names  = _requested_source_names(req.source, username)
+    source_filter = {"terms": {"source": source_names}} if source_names is not None else None
 
     # Facettes personnalisées (voir _active_custom_facets) : une par champ
     # marqué "facet" sur l'une des sources SQL actuellement en jeu. Les
@@ -880,7 +918,7 @@ def search(
     # obsolète restée dans le state du navigateur) plutôt que de lever une
     # erreur — même tolérance que le reste de la recherche vis-à-vis d'un
     # état client périmé.
-    custom_facet_defs = _active_custom_facets(source_names, username)
+    custom_facet_defs = _active_custom_facets(source_names or [], username)
     custom_filters = {}
     for es_field in custom_facet_defs:
         values = (req.custom or {}).get(es_field)
@@ -1184,14 +1222,16 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
     folder_filter = _folder_filter(req.folder)
     if folder_filter:
         filters.append(folder_filter)
-    source_names = _validate_source_names(req.source)
-    if source_names:
+    # Voir le commentaire équivalent dans /search : None et liste vide ne
+    # veulent pas dire la même chose.
+    source_names = _requested_source_names(req.source, username)
+    if source_names is not None:
         filters.append({"terms": {"source": source_names}})
     for es_field, values in (req.custom or {}).items():
         # Même tolérance qu'en recherche normale (voir _active_custom_facets
         # dans /search) : une clé qui ne correspond plus à une facette
         # active de la/des source(s) en jeu est ignorée plutôt que rejetée.
-        if values and es_field in _active_custom_facets(source_names, username):
+        if values and es_field in _active_custom_facets(source_names or [], username):
             filters.append({"terms": {es_field: values}})
 
     return {"bool": {"must": must, "filter": filters}}
@@ -1624,19 +1664,37 @@ def _check_doc_access(doc: dict, username: str) -> bool:
     """Même règle ACL que build_acl_filter() (public/propriétaire/partagé
     utilisateur ou groupe), mais évaluée sur un document déjà récupéré
     plutôt qu'en filtre de requête ES — utilisée partout où un document
-    précis est accédé par id (GET /document, édition des mots-clés
-    personnalisés...). Vérifie EN PLUS que la source elle-même n'est pas
-    restreinte à des groupes dont l'utilisateur n'est pas membre (voir
-    allowed_groups) : un accès direct par doc_id doit respecter la même
-    restriction qu'une recherche, sinon un doc_id connu (partagé,
-    deviné...) contournerait la restriction de source."""
+    précis est accédé par id (GET /document, /api/preview, édition des
+    mots-clés personnalisés...).
+
+    Vérifie EN PLUS que la source du document est cherchable par cet
+    utilisateur, au sens EXACT de _searchable_source_names() — le filtre
+    obligatoire de /search. Un accès direct par doc_id doit respecter la
+    même restriction qu'une recherche, sinon un doc_id connu (partagé,
+    laissé dans une collection, deviné) la contourne.
+
+    Trois cas étaient laissés passer jusqu'ici, tous mesurés en dev :
+      - source désactivée (searchable=false) : /document renvoyait le
+        contenu intégral et /api/preview servait le fichier, alors que la
+        même source rendait zéro résultat en recherche ;
+      - source retirée du registre : remove_source() ne supprime ni
+        l'index ES ni son appartenance à l'alias, et _get_any_source()
+        rendant None, le contrôle de groupes était simplement SAUTÉ —
+        retirer une source ne coupait donc pas l'accès direct à ses
+        documents, y compris pour une source qui était restreinte ;
+      - document sans champ "source" : même raison, alors que le filtre
+        {"terms": {"source": [...]}} de /search ne le remonte jamais.
+
+    Coût : la lecture des trois registres (cache Redis de
+    SOURCES_CACHE_TTL) sur une action utilisateur ponctuelle, pas dans
+    une boucle de résultats.
+    """
+    source_name = doc.get("source")
+    if not source_name or source_name not in _searchable_source_names(username):
+        return False
+
     acl         = _doc_acl(doc)
     user_groups = get_effective_groups(username)
-
-    source_name = doc.get("source")
-    source = _get_any_source(source_name) if source_name else None
-    if source is not None and not _visible_to(source, user_groups):
-        return False
 
     return (
         acl.get("public", False)
@@ -2540,6 +2598,88 @@ def admin_set_config(key: str, body: ConfigUpdate, user: str = Depends(require_a
         return runtime_config.set_param(key, body.value)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+@app.get("/admin/duplicates")
+def admin_duplicates(
+    source: str = Query(DEFAULT_SOURCE_NAME),
+    rafraichir: bool = False,
+    user: str = Depends(require_admin),
+):
+    """Documents indexés en plusieurs exemplaires, et place qu'ils
+    occupent — par source, l'empreinte étant portée par les documents
+    fichiers uniquement.
+
+    Servi depuis un cache quotidien : sans lui, chaque ouverture du
+    panneau lancerait une agrégation sur tout l'index pendant que les
+    utilisateurs cherchent. `rafraichir=true` force le recalcul.
+    """
+    s = _get_any_source(source)
+    try:
+        return duplicates.rapport(es, s.es_index, rafraichir=rafraichir)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Rapport indisponible : {e}") from e
+
+
+# ── Thésaurus (synonymes de recherche) ───────────────────────────────
+class SynonymRule(BaseModel):
+    regle: str
+
+
+class SynonymTest(BaseModel):
+    texte: str
+    source: str = DEFAULT_SOURCE_NAME
+
+
+@app.get("/admin/synonyms")
+def admin_get_synonyms(user: str = Depends(require_admin)):
+    try:
+        return {"regles": synonyms.lister(es), "jeu": synonyms.SYNONYMS_SET}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Thésaurus indisponible : {e}") from e
+
+
+@app.post("/admin/synonyms")
+def admin_add_synonym(body: SynonymRule, user: str = Depends(require_admin)):
+    """Ajoute ou remplace une règle. Effet immédiat : Elasticsearch
+    recharge lui-même les analyseurs des index concernés, sans
+    réindexation — le nombre de shards rechargés est remonté, c'est la
+    seule preuve que la modification est en vigueur."""
+    try:
+        return synonyms.ajouter(es, body.regle)
+    except synonyms.RegleInvalide as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Écriture impossible : {e}") from e
+
+
+@app.delete("/admin/synonyms/{rule_id}")
+def admin_remove_synonym(rule_id: str, user: str = Depends(require_admin)):
+    try:
+        return synonyms.supprimer(es, rule_id)
+    except synonyms.RegleInvalide as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Suppression impossible : {e}") from e
+
+
+@app.post("/admin/synonyms/test")
+def admin_test_synonyms(body: SynonymTest, user: str = Depends(require_admin)):
+    """Ce que le moteur comprend d'une requête, synonymes appliqués.
+
+    Indispensable : une règle mal écrite ne produit aucune erreur,
+    seulement une recherche qui ne trouve rien de plus qu'avant."""
+    s = _get_any_source(body.source)
+    try:
+        return synonyms.tester(es, s.es_index, body.texte)
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Analyse impossible : {e}. L'index de cette source a-t-il reçu "
+                "l'analyseur de synonymes (./manage.sh migrer-synonymes) ?"
+            ),
+        ) from e
 
 
 @app.get("/admin/retention")

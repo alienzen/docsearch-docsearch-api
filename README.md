@@ -21,11 +21,14 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 |---|---|---|
 | GET  | `/health` | Santé du service + version ES |
 | POST | `/search` | Recherche full-text filtrée par ACL |
-| GET  | `/document/{id}` | Détail d'un document (vérifie l'ACL) |
+| GET  | `/document/{id}` | Détail d'un document (vérifie l'ACL **et** que la source est cherchable par l'appelant) |
 | GET  | `/document/{id}/similar` | Documents similaires (More Like This) |
-| GET  | `/api/preview/{id}` | Aperçu PDF (conversion LibreOffice si besoin) |
+| GET  | `/api/preview/{id}` | Aperçu PDF (conversion LibreOffice si besoin) — mêmes contrôles que `/document/{id}` |
 | GET  | `/metrics` | Statistiques d'indexation |
 | GET  | `/admin/retention` | Ce que la purge quotidienne des journaux emporterait, sans rien supprimer |
+| GET  | `/admin/duplicates` | Documents indexés en plusieurs exemplaires, et place occupée |
+| GET/POST/DELETE | `/admin/synonyms[/{id}]` | Thésaurus métier — effet immédiat, sans réindexation |
+| POST | `/admin/synonyms/test` | Ce que le moteur comprend d'une requête, synonymes appliqués |
 | GET/POST/DELETE | `/saved-searches` | Recherches enregistrées par utilisateur |
 | PATCH | `/saved-searches/{id}/alert` | Active/désactive l'alerte d'une recherche enregistrée (fréquence quotidienne/hebdomadaire) |
 | GET  | `/alerts` | Notifications in-app de l'utilisateur (nouveaux résultats détectés par `alert_worker.py`) |
@@ -218,6 +221,36 @@ Tout ceci tient dans un seul `msearch`, exécuté **uniquement** quand le
 total est nul : une recherche qui trouve quelque chose ne paie rien pour
 cette aide. Une panne d'Elasticsearch pendant ce calcul rend un bloc
 absent, pas une erreur — l'écran retombe alors sur son message d'origine.
+
+## Doublons et thésaurus
+
+Deux fonctionnalités qui s'appuient sur le **mapping** des index de
+documents, donc sur `docsearch-ingestion` — voir son README pour
+l'empreinte de contenu (`content_sha256`), les trois analyseurs du champ
+`content` et les deux commandes de migration
+(`./manage.sh migrer-synonymes`, `./manage.sh backfill-hashes`).
+
+Côté API :
+
+- `GET /admin/duplicates?source=…` regroupe les documents par empreinte
+  et chiffre la place occupée par les copies. **Rapport administratif**,
+  sans filtre ACL — comme la volumétrie ou la répartition par extension,
+  et donc réservé au groupe d'administration. Servi depuis un **cache
+  quotidien** : sans lui, chaque ouverture du panneau lancerait une
+  agrégation sur tout l'index pendant que les utilisateurs cherchent.
+  `rafraichir=true` force le recalcul.
+- `GET/POST/DELETE /admin/synonyms` gère le jeu de règles. Chaque
+  écriture remonte le **nombre de shards rechargés** par Elasticsearch :
+  c'est la seule preuve que la règle est en vigueur, le rechargement
+  étant fait par le moteur lui-même, sans réindexation.
+- `POST /admin/synonyms/test` rend les jetons produits par l'analyseur de
+  recherche. Indispensable : une règle mal écrite ne produit aucune
+  erreur, seulement une recherche qui ne trouve rien de plus qu'avant.
+
+La forme `a => b` est refusée à l'écriture : elle *remplace* les termes
+d'origine au lieu de les compléter, ce qui surprend tout le monde et se
+règle très mal depuis une interface. L'équivalence (`a, b`) couvre le
+besoin réel.
 
 ## Conservation des journaux
 
