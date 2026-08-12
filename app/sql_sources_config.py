@@ -365,10 +365,11 @@ def add_source(
 
 def set_searchable(name: str, searchable: bool) -> dict:
     """
-    Active/désactive la RECHERCHE pour une source SQL, sans toucher à
+    Active/désactive la CONSULTATION d'une source SQL, sans toucher à
     l'ingestion : sql_worker.py continue d'interroger la base à son
-    intervalle normal, seuls ses documents cessent d'apparaître dans
-    /search (docsearch-api).
+    intervalle normal. Ses documents disparaissent de /search comme de
+    l'accès direct par identifiant — voir set_searchable() dans
+    file_sources_config.py, qui porte le détail.
     """
     def mutate(sources):
         if name not in sources:

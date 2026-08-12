@@ -31,10 +31,11 @@
 #   {"documents": {"subfolder": "documents", "es_index": "documents", "label": "Documents", "searchable": true},
 #    "finance":   {"subfolder": "finance",   "es_index": "finance_docs", "label": "Finance", "searchable": true}}
 #
-# "searchable" (défaut true) n'affecte QUE la visibilité dans /search
-# (docsearch-api) — une source non cherchable continue d'être surveillée
-# et indexée normalement par watcher/worker/producer, elle disparaît
-# seulement des résultats de recherche. Voir set_searchable().
+# "searchable" (défaut true) n'affecte que la CONSULTATION côté
+# docsearch-api — une source non cherchable continue d'être surveillée et
+# indexée normalement par watcher/worker/producer, mais ses documents
+# disparaissent des résultats de recherche ET de l'accès direct par
+# identifiant. Voir set_searchable().
 #
 # Repli par défaut (Redis injoignable ou clé absente) : une seule source
 # "documents", dérivée des variables d'environnement ES_INDEX/DEFAULT_SOURCE_SUBFOLDER
@@ -296,12 +297,19 @@ def add_source(
 
 def set_searchable(name: str, searchable: bool) -> dict:
     """
-    Active/désactive la RECHERCHE pour une source, sans toucher à
+    Active/désactive la CONSULTATION d'une source, sans toucher à
     l'ingestion : watcher/worker/producer continuent de surveiller et
-    d'indexer cette source normalement, seuls ses documents cessent
-    d'apparaître dans /search (docsearch-api). Utile pour mettre une
-    source en pause côté recherche (ex: données en cours de validation)
-    sans interrompre l'indexation en arrière-plan.
+    d'indexer cette source normalement. Utile pour mettre une source en
+    pause côté utilisateur (ex: données en cours de validation) sans
+    interrompre l'indexation en arrière-plan.
+
+    « Consultation » et non « recherche » : ses documents disparaissent
+    de /search, MAIS AUSSI de l'accès direct par identifiant
+    (/document/{id}, /api/preview/{id}, mots-clés personnalisés — voir
+    _check_doc_access dans search_api.py). C'était limité à /search
+    jusqu'ici, si bien qu'un identifiant connu — lien copié avant la
+    désactivation, document laissé dans une collection — rendait encore
+    le contenu et le fichier lui-même.
     """
     def mutate(sources):
         if name not in sources:
@@ -375,6 +383,13 @@ def remove_source(name: str) -> dict:
     SUPPRIME NI l'index Elasticsearch ni les documents déjà indexés
     (cohérent avec exclude-path : purge_path reste l'outil explicite,
     destructif et confirmé, pour nettoyer l'existant).
+
+    Ces documents restent donc dans l'alias fédéré, mais deviennent
+    inatteignables côté API : plus aucune source enregistrée ne porte
+    leur nom, donc ni la recherche ni l'accès direct par identifiant ne
+    les rendent (voir _searchable_source_names et _check_doc_access dans
+    search_api.py). C'est volontaire — retirer une source ne doit pas
+    laisser un chemin d'accès ouvert à ce qu'elle contenait.
     """
     if name == DEFAULT_SOURCE_NAME:
         raise ValueError(f"Impossible de retirer la source par défaut ('{DEFAULT_SOURCE_NAME}').")

@@ -253,10 +253,11 @@ def add_source(
 
 def set_searchable(name: str, searchable: bool) -> dict:
     """
-    Active/désactive la RECHERCHE pour une source web, sans toucher à
+    Active/désactive la CONSULTATION d'une source web, sans toucher à
     l'ingestion : web_worker.py continue de synchroniser crawl_index vers
-    es_index normalement, seuls ses documents cessent d'apparaître dans
-    /search (docsearch-api).
+    es_index normalement. Ses documents disparaissent de /search comme de
+    l'accès direct par identifiant — voir set_searchable() dans
+    file_sources_config.py, qui porte le détail.
     """
     def mutate(sources):
         if name not in sources:
