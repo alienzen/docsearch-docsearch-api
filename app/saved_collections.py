@@ -86,9 +86,9 @@ def _get_owned(es: Elasticsearch, username: str, collection_id: str) -> dict:
     try:
         res = es.get(index=SAVED_COLLECTIONS_INDEX, id=collection_id)
     except NotFoundError:
-        raise KeyError(f"Collection inconnue : '{collection_id}'")
-    except Exception:
-        raise _unavailable()
+        raise KeyError(f"Collection inconnue : '{collection_id}'") from None
+    except Exception as exc:
+        raise _unavailable() from exc
     if res["_source"].get("username") != username:
         raise KeyError(f"Collection inconnue : '{collection_id}'")
     return res["_source"]
@@ -141,8 +141,8 @@ def create_collection(es: Elasticsearch, username: str, name: str) -> dict:
             index=SAVED_COLLECTIONS_INDEX, id=collection_id, refresh="wait_for",
             document={**entry, "username": username},
         )
-    except Exception:
-        raise _unavailable()
+    except Exception as exc:
+        raise _unavailable() from exc
 
     return entry
 
@@ -155,8 +155,8 @@ def rename_collection(es: Elasticsearch, username: str, collection_id: str, name
     _get_owned(es, username, collection_id)
     try:
         es.update(index=SAVED_COLLECTIONS_INDEX, id=collection_id, refresh="wait_for", doc={"name": name})
-    except Exception:
-        raise _unavailable()
+    except Exception as exc:
+        raise _unavailable() from exc
 
     return list_collections(es, username)
 
@@ -169,16 +169,16 @@ def delete_collection(es: Elasticsearch, username: str, collection_id: str) -> l
         doc = es.get(index=SAVED_COLLECTIONS_INDEX, id=collection_id)["_source"]
     except NotFoundError:
         return list_collections(es, username)
-    except Exception:
-        raise _unavailable()
+    except Exception as exc:
+        raise _unavailable() from exc
 
     if doc.get("username") == username:
         try:
             es.delete(index=SAVED_COLLECTIONS_INDEX, id=collection_id, refresh="wait_for")
         except NotFoundError:
             pass  # déjà supprimée entre-temps (course rare) — idempotent
-        except Exception:
-            raise _unavailable()
+        except Exception as exc:
+            raise _unavailable() from exc
 
     return list_collections(es, username)
 
@@ -192,8 +192,8 @@ def add_document(es: Elasticsearch, username: str, collection_id: str, doc_id: s
         doc_ids = doc_ids + [doc_id]
         try:
             es.update(index=SAVED_COLLECTIONS_INDEX, id=collection_id, refresh="wait_for", doc={"doc_ids": doc_ids})
-        except Exception:
-            raise _unavailable()
+        except Exception as exc:
+            raise _unavailable() from exc
 
     return list_collections(es, username)
 
@@ -205,7 +205,7 @@ def remove_document(es: Elasticsearch, username: str, collection_id: str, doc_id
     doc_ids = [d for d in entry.get("doc_ids", []) if d != doc_id]
     try:
         es.update(index=SAVED_COLLECTIONS_INDEX, id=collection_id, refresh="wait_for", doc={"doc_ids": doc_ids})
-    except Exception:
-        raise _unavailable()
+    except Exception as exc:
+        raise _unavailable() from exc
 
     return list_collections(es, username)

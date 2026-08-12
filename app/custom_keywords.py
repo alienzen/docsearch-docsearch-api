@@ -75,8 +75,8 @@ def _get_entry(es: Elasticsearch, doc_id: str) -> dict:
         return es.get(index=CUSTOM_KEYWORDS_INDEX, id=doc_id)["_source"]
     except NotFoundError:
         return {"added": [], "removed": []}
-    except Exception:
-        raise _unavailable()
+    except Exception as exc:
+        raise _unavailable() from exc
 
 
 def _save(es: Elasticsearch, doc_id: str, source: str | None,
@@ -94,8 +94,8 @@ def _save(es: Elasticsearch, doc_id: str, source: str | None,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
         )
-    except Exception:
-        raise _unavailable()
+    except Exception as exc:
+        raise _unavailable() from exc
 
 
 def add_keyword(es: Elasticsearch, doc_id: str, source: str | None, keyword: str, username: str) -> None:

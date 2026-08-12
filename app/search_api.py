@@ -142,7 +142,7 @@ def health():
             "ldap_enabled": str(LDAP_ENABLED),
         }
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 # ── Modèle de requête ────────────────────────────────────────
@@ -777,7 +777,7 @@ def search(
         # ("Internal Server Error") — indispensable pour diagnostiquer
         # un problème de tri/requête sans avoir à fouiller les logs.
         logger.error(f"[search] Erreur ES pour la requête '{req.query}' (sort={req.sort}) : {e}")
-        raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}")
+        raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}") from e
 
     hits  = res["hits"]["hits"]
     total = res["hits"]["total"]["value"]
@@ -1038,7 +1038,7 @@ def export_search_results(req: SearchExportQuery, user: str = Depends(current_us
         )
     except Exception as e:
         logger.error(f"[search/export] Erreur ES pour la requête '{req.query}' : {e}")
-        raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}")
+        raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}") from e
 
     hits = res["hits"]["hits"]
     if req.format == "docx":
@@ -1061,7 +1061,7 @@ def create_saved_search(body: SavedSearchCreate, user: str = Depends(current_use
     try:
         return saved_searches.save_search(username, body.name, body.model_dump(exclude={"name"}))
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.delete("/saved-searches/{search_id}")
@@ -1070,7 +1070,7 @@ def remove_saved_search(search_id: str, user: str = Depends(current_user)):
     try:
         return saved_searches.delete_saved(username, search_id)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 # ── Alertes sur recherches sauvegardées ──────────────────────────────
@@ -1092,9 +1092,9 @@ def update_saved_search_alert(search_id: str, body: SavedSearchAlertUpdate, user
     try:
         return saved_searches.set_alert(username, search_id, body.enabled, body.frequency)
     except KeyError:
-        raise HTTPException(status_code=404, detail="Recherche sauvegardée introuvable")
+        raise HTTPException(status_code=404, detail="Recherche sauvegardée introuvable") from None
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.get("/alerts")
@@ -1163,9 +1163,9 @@ def create_collection(body: SavedCollectionCreate, user: str = Depends(current_u
     try:
         return saved_collections.create_collection(es, username, body.name)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.delete("/collections/{collection_id}")
@@ -1175,7 +1175,7 @@ def remove_collection(collection_id: str, user: str = Depends(current_user)):
     try:
         return saved_collections.delete_collection(es, username, collection_id)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.post("/collections/{collection_id}/rename")
@@ -1185,11 +1185,11 @@ def rename_collection(collection_id: str, body: SavedCollectionRename, user: str
     try:
         return saved_collections.rename_collection(es, username, collection_id, body.name)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.post("/collections/{collection_id}/documents")
@@ -1205,9 +1205,9 @@ def add_collection_document(collection_id: str, body: SavedCollectionDocumentAdd
     try:
         return saved_collections.add_document(es, username, collection_id, body.doc_id)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.delete("/collections/{collection_id}/documents/{doc_id}")
@@ -1217,9 +1217,9 @@ def remove_collection_document(collection_id: str, doc_id: str, user: str = Depe
     try:
         return saved_collections.remove_document(es, username, collection_id, doc_id)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 def _doc_acl(doc: dict) -> dict:
@@ -1282,8 +1282,8 @@ def get_document(
     doc_index = _resolve_doc_index(doc_id)
     try:
         res = es.get(index=doc_index, id=doc_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Document introuvable")
+    except Exception as e:
+        raise HTTPException(status_code=404, detail="Document introuvable") from e
 
     doc = res["_source"]
 
@@ -1327,8 +1327,8 @@ def _load_doc_for_keyword_edit(doc_id: str, username: str) -> tuple[str, dict]:
     doc_index = _resolve_doc_index(doc_id)
     try:
         doc = es.get(index=doc_index, id=doc_id)["_source"]
-    except Exception:
-        raise HTTPException(status_code=404, detail="Document introuvable")
+    except Exception as e:
+        raise HTTPException(status_code=404, detail="Document introuvable") from e
 
     if not _check_doc_access(doc, username):
         raise HTTPException(status_code=403, detail="Accès refusé")
@@ -1353,7 +1353,7 @@ def add_document_keyword(doc_id: str, body: DocumentKeywordBody, user: str = Dep
     try:
         custom_keywords.add_keyword(es, doc_id, doc.get("source"), keyword, username)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
     # Effet immédiat sur le document principal — la surcharge persistée
     # ci-dessus n'est réappliquée par le pipeline d'ingestion qu'à la
@@ -1383,7 +1383,7 @@ def remove_document_keyword(doc_id: str, keyword: str, user: str = Depends(curre
     try:
         custom_keywords.remove_keyword(es, doc_id, doc.get("source"), keyword, username)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
     current = [k for k in (doc.get("keywords") or []) if k != keyword]
     if current != (doc.get("keywords") or []):
@@ -1632,7 +1632,7 @@ def admin_add_source(body: SourceCreate, user: str = Depends(require_admin)):
             ocr_enabled=body.ocr_enabled if body.ocr_enabled is not None else (existing.ocr_enabled if existing else False),
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @app.delete("/admin/file-sources/{name}")
@@ -1643,7 +1643,7 @@ def admin_remove_source(name: str, user: str = Depends(require_admin)):
     try:
         return file_sources_config.remove_source(name)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @app.post("/admin/file-sources/{name}/label")
@@ -1653,9 +1653,9 @@ def admin_set_source_label(name: str, body: LabelUpdate, user: str = Depends(req
     try:
         return file_sources_config.set_label(name, body.label)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @app.post("/admin/file-sources/{name}/description")
@@ -1663,7 +1663,7 @@ def admin_set_source_description(name: str, body: DescriptionUpdate, user: str =
     try:
         return file_sources_config.set_description(name, body.description)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
 
 
 @app.post("/admin/file-sources/{name}/ocr")
@@ -1677,7 +1677,7 @@ def admin_set_source_ocr(name: str, body: OcrUpdate, user: str = Depends(require
     try:
         return file_sources_config.set_ocr_enabled(name, body.ocr_enabled)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
 
 
 @app.get("/admin/file-sources/{name}/tree")
@@ -1694,7 +1694,7 @@ def admin_get_source_tree(name: str, path: str = Query(""), user: str = Depends(
     try:
         source = file_sources_config.get_source(name)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
 
     root = Path(source.folder).resolve()
     target = (root / path).resolve()
@@ -1737,7 +1737,7 @@ def admin_get_source_tree(name: str, path: str = Query(""), user: str = Depends(
                     item["included"] = any(path_filter.matches_pattern(rel, p) for p in included_patterns)
                 entries.append(item)
     except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lecture dossier : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lecture dossier : {e}") from e
 
     entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
     return {"path": path, "whitelist_active": whitelist_active, "entries": entries}
@@ -1803,7 +1803,7 @@ def admin_add_sql_source(body: SqlSourceCreate, user: str = Depends(require_admi
             description=body.description,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @app.delete("/admin/sql-sources/{name}")
@@ -1814,7 +1814,7 @@ def admin_remove_sql_source(name: str, user: str = Depends(require_admin)):
     try:
         return sql_sources_config.remove_source(name)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
 
 
 @app.post("/admin/sql-sources/{name}/label")
@@ -1824,9 +1824,9 @@ def admin_set_sql_source_label(name: str, body: LabelUpdate, user: str = Depends
     try:
         return sql_sources_config.set_label(name, body.label)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @app.post("/admin/sql-sources/{name}/description")
@@ -1834,7 +1834,7 @@ def admin_set_sql_source_description(name: str, body: DescriptionUpdate, user: s
     try:
         return sql_sources_config.set_description(name, body.description)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
 
 
 # ── DSN SQL chiffrés (registre dynamique, alternative aux variables
@@ -1866,9 +1866,9 @@ def admin_add_sql_dsn(body: SqlDsnCreate, user: str = Depends(require_admin)):
     try:
         return sql_dsn_registry.add_dsn(body.name, body.dsn)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.delete("/admin/sql-dsns/{name}")
@@ -1882,9 +1882,9 @@ def admin_remove_sql_dsn(name: str, user: str = Depends(require_admin)):
     try:
         return sql_dsn_registry.remove_dsn(name)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.get("/admin/web-sources")
@@ -1931,7 +1931,7 @@ def admin_add_web_source(body: WebSourceCreate, user: str = Depends(require_admi
             description=body.description,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @app.delete("/admin/web-sources/{name}")
@@ -1942,7 +1942,7 @@ def admin_remove_web_source(name: str, user: str = Depends(require_admin)):
     try:
         return web_sources_config.remove_source(name)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
 
 
 @app.post("/admin/web-sources/{name}/label")
@@ -1952,9 +1952,9 @@ def admin_set_web_source_label(name: str, body: LabelUpdate, user: str = Depends
     try:
         return web_sources_config.set_label(name, body.label)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @app.post("/admin/web-sources/{name}/description")
@@ -1962,7 +1962,7 @@ def admin_set_web_source_description(name: str, body: DescriptionUpdate, user: s
     try:
         return web_sources_config.set_description(name, body.description)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
 
 
 class PauseUpdate(BaseModel):
@@ -1983,7 +1983,7 @@ def admin_set_web_source_paused(name: str, body: PauseUpdate, user: str = Depend
     try:
         return web_sources_config.set_paused(name, body.paused)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
 
 
 # ── Vue d'ensemble unifiée (les 3 types de sources confondus) ─────
@@ -2070,7 +2070,7 @@ def admin_set_source_searchable(
     try:
         registry.set_searchable(name, body.searchable)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     return _all_sources_status()
 
 
@@ -2090,7 +2090,7 @@ def admin_set_source_collectable(
     try:
         registry.set_collectable(name, body.collectable)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     return _all_sources_status()
 
 
@@ -2116,7 +2116,7 @@ def admin_set_source_groups(
     try:
         registry.set_allowed_groups(name, body.allowed_groups)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     return _all_sources_status()
 
 
@@ -2143,7 +2143,7 @@ def admin_remove_filetype(extension: str, source: str = Query(DEFAULT_SOURCE_NAM
     try:
         return filetype_config.remove_filetype(extension, source)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @app.get("/admin/config")
@@ -2164,7 +2164,7 @@ def admin_set_config(key: str, body: ConfigUpdate, user: str = Depends(require_a
     try:
         return runtime_config.set_param(key, body.value)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @app.get("/admin/path-filters")
@@ -2200,9 +2200,9 @@ def admin_purge_path(body: PurgeRequest, user: str = Depends(require_admin)):
         n = admin_scan.purge_path(body.pattern, source_name=body.source, dry_run=body.dry_run)
         return {"pattern": body.pattern, "source": body.source, "dry_run": body.dry_run, "matched": n}
     except KeyError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/admin/scan")
@@ -2418,7 +2418,7 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_text("sources_mount_display", body.sources_mount_display)
         return config
     except (ValueError, RuntimeError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.get("/engagement-config")
@@ -2449,8 +2449,8 @@ def submit_feedback(body: FeedbackCreate, request: Request, user: str = Depends(
         es.update(index=search_log.SEARCH_LOG_INDEX, id=body.search_id, doc={"feedback": body.rating})
     except Exception as e:
         if "not_found" in str(e).lower():
-            raise HTTPException(status_code=404, detail="search_id introuvable.")
-        raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=404, detail="search_id introuvable.") from None
+        raise HTTPException(status_code=500, detail=str(e)) from e
     return {"status": "ok"}
 
 
@@ -2543,7 +2543,7 @@ def admin_set_engagement_config(body: EngagementConfigUpdate, user: str = Depend
             config = engagement_config.set_param("suggestions_enabled", body.suggestions_enabled)
         return config
     except (ValueError, RuntimeError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.get("/admin/nps-summary")
@@ -2577,9 +2577,9 @@ def admin_set_suggestion_status(suggestion_id: str, body: SuggestionStatusUpdate
     try:
         suggestion_log.set_status(es, suggestion_id=suggestion_id, status=body.status)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Suggestion introuvable : {e}")
+        raise HTTPException(status_code=404, detail=f"Suggestion introuvable : {e}") from e
     return {"status": "ok"}
 
 
@@ -2619,7 +2619,7 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
             return {"total_searches": 0, "unique_users": 0, "unique_ips": 0, "by_day": [],
                      "feedback_up": 0, "feedback_down": 0,
                      "by_group": [], "searches_by_group": []}
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     return {
         "total_searches": res["hits"]["total"]["value"],
@@ -2687,7 +2687,7 @@ def admin_zero_result_searches(user: str = Depends(require_admin), size: int = 5
     except Exception as e:
         if "index_not_found" in str(e).lower():
             return {"total_zero_result_searches": 0, "results": [], "by_group": []}
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     return {
         "total_zero_result_searches": res["hits"]["total"]["value"],
@@ -2752,7 +2752,7 @@ def admin_search_logs(
     except Exception as e:
         if "index_not_found" in str(e).lower():
             return {"total": 0, "results": []}
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     return {
         "total":   res["hits"]["total"]["value"],
@@ -2840,7 +2840,7 @@ def admin_export_search_logs(
             ])
     except Exception as e:
         if "index_not_found" not in str(e).lower():
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     for col_idx, width in enumerate([19, 14, 28, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8], start=1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width

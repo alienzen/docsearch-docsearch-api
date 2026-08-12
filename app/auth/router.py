@@ -268,7 +268,7 @@ def login(payload: LoginRequest, request: Request, response: Response) -> Sessio
         raise HTTPException(
             status_code=429,
             detail="Trop de tentatives de connexion. Réessayer dans quelques minutes.",
-        )
+        ) from None
 
     try:
         identity = provider.authenticate(
@@ -280,7 +280,7 @@ def login(payload: LoginRequest, request: Request, response: Response) -> Sessio
             identifier=identifier, outcome=events.INVALID_CREDENTIALS,
             method=provider.name, ip=ip, user_agent=_user_agent(request),
         )
-        raise HTTPException(status_code=401, detail=GENERIC_AUTH_ERROR)
+        raise HTTPException(status_code=401, detail=GENERIC_AUTH_ERROR) from None
     except AuthProviderUnavailableError as exc:
         # Jamais un 401 : l'annuaire est en panne, les identifiants n'y sont
         # pour rien, et l'échec ne doit pas compter dans le rate limiting.
@@ -371,7 +371,7 @@ def login_kerberos(request: Request, response: Response) -> SessionResponse:
                 identifier="", outcome=events.INVALID_CREDENTIALS, method="kerberos",
                 ip=ip, user_agent=_user_agent(request), detail="jeton SPNEGO illisible",
             )
-            raise HTTPException(status_code=401, detail="Ticket Kerberos invalide.")
+            raise HTTPException(status_code=401, detail="Ticket Kerberos invalide.") from None
 
         # Premier étage de limitation : avant l'acceptation, seule l'IP est
         # imputable — le jeton n'a pas encore livré d'identité. Surtout pas
@@ -384,7 +384,7 @@ def login_kerberos(request: Request, response: Response) -> SessionResponse:
                 identifier="", outcome=events.RATE_LIMITED, method="kerberos",
                 ip=ip, user_agent=_user_agent(request),
             )
-            raise HTTPException(status_code=429, detail="Trop de tentatives.")
+            raise HTTPException(status_code=429, detail="Trop de tentatives.") from None
 
         try:
             principal, return_token = kerberos.accept_token(spnego_token)
@@ -396,7 +396,7 @@ def login_kerberos(request: Request, response: Response) -> SessionResponse:
             )
             # 401 SANS WWW-Authenticate : redéfier ferait reboucler le
             # navigateur sur un ticket qu'on vient de refuser.
-            raise HTTPException(status_code=401, detail="Ticket Kerberos invalide.")
+            raise HTTPException(status_code=401, detail="Ticket Kerberos invalide.") from None
         except AuthProviderUnavailableError as exc:
             # Keytab absent/illisible, `gssapi` non installée : une panne
             # d'exploitation, et le message est le seul moyen de savoir
@@ -417,7 +417,7 @@ def login_kerberos(request: Request, response: Response) -> SessionResponse:
             identifier=principal, outcome=events.INVALID_CREDENTIALS, method="kerberos",
             ip=ip, user_agent=_user_agent(request), detail=str(exc), simulated=simulated,
         )
-        raise HTTPException(status_code=401, detail="Ticket Kerberos invalide.")
+        raise HTTPException(status_code=401, detail="Ticket Kerberos invalide.") from None
     except AuthProviderUnavailableError as exc:
         logger.warning("[kerberos] Annuaire indisponible pour %r : %s", principal, exc)
         events.record(
@@ -475,7 +475,7 @@ def refresh(request: Request, response: Response) -> SessionResponse:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except pyjwt.InvalidTokenError:
         _clear_session_cookies(response)
-        raise HTTPException(status_code=401, detail="Session expirée.")
+        raise HTTPException(status_code=401, detail="Session expirée.") from None
 
     try:
         stored = sessions.get_refresh_session(claims["jti"])

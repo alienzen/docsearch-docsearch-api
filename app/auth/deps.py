@@ -50,14 +50,14 @@ def _from_token(request: Request) -> str | None:
 
     try:
         claims = tokens.decode_token(raw, expected_type=tokens.ACCESS_TOKEN_TYPE)
-    except tokens.KeyLoadError:
+    except tokens.KeyLoadError as exc:
         # Clés absentes : c'est une panne de configuration, pas une identité
         # invalide. Laisser passer en « non authentifié » produirait un 401
         # trompeur ; le 503 dit où chercher.
         raise HTTPException(
             status_code=503,
             detail="Authentification indisponible : clés de signature illisibles.",
-        )
+        ) from exc
     except pyjwt.InvalidTokenError:
         # Expiré, mal signé, mauvaise audience, mauvais type. Aucun détail
         # côté client — le front tente un /auth/refresh sur 401 et n'a pas

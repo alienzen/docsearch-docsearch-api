@@ -49,13 +49,6 @@ ignore = [
     # "tar.gz"`), plus lisibles en colonnes qu'étalées. 20 signalements,
     # aucun défaut.
     "E701",
-
-    # `raise HTTPException(...)` dans un `except` sans `from err`. 80
-    # occurrences. La règle est légitime — elle préserve la cause d'origine
-    # dans la trace — mais 80 réécritures à la main ne sont pas un effet de
-    # bord acceptable de l'installation d'un linter. Lot à part, à retirer
-    # d'ici une fois traité.
-    "B904",
 ]
 
 [lint.per-file-ignores]

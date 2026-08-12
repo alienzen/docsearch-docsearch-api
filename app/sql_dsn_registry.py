@@ -175,7 +175,7 @@ def _get_fernet():
         raise RuntimeError(
             f"DSN_ENCRYPTION_KEY invalide ({e}) — attendu une clé Fernet "
             f"générée par Fernet.generate_key() (32 octets urlsafe-base64)."
-        )
+        ) from e
     _fernet, _fernet_key_seen = instance, key
     return _fernet
 
