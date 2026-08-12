@@ -36,6 +36,7 @@ import user_history
 import log_retention
 import duplicates
 import synonyms
+import pinned
 import nps_log
 import suggestion_log
 import engagement_config
@@ -788,6 +789,52 @@ def _aide_zero_resultat(
     return aide if (aide["suggestion"] or aide["relaxations"] or aide["sources"]) else {}
 
 
+def _documents_epingles(requete: str, username: str) -> list[dict]:
+    """Les documents épinglés sur cette requête, tels que CET utilisateur
+    a le droit de les voir.
+
+    ⚠️ Relus par une vraie recherche portant le filtre ACL et la
+    restriction aux sources cherchables — jamais par un `mget`, qui
+    rendrait le document sans rien vérifier. Un épinglage met en avant,
+    il n'autorise pas : celui qui n'a pas le droit de voir le document ne
+    le voit pas, et rien à l'écran ne lui apprend qu'il existe.
+
+    Un document épinglé puis supprimé de l'index disparaît de lui-même :
+    la recherche ne le trouve plus, la liste se réduit. Le panneau
+    d'administration, lui, le signale comme introuvable pour qu'on puisse
+    nettoyer la règle.
+
+    Meilleur effort : toute erreur ici rend une liste vide plutôt que de
+    faire échouer la recherche.
+    """
+    identifiants = pinned.pour_requete(requete)
+    if not identifiants:
+        return []
+    try:
+        res = es.search(
+            index=ES_SEARCH_ALIAS,
+            size=len(identifiants),
+            query={"bool": {"filter": [
+                {"ids": {"values": identifiants}},
+                build_acl_filter(username),
+                {"terms": {"source": _searchable_source_names(username)}},
+            ]}},
+            source_excludes=["content", "content_vector"],
+        )
+    except Exception as e:
+        logger.warning(f"[epingles] Relecture impossible pour « {requete} » : {e}")
+        return []
+
+    trouves = {h["_id"]: h["_source"] for h in res["hits"]["hits"]}
+    # L'ordre est celui de l'administration, pas celui d'Elasticsearch :
+    # quand quelqu'un épingle trois documents, il les a classés.
+    return [
+        {**trouves[identifiant], "id": identifiant, "score": None, "highlight": [], "pinned": True}
+        for identifiant in identifiants
+        if identifiant in trouves
+    ]
+
+
 @app.post("/search")
 def search(
     req: SearchQuery,
@@ -1111,6 +1158,12 @@ def search(
         query_text=query_text[1:-1].strip() if is_exact_phrase else query_text,
     ) if total == 0 else {}
 
+    # Épinglés : uniquement sur la première page. Les répéter en tête de
+    # chaque page ferait passer l'utilisateur devant les mêmes documents
+    # à chaque « suivant », en croyant les avoir déjà dépassés.
+    epingles = _documents_epingles(req.query, username) if req.from_ == 0 else []
+    ids_epingles = {document["id"] for document in epingles}
+
     return {
         "total":     total,
         "username":  username,
@@ -1140,7 +1193,15 @@ def search(
                 "highlight": h.get("highlight", {}).get("content", []),
             }
             for h in hits
+            # Un document épinglé qui figure aussi dans les résultats
+            # naturels n'est pas affiché deux fois : il est rendu une
+            # seule fois, dans le bloc épinglé. Le total, lui, ne bouge
+            # pas — il compte des documents trouvés, pas des cartes.
+            if h["_id"] not in ids_epingles
         ],
+        # Absent quand il n'y a rien à épingler : l'interface n'affiche
+        # ce bloc que s'il existe.
+        **({"pinned": epingles} if epingles else {}),
         "facets": {
             "extensions": res["aggregations"]["by_extension"]["values"]["buckets"],
             "authors":    res["aggregations"]["by_author"]["values"]["buckets"],
@@ -2680,6 +2741,59 @@ def admin_test_synonyms(body: SynonymTest, user: str = Depends(require_admin)):
                 "l'analyseur de synonymes (./manage.sh migrer-synonymes) ?"
             ),
         ) from e
+
+
+# ── Résultats épinglés ───────────────────────────────────────────────
+class PinnedRule(BaseModel):
+    requete: str
+    documents: list[str] = []
+
+
+@app.get("/admin/pinned")
+def admin_get_pinned(user: str = Depends(require_admin)):
+    """Le registre, enrichi de l'état de chaque document épinglé.
+
+    Un identifiant qui ne correspond plus à rien (document supprimé,
+    source retirée) est signalé : sans ça, on épingle durablement un lien
+    mort que personne ne voit disparaître — l'utilisateur, lui, ne voit
+    rien du tout, la relecture le filtrant."""
+    regles = pinned.lister()
+    identifiants = [d for regle in regles for d in regle["documents"]]
+    existants: dict[str, dict] = {}
+    if identifiants:
+        try:
+            res = es.search(
+                index=ES_SEARCH_ALIAS,
+                size=len(identifiants),
+                query={"ids": {"values": identifiants}},
+                source_includes=["filename", "title", "filepath", "source"],
+            )
+            existants = {h["_id"]: h["_source"] for h in res["hits"]["hits"]}
+        except Exception as e:
+            logger.warning(f"[epingles] État des documents indisponible : {e}")
+
+    return {"regles": [
+        {
+            "requete": regle["requete"],
+            "documents": [
+                {"id": identifiant, "trouve": identifiant in existants, **existants.get(identifiant, {})}
+                for identifiant in regle["documents"]
+            ],
+        }
+        for regle in regles
+    ]}
+
+
+@app.post("/admin/pinned")
+def admin_set_pinned(body: PinnedRule, user: str = Depends(require_admin)):
+    """Remplace les épinglages d'une requête. Une liste vide les retire."""
+    try:
+        pinned.definir(body.requete, body.documents)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return admin_get_pinned(user=user)
 
 
 @app.get("/admin/retention")

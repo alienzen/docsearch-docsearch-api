@@ -28,6 +28,7 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | GET  | `/admin/retention` | Ce que la purge quotidienne des journaux emporterait, sans rien supprimer |
 | GET  | `/admin/duplicates` | Documents indexés en plusieurs exemplaires, et place occupée |
 | GET/POST/DELETE | `/admin/synonyms[/{id}]` | Thésaurus métier — effet immédiat, sans réindexation |
+| GET/POST | `/admin/pinned` | Résultats épinglés sur une requête (mise en avant, jamais autorisation) |
 | POST | `/admin/synonyms/test` | Ce que le moteur comprend d'une requête, synonymes appliqués |
 | GET/POST/DELETE | `/saved-searches` | Recherches enregistrées par utilisateur |
 | PATCH | `/saved-searches/{id}/alert` | Active/désactive l'alerte d'une recherche enregistrée (fréquence quotidienne/hebdomadaire) |
@@ -246,6 +247,37 @@ Côté API :
 - `POST /admin/synonyms/test` rend les jetons produits par l'analyseur de
   recherche. Indispensable : une règle mal écrite ne produit aucune
   erreur, seulement une recherche qui ne trouve rien de plus qu'avant.
+
+### Résultats épinglés
+
+`GET/POST /admin/pinned` (voir `pinned.py`) associe une requête
+normalisée — minuscules, accents repliés, espaces réduits — à quelques
+identifiants de documents, dans un registre Redis. Sur la **première page
+seulement**, `/search` les rend dans une clé `pinned` distincte de
+`results`.
+
+⚠️ **Un document épinglé n'échappe pas à l'ACL.** Il est relu par une
+vraie recherche portant le filtre ACL et la restriction aux sources
+cherchables — jamais par un `mget`, qui le rendrait sans rien vérifier.
+Épingler met en avant, ça n'autorise pas : celui qui n'a pas le droit de
+voir le document ne le voit pas, et rien à l'écran ne lui apprend qu'il
+existe.
+
+Trois conséquences à connaître :
+
+- un document épinglé présent dans les résultats naturels en est retiré,
+  pour n'être affiché qu'une fois. `total` ne bouge pas : il compte des
+  documents trouvés, pas des cartes affichées ;
+- l'ordre rendu est celui de l'administration, pas celui du moteur —
+  quand quelqu'un épingle trois documents, il les a classés ;
+- un document supprimé de l'index disparaît de lui-même côté recherche.
+  C'est `GET /admin/pinned` qui le signale comme introuvable, pour qu'on
+  puisse nettoyer la règle — sans quoi on épingle durablement un lien
+  mort que personne ne voit disparaître.
+
+L'interface l'affiche sous une mention « Proposé par votre
+administration » : un classement forcé en silence est une mauvaise
+surprise le jour où quelqu'un s'en aperçoit.
 
 La forme `a => b` est refusée à l'écriture : elle *remplace* les termes
 d'origine au lieu de les compléter, ce qui surprend tout le monde et se
