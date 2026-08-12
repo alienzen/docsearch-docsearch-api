@@ -2,7 +2,8 @@
 #
 # Chaque recherche réussie sur /search est indexée dans un index ES
 # dédié (SEARCH_LOG_INDEX, séparé de l'index documents) : qui, quand,
-# depuis quelle IP, quelle requête, combien de résultats. Sert
+# depuis quelle IP, quelle requête, combien de résultats, en combien de
+# temps. Sert
 # uniquement la page /stats.html — un échec d'écriture ici ne doit
 # JAMAIS faire échouer une recherche (best-effort, erreur juste loguée).
 
@@ -71,6 +72,21 @@ _CRITERIA_PROPERTIES = {
 # l'appartenance de l'époque, pas celle du jour de la consultation.
 _GROUP_PROPERTIES = {"groups": {"type": "keyword"}}
 
+# Idem, ajoutés après coup : temps de la recherche, en millisecondes.
+# Deux mesures et non une seule — leur écart est toute l'information :
+#   took_ms     : temps passé dans Elasticsearch, rapporté par ES lui-même
+#   duration_ms : temps total du endpoint /search (ACL, construction de la
+#                 requête, appel ES), hors écriture de ce journal
+# Une recherche à 3000 ms dont 2900 dans le moteur et une autre à 3000 ms
+# dont 200 dans le moteur n'appellent pas du tout la même correction.
+#
+# float pour duration_ms (arrondi au dixième de milliseconde côté API),
+# integer pour took_ms (ES ne compte qu'en millisecondes entières).
+_TIMING_PROPERTIES = {
+    "took_ms":     {"type": "integer"},
+    "duration_ms": {"type": "float"},
+}
+
 
 def _ensure_index(es: Elasticsearch) -> None:
     global _index_ready
@@ -91,17 +107,23 @@ def _ensure_index(es: Elasticsearch) -> None:
                     **_ENGAGEMENT_PROPERTIES,
                     **_CRITERIA_PROPERTIES,
                     **_GROUP_PROPERTIES,
+                    **_TIMING_PROPERTIES,
                 }
             }
         })
         logger.info(f"Index '{SEARCH_LOG_INDEX}' créé.")
     else:
         # Index déjà créé par une version antérieure (avant l'ajout du
-        # feedback/tracking de clic/critères) — complète son mapping sans
-        # y toucher autrement. Idempotent, appelable à chaque démarrage.
+        # feedback/tracking de clic/critères/temps) — complète son mapping
+        # sans y toucher autrement. Idempotent, appelable à chaque démarrage.
         es.indices.put_mapping(
             index=SEARCH_LOG_INDEX,
-            properties={**_ENGAGEMENT_PROPERTIES, **_CRITERIA_PROPERTIES, **_GROUP_PROPERTIES},
+            properties={
+                **_ENGAGEMENT_PROPERTIES,
+                **_CRITERIA_PROPERTIES,
+                **_GROUP_PROPERTIES,
+                **_TIMING_PROPERTIES,
+            },
         )
     _index_ready = True
 
@@ -232,6 +254,8 @@ def log_search(
     keywords: str | list[str] | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    took_ms: int | None = None,
+    duration_ms: float | None = None,
 ) -> str | None:
     """
     Enregistre un événement de recherche. Ne lève jamais d'exception —
@@ -253,6 +277,13 @@ def log_search(
     extension/author/folder/keywords acceptent une liste —, période) —
     purement informatif pour /stats.html ("Historique des recherches"),
     jamais réutilisés pour rejouer la recherche.
+
+    took_ms/duration_ms : temps du moteur et temps total du endpoint, en
+    millisecondes (voir _TIMING_PROPERTIES). Absents des enregistrements
+    antérieurs à leur introduction : toute agrégation dessus porte donc
+    sur un sous-ensemble de l'index, et doit le dire (voir
+    /admin/search-logs/summary, qui remonte le nombre de recherches
+    effectivement mesurées).
     """
     try:
         _ensure_index(es)
@@ -281,6 +312,16 @@ def log_search(
             doc["date_to"] = date_to
         if source:
             doc["source"] = source
+        # `is not None` et non le test de vérité employé ci-dessus pour
+        # les critères : 0 ms est une mesure parfaitement légitime (ES
+        # rapporte régulièrement took=0 sur une requête servie depuis son
+        # cache), et un `if took_ms:` la ferait disparaître du journal en
+        # ne gardant que les recherches lentes — soit exactement le
+        # contraire d'une mesure honnête.
+        if took_ms is not None:
+            doc["took_ms"] = took_ms
+        if duration_ms is not None:
+            doc["duration_ms"] = duration_ms
         res = es.index(index=SEARCH_LOG_INDEX, document=doc)
         _record_health(True)
         return res.get("_id")

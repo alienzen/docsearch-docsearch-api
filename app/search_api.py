@@ -12,6 +12,7 @@ import logging
 import io
 import re
 import json
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -46,6 +47,18 @@ import sql_sources_config
 import sql_dsn_registry
 import web_sources_config
 
+# Sans cet appel, le logger racine n'a AUCUN handler : uvicorn ne
+# configure que ses propres loggers ("uvicorn.*", propagate=False), et
+# tous les logger.info/debug des modules de l'application étaient donc
+# écrits nulle part — seuls les WARNING et au-delà ressortaient, via le
+# handler de dernier recours de la bibliothèque standard, sans horodatage
+# ni niveau. Même format que app/alert_worker.py, pour que les deux se
+# lisent pareil dans journalctl.
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+
 logger = logging.getLogger(__name__)
 
 # La version vient du fichier VERSION du dépôt via version.py — plus de
@@ -64,6 +77,22 @@ es = Elasticsearch(ES_HOST, retry_on_timeout=True, max_retries=3, request_timeou
 # facette — voir facet_agg() dans search(), qui explique pourquoi le
 # défaut d'Elasticsearch fausse les comptes affichés.
 FACET_SHARD_SIZE = 500
+
+# Au-delà de cette durée totale, une recherche laisse une ligne WARNING
+# dans le journal (journalctl -u docsearch-api). Une ligne par recherche
+# noierait le journal sans rien apprendre : seules les lentes méritent
+# d'être signalées, les autres restent mesurées et enregistrées dans
+# l'index search_logs.
+#
+# 2000 ms n'est pas une valeur inventée ici : c'est déjà le seuil de
+# déclenchement de la supervision ({$DOCSEARCH.RECHERCHE.MS.MAX}, voir
+# docsearch-infra/zabbix/REFERENCE.md). Les deux doivent rester alignés,
+# sinon Zabbix alerte sur des recherches dont le journal ne dit rien —
+# ou l'inverse.
+#
+# 0 désactive complètement la ligne de journal (la mesure, elle,
+# continue).
+SLOW_SEARCH_MS = int(os.getenv("SLOW_SEARCH_MS", "2000"))
 
 
 @app.middleware("http")
@@ -541,6 +570,39 @@ def _resolve_doc_source(doc_id: str) -> str | None:
         return None
 
 
+def _journaliser_temps(
+    *,
+    query: str,
+    search_in: str,
+    total: int,
+    username: str,
+    took_ms: int | None,
+    duration_ms: float,
+) -> None:
+    """Trace le temps d'une recherche dans le journal du service.
+
+    Fonction séparée du endpoint pour rester vérifiable sans monter une
+    requête HTTP complète : ce qui se joue ici n'est pas la mesure mais
+    la DÉCISION d'écrire ou non, et c'est elle qui doit être testée.
+
+    Au-delà de SLOW_SEARCH_MS, une ligne WARNING avec de quoi rejouer le
+    cas (requête, champ, volume, utilisateur). En deçà, une ligne DEBUG,
+    muette en exploitation normale, qui permet d'observer une période
+    précise en abaissant LOG_LEVEL sans redéployer quoi que ce soit.
+    """
+    if SLOW_SEARCH_MS and duration_ms >= SLOW_SEARCH_MS:
+        logger.warning(
+            f"[search] Recherche lente : {duration_ms} ms (moteur {took_ms} ms) "
+            f"pour '{query}' (search_in={search_in}, {total} résultats, "
+            f"utilisateur {username})"
+        )
+    else:
+        logger.debug(
+            f"[search] {duration_ms} ms (moteur {took_ms} ms) "
+            f"pour '{query}' ({total} résultats)"
+        )
+
+
 # ── Recherche ────────────────────────────────────────────────
 @app.post("/search")
 def search(
@@ -548,6 +610,13 @@ def search(
     request: Request,
     user: str = Depends(current_user),
 ):
+    # Départ du chronomètre AVANT toute autre chose : la résolution des
+    # groupes ACL et la relecture de la configuration des champs sont
+    # elles aussi du temps que l'utilisateur attend. perf_counter et non
+    # time.time() — seul le premier est monotone, donc insensible à un
+    # ajustement d'horloge (NTP) pendant la mesure.
+    t0 = time.perf_counter()
+
     _ensure_index_exists()
     username   = user
     acl_filter = build_acl_filter(username)
@@ -776,11 +845,39 @@ def search(
         # Remonte le vrai message ES plutôt qu'un 500 générique opaque
         # ("Internal Server Error") — indispensable pour diagnostiquer
         # un problème de tri/requête sans avoir à fouiller les logs.
-        logger.error(f"[search] Erreur ES pour la requête '{req.query}' (sort={req.sort}) : {e}")
+        # La durée écoulée distingue une requête refusée d'emblée (erreur
+        # de syntaxe, quelques millisecondes) d'un timeout au bout des 60
+        # secondes de request_timeout — deux pannes sans rapport.
+        logger.error(
+            f"[search] Erreur ES pour la requête '{req.query}' (sort={req.sort}) "
+            f"après {round((time.perf_counter() - t0) * 1000)} ms : {e}"
+        )
         raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}") from e
 
     hits  = res["hits"]["hits"]
     total = res["hits"]["total"]["value"]
+
+    # Temps passé DANS Elasticsearch, tel qu'il le rapporte lui-même :
+    # n'inclut ni le réseau, ni la sérialisation, ni tout ce que fait
+    # l'API autour. C'est ce qui permet de trancher entre « le moteur est
+    # lent » et « l'API est lente » — la durée totale seule ne le dit pas.
+    took_ms = res.get("took")
+
+    # Arrêt du chronomètre AVANT la journalisation : l'écriture du log de
+    # recherche dans ES n'est pas du temps de recherche, et l'inclure
+    # ferait passer une panne du journal pour une lenteur du moteur.
+    # L'assemblage de la réponse ci-dessous reste également hors mesure,
+    # mais il ne fait que parcourir une page de résultats déjà en mémoire.
+    duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    _journaliser_temps(
+        query=req.query,
+        search_in=req.search_in,
+        total=total,
+        username=username,
+        took_ms=took_ms,
+        duration_ms=duration_ms,
+    )
 
     search_id = search_log.log_search(
         es,
@@ -800,12 +897,21 @@ def search(
         keywords=req.keywords,
         date_from=req.date_from,
         date_to=req.date_to,
+        took_ms=took_ms,
+        duration_ms=duration_ms,
     )
 
     return {
         "total":     total,
         "username":  username,
         "search_id": search_id,
+        # Un sous-objet plutôt que deux clés à plat : l'interface n'a
+        # qu'une seule chose à tester pour savoir si elle a une mesure à
+        # afficher, et les deux durées restent visiblement solidaires.
+        "timing": {
+            "took_ms":     took_ms,
+            "duration_ms": duration_ms,
+        },
         "results": [
             {
                 **h["_source"],
@@ -2279,6 +2385,7 @@ class UiConfigUpdate(BaseModel):
     custom_keywords_enabled: bool | None = None
     alerts_enabled:      bool | None = None
     sort_enabled:        bool | None = None
+    search_time_enabled: bool | None = None
     acl_visible_enabled: bool | None = None
     shortcuts_link_enabled: bool | None = None
     empty_state_animation_enabled: bool | None = None
@@ -2376,6 +2483,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("alerts_enabled", body.alerts_enabled)
         if body.sort_enabled is not None:
             config = ui_config.set_param("sort_enabled", body.sort_enabled)
+        if body.search_time_enabled is not None:
+            config = ui_config.set_param("search_time_enabled", body.search_time_enabled)
         if body.acl_visible_enabled is not None:
             config = ui_config.set_param("acl_visible_enabled", body.acl_visible_enabled)
         if body.shortcuts_link_enabled is not None:
@@ -2584,10 +2693,27 @@ def admin_set_suggestion_status(suggestion_id: str, body: SuggestionStatusUpdate
 
 
 # ── Statistiques de recherche ───────────────────────────────────
+# Reprend les clés de la section "timing" du résumé pour le cas où
+# l'index n'existe pas encore (première installation) — la page de stats
+# affiche alors des tirets plutôt que de tomber sur une clé absente.
+_EMPTY_TIMING_SUMMARY = {
+    "avg_ms": None, "p50_ms": None, "p95_ms": None, "took_avg_ms": None,
+    "slow_count": 0, "slow_threshold_ms": SLOW_SEARCH_MS, "measured": 0,
+}
+
+
+def _round_ms(value: float | None) -> float | None:
+    """Arrondit une durée au dixième de milliseconde. None reste None :
+    une agrégation sur un index où aucune recherche n'a encore été
+    mesurée ne renvoie pas 0, elle ne renvoie rien — et afficher « 0 ms »
+    au lieu de « — » ferait croire à une recherche instantanée."""
+    return None if value is None else round(value, 1)
+
+
 @app.get("/admin/search-logs/summary")
 def admin_search_logs_summary(user: str = Depends(require_admin)):
-    """Compteurs agrégés + répartition par jour (14 derniers jours) pour
-    les cartes de résumé de la page /stats.html."""
+    """Compteurs agrégés + répartition par jour (14 derniers jours) +
+    temps de recherche pour les cartes de résumé de la page /stats.html."""
     try:
         res = es.search(
             index=search_log.SEARCH_LOG_INDEX,
@@ -2612,14 +2738,30 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
                         "feedback_down": {"filter": {"term": {"feedback": "down"}}},
                     },
                 },
+                # Temps de recherche. `duration_measured` n'est pas une
+                # redondance de total_searches : les recherches d'avant
+                # l'introduction de la mesure n'ont pas le champ et sont
+                # ignorées par avg/percentiles. Sans ce décompte, une
+                # moyenne calculée sur douze lignes se lirait comme
+                # portant sur tout l'historique.
+                "duration_avg":         {"avg": {"field": "duration_ms"}},
+                "duration_percentiles": {"percentiles": {"field": "duration_ms", "percents": [50, 95]}},
+                "duration_measured":    {"value_count": {"field": "duration_ms"}},
+                "took_avg":             {"avg": {"field": "took_ms"}},
+                "slow_searches": {
+                    "filter": {"range": {"duration_ms": {"gte": SLOW_SEARCH_MS}}},
+                } if SLOW_SEARCH_MS else {"filter": {"match_none": {}}},
             },
         )
     except Exception as e:
         if "index_not_found" in str(e).lower():
             return {"total_searches": 0, "unique_users": 0, "unique_ips": 0, "by_day": [],
                      "feedback_up": 0, "feedback_down": 0,
-                     "by_group": [], "searches_by_group": []}
+                     "by_group": [], "searches_by_group": [],
+                     "timing": _EMPTY_TIMING_SUMMARY}
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+    percentiles = res["aggregations"]["duration_percentiles"]["values"]
 
     return {
         "total_searches": res["hits"]["total"]["value"],
@@ -2656,6 +2798,17 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
             # que de ça.
             if b["feedback_up"]["doc_count"] or b["feedback_down"]["doc_count"]
         ],
+        "timing": {
+            "avg_ms":            _round_ms(res["aggregations"]["duration_avg"]["value"]),
+            # Les clés d'une agrégation "percentiles" sont les percentiles
+            # eux-mêmes, en flottant ("50.0"), pas les entiers demandés.
+            "p50_ms":            _round_ms(percentiles.get("50.0")),
+            "p95_ms":            _round_ms(percentiles.get("95.0")),
+            "took_avg_ms":       _round_ms(res["aggregations"]["took_avg"]["value"]),
+            "slow_count":        res["aggregations"]["slow_searches"]["doc_count"],
+            "slow_threshold_ms": SLOW_SEARCH_MS,
+            "measured":          res["aggregations"]["duration_measured"]["value"],
+        },
     }
 
 
@@ -2808,6 +2961,12 @@ def admin_export_search_logs(
         "Source(s)", "Extension(s)", "Auteur(s)", "Dossier",
         "Période début", "Période fin",
         "Résultats", "Documents retournés", "Avis", "Clics",
+        # Ajoutées EN FIN de ligne et non à côté de « Résultats », où
+        # elles auraient pourtant mieux leur place : décaler les colonnes
+        # existantes casserait les classeurs et macros construits sur un
+        # export précédent. Vides pour les recherches antérieures à la
+        # mesure.
+        "Durée (ms)", "Moteur ES (ms)",
     ])
 
     try:
@@ -2837,12 +2996,16 @@ def admin_export_search_logs(
                 _join(s.get("result_files")),
                 s.get("feedback", ""),
                 len(s.get("clicks") or []),
+                s.get("duration_ms", ""),
+                s.get("took_ms", ""),
             ])
     except Exception as e:
         if "index_not_found" not in str(e).lower():
             raise HTTPException(status_code=500, detail=str(e)) from e
 
-    for col_idx, width in enumerate([19, 14, 28, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8], start=1):
+    # Une largeur par colonne d'en-tête, dans le même ordre : les deux
+    # listes doivent rester de même longueur.
+    for col_idx, width in enumerate([19, 14, 28, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8, 12, 14], start=1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
 
     buffer = io.BytesIO()

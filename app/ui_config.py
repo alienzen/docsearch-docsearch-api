@@ -64,6 +64,18 @@ DEFAULT_UI_CONFIG = {
                                     # purement une préférence d'affichage, pas de contrôle d'accès
                                     # associé côté API (contrairement à export/collections/alerts) :
                                     # désactivé, la recherche reste triée par pertinence par défaut.
+    "search_time_enabled": False,  # affichage du temps de recherche à côté du décompte de
+                                    # résultats, et bouton qui permet à chacun de le masquer
+                                    # (la préférence est ensuite retenue par poste, côté
+                                    # navigateur). SEUL flag de ce fichier à valoir False par
+                                    # défaut, et c'est délibéré : tous les autres masquent une
+                                    # fonctionnalité qui existait déjà, alors que celui-ci
+                                    # AJOUTERAIT une information sur l'écran de tous les
+                                    # utilisateurs sans que personne l'ait demandée. Ne le
+                                    # "corrigez" pas vers True par souci d'uniformité.
+                                    # N'influe que sur l'affichage : la mesure, la ligne de
+                                    # journal des recherches lentes et l'enregistrement dans
+                                    # l'index search_logs ont lieu quel que soit ce flag.
     "acl_visible_enabled": True,   # section "Droits d'accès" de la fiche détail (propriétaire,
                                     # groupes autorisés) visible des utilisateurs NON administrateurs.
                                     # Désactivé, elle n'apparaît plus que pour les membres d'ADMIN_GROUP.

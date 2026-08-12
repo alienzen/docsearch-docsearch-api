@@ -57,6 +57,55 @@ les documents indexés après l'ajout de ce mapping — une réindexation
 est nécessaire pour que les documents déjà présents deviennent
 cherchables par ce biais.
 
+## Temps de recherche
+
+`POST /search` renvoie, à côté de `total`/`results`/`facets` :
+
+```json
+"timing": { "took_ms": 41, "duration_ms": 128.4 }
+```
+
+- `took_ms` : temps passé DANS Elasticsearch, rapporté par ES lui-même.
+- `duration_ms` : temps total du endpoint (résolution ACL, construction
+  de la requête, appel ES), hors écriture du journal de recherche —
+  celle-ci n'est pas du temps de recherche, et l'y inclure ferait passer
+  une panne du journal pour une lenteur du moteur.
+
+Aucune des deux ne compte l'aller-retour réseau : ce que l'utilisateur
+attend est toujours un peu plus. Leur **écart** est l'information utile —
+3000 ms dont 2900 dans le moteur et 3000 ms dont 200 dans le moteur
+n'appellent pas la même correction.
+
+Les deux valeurs sont enregistrées dans chaque document de l'index
+`search_logs` (champs `took_ms` et `duration_ms`, ajoutés au mapping des
+index existants par `put_mapping` au premier démarrage). Elles alimentent
+les indicateurs de `stats.html` (moyenne, médiane, 95ᵉ centile, nombre de
+recherches lentes) et les deux dernières colonnes de l'export XLSX de
+l'historique. Les recherches antérieures à la mise en place de la mesure
+n'ont pas ces champs : `/admin/search-logs/summary` remonte donc
+`timing.measured`, le nombre de recherches réellement mesurées, que la
+page affiche à côté des moyennes.
+
+**Journal du service.** Une recherche dont `duration_ms` atteint
+`SLOW_SEARCH_MS` (2000 par défaut, `0` désactive) laisse une ligne
+`WARNING` dans `journalctl -u docsearch-api`. Ce seuil doit rester aligné
+avec la macro Zabbix `{$DOCSEARCH.RECHERCHE.MS.MAX}`
+(`docsearch-infra/zabbix/REFERENCE.md`), faute de quoi la supervision
+alerte sur des recherches dont le journal ne dit rien. Toutes les autres
+recherches sont tracées en `DEBUG` : `LOG_LEVEL=DEBUG` les fait
+apparaître le temps d'une observation, sans rien émettre le reste du
+temps.
+
+⚠️ `search_api.py` appelle `logging.basicConfig()` au chargement. Sans
+lui, le logger racine n'a aucun handler — uvicorn ne configure que les
+siens — et tous les `logger.info`/`logger.debug` de l'application
+partaient dans le vide. Ne pas le retirer en croyant à un doublon avec
+uvicorn : ses loggers ne propagent pas.
+
+L'affichage de la durée côté interface est une bascule d'administration
+(`search_time_enabled`), désactivée par défaut, doublée d'une préférence
+par poste. La mesure, elle, a lieu quel que soit ce réglage.
+
 ## Alertes sur recherches sauvegardées
 
 Une recherche enregistrée (`saved_searches.py`) peut être marquée
