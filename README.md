@@ -32,11 +32,21 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | GET  | `/searchable-sources` | Sources cherchables, pour la présélection avant recherche |
 | GET/POST/DELETE | `/collections` | Collections de documents personnelles ("📋 Mes collections") |
 | POST | `/collections/{id}/rename`, `/collections/{id}/documents`, `/collections/{id}/documents/{doc_id}` | Gestion du contenu d'une collection |
-| POST | `/ask` | Assistant conversationnel (RAG), voir `chat.html` |
 | GET  | `/ui-config` | Bascules d'interface publique (lien Assistant IA, pied de page, export...) |
 | GET  | `/is-admin` | Indique si l'utilisateur courant a accès au panneau d'administration |
 | GET  | `/engagement-config` | Bascules de mesure de satisfaction (pouce, NPS, suggestions) |
 | POST | `/feedback`, `/click`, `/nps`, `/suggestions` | Signaux de mesure de satisfaction (voir "Mesure de satisfaction" dans l'admin) |
+
+⚠️ **Il n'y a pas de route `/ask`.** Ce tableau en a listé une, décrite comme
+un « assistant conversationnel (RAG) » — elle n'a jamais existé dans le code.
+La page `chat.html` de l'interface est une **maquette** qui joue des réponses
+écrites à l'avance (`docsearch-ui-vue/src/pages/chat/cannedResponses.ts`) :
+aucun document indexé n'est interrogé, aucun modèle de langage n'est branché.
+Le lien « Assistant IA » de l'en-tête étant affiché par défaut
+(`chat_enabled` vaut `true`), le masquer depuis le panneau d'administration
+est recommandé partout où cette maquette pourrait passer pour une
+fonctionnalité réelle. Voir `docsearch-infra/FEATURES.md` et
+`docsearch-infra/PLAN-EVOLUTIONS.md` (§5, en attente d'arbitrage).
 
 **Recherche exacte** : entourer la requête de guillemets (`"terme exact"`)
 force une correspondance de phrase exacte (ordre et adjacence des mots
