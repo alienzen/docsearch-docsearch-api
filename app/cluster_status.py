@@ -30,6 +30,17 @@ TIKA_SERVERS    = os.getenv("TIKA_SERVERS", "http://localhost:9998").split(",")
 HEARTBEAT_KEY = "docsearch:heartbeat:watcher"
 HEARTBEAT_STALE_AFTER = 60  # secondes — au-delà, watcher considéré "silencieux"
 
+# Blocages d'index qui font échouer une écriture, et ce qu'ils racontent
+# (voir check_suggestions). Elasticsearch pose lui-même le premier au
+# franchissement du flood-stage watermark ; les deux autres demandent une
+# intervention explicite.
+WRITE_BLOCK_SETTINGS = {
+    "index.blocks.read_only_allow_delete":
+        "disque saturé (flood-stage watermark) — Elasticsearch a passé l'index en lecture seule",
+    "index.blocks.read_only": "index placé en lecture seule",
+    "index.blocks.write":     "écritures bloquées sur l'index",
+}
+
 
 def check_elasticsearch() -> dict:
     try:
@@ -141,6 +152,85 @@ def check_watcher_heartbeat() -> dict:
         return {"alive": False, "error": str(e)}
 
 
+def _check_write_blocks(index: str, *, rien_recu: str) -> dict:
+    """Cet index accepte-t-il encore les écritures ?
+
+    Sondé ACTIVEMENT, à la différence de search_log.health() qui rapporte
+    le résultat de la dernière écriture réelle. Le rythme n'a rien de
+    comparable : il se fait une recherche par minute, une suggestion ou
+    une réponse NPS par semaine dans un bon mois. Un état déduit de la
+    dernière écriture réelle afficherait donc « actif » pendant toutes
+    les semaines qui suivent le blocage, c'est-à-dire exactement pendant
+    la panne.
+
+    Rien d'autre ne la signale : log_suggestion() et log_nps() avalent
+    leur exception (c'est leur contrat), /suggestions et /nps répondent
+    200, et l'interface remercie l'utilisateur dont le message vient
+    d'être perdu.
+
+    Ce qui est regardé est le BLOCAGE lui-même, pas sa cause : le
+    flood-stage watermark (disque à 95 %) pose
+    `index.blocks.read_only_allow_delete`, mais un `index.blocks.write`
+    posé à la main produit exactement le même silence, cluster « green »
+    compris.
+
+    `rien_recu` : ce que veut dire un index absent pour CE canal-là — il
+    naît à la première écriture reçue, son absence n'est donc pas une
+    panne mais l'absence de toute contribution.
+    """
+    try:
+        r = httpx.get(
+            f"{ES_HOST}/{index}/_settings/index.blocks.*",
+            params={"flat_settings": "true"}, timeout=5,
+        )
+        if r.status_code == 404:
+            # Ne rien savoir n'est pas une panne — même raisonnement que
+            # search_log.health(), le panneau l'affiche en neutre.
+            return {"ok": None, "index": index, "reason": rien_recu}
+        r.raise_for_status()
+        # Réponse vide ({}) tant qu'aucun blocage n'est posé ; sinon une
+        # entrée par index CONCRET, d'où le parcours des valeurs plutôt
+        # qu'un accès par nom — la variable d'environnement pourrait
+        # désigner un alias. Les valeurs sont rendues en chaînes ("true").
+        blocages = sorted({
+            libelle
+            for reglages in r.json().values()
+            for cle, libelle in WRITE_BLOCK_SETTINGS.items()
+            if str(reglages.get("settings", {}).get(cle, "")).lower() == "true"
+        })
+        if blocages:
+            return {"ok": False, "index": index, "error": " ; ".join(blocages)}
+        return {"ok": True, "index": index}
+    except Exception as e:
+        # Elasticsearch injoignable : sa propre carte le dit déjà en rouge,
+        # inutile d'en allumer une seconde pour la même panne.
+        return {"ok": None, "index": index, "reason": str(e)}
+
+
+# Les deux canaux par lesquels un utilisateur envoie quelque chose sans
+# jamais savoir si c'est arrivé. Ils tombent ensemble — même blocage
+# d'index — mais chacun a sa carte : réparer le disque sans savoir que
+# des idées ET des notes ont été perdues n'est pas la même information.
+def check_suggestions() -> dict:
+    """Recueil des suggestions libres — voir _check_write_blocks()."""
+    import suggestion_log
+
+    return _check_write_blocks(
+        suggestion_log.SUGGESTION_LOG_INDEX,
+        rien_recu="aucune suggestion reçue à ce jour (index pas encore créé)",
+    )
+
+
+def check_nps() -> dict:
+    """Réponses à la question de satisfaction — voir _check_write_blocks()."""
+    import nps_log
+
+    return _check_write_blocks(
+        nps_log.NPS_LOG_INDEX,
+        rien_recu="aucune réponse NPS reçue à ce jour (index pas encore créé)",
+    )
+
+
 def check_versions(watcher: dict) -> dict:
     """Identité des composants DocSearch déployés.
 
@@ -190,5 +280,12 @@ def get_full_status() -> dict:
         # dépassement du flood-stage watermark), et c'est justement le cas
         # qui a motivé cette carte. Voir search_log.health().
         "search_log":    search_log.health(),
+        # Même angle mort que la ligne ci-dessus, autres symptômes : le
+        # blocage en lecture seule fait aussi disparaître les suggestions
+        # et les réponses NPS, sans que personne ne l'apprenne — ni
+        # l'administrateur, ni l'utilisateur, que l'interface remercie
+        # quand même.
+        "suggestions":   check_suggestions(),
+        "nps":           check_nps(),
         "versions":      check_versions(watcher),
     }

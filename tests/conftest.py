@@ -78,12 +78,23 @@ LDAP_PASSWORD = os.getenv("DOCSEARCH_TEST_LDAP_USER_PASSWORD", "")
 def pytest_configure(config):
     config.addinivalue_line("markers", "requires_ldap: exige l'annuaire de dev (~/ldap-test-stack)")
     config.addinivalue_line("markers", "requires_redis: exige un Redis joignable")
+    config.addinivalue_line("markers", "requires_elasticsearch: exige un Elasticsearch joignable")
     config.addinivalue_line("markers", "requires_kerberos: exige un KDC — aucun sur cette VM")
 
 
 def _redis_reachable() -> bool:
     store.reset_client()
     return store.get_client() is not None
+
+
+def _elasticsearch_reachable() -> bool:
+    import httpx
+
+    import cluster_status
+    try:
+        return httpx.get(f"{cluster_status.ES_HOST}/", timeout=2).status_code == 200
+    except Exception:
+        return False
 
 
 def _ldap_reachable() -> bool:
@@ -99,6 +110,8 @@ def _ldap_reachable() -> bool:
 def _skip_by_marker(request):
     if request.node.get_closest_marker("requires_redis") and not _redis_reachable():
         pytest.skip("Redis injoignable")
+    if request.node.get_closest_marker("requires_elasticsearch") and not _elasticsearch_reachable():
+        pytest.skip("Elasticsearch injoignable")
     if request.node.get_closest_marker("requires_ldap"):
         if not (LDAP_DEV["LDAP_PASS"] and LDAP_PASSWORD):
             pytest.skip(
