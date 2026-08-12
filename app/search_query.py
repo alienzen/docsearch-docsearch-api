@@ -106,35 +106,39 @@ def _searchable_source_names(username: str) -> list[str]:
     return names
 
 
-def _valid_source_names(source: str | list[str] | None) -> list[str]:
-    """Comme _validate_source_names() dans search_api.py, mais tolérant :
-    un nom de source devenue invalide depuis l'enregistrement de l'alerte
-    (source supprimée) est ignoré plutôt que de faire échouer toute la
-    vérification — un worker de fond ne doit jamais planter sur une
-    donnée utilisateur périmée."""
-    if not source:
-        return []
-    names = source if isinstance(source, list) else [source]
-    valid = []
-    for name in names:
-        try:
-            file_sources_config.get_source(name)
-            valid.append(name)
-            continue
-        except KeyError:
-            pass
-        try:
-            sql_sources_config.get_source(name)
-            valid.append(name)
-            continue
-        except KeyError:
-            pass
-        try:
-            web_sources_config.get_source(name)
-            valid.append(name)
-        except KeyError:
-            pass
-    return valid
+def _requested_source_names(
+    source_names: str | list[str] | None, username: str,
+) -> list[str] | None:
+    """Identique à _requested_source_names() dans search_api.py — voir
+    l'avertissement de cohérence en tête de fichier.
+
+    Retourne None quand la recherche enregistrée ne filtrait sur aucune
+    source, et la liste VIDE quand elle en nommait mais qu'aucune n'est
+    plus atteignable. L'appelant doit poser le filtre dans ce second cas
+    (voir build_query_clauses) : sans cette distinction, une alerte posée
+    sur la seule source X devenait FÉDÉRÉE le jour où X disparaissait, et
+    notifiait pour des documents hors de ce à quoi l'utilisateur s'était
+    abonné — au lieu de ne plus rien remonter.
+
+    Restreint aux sources cherchables PAR CET UTILISATEUR et non aux
+    seules sources présentes dans les registres : c'est la même liste que
+    le filtre obligatoire de build_query_clauses, donc le résultat ne
+    change pas (l'intersection des deux était déjà vide), mais il n'y a
+    plus qu'une définition de « source atteignable » à tenir à jour. Les
+    quatre raisons d'écarter un nom — retiré du registre, renommé,
+    désactivé, hors des groupes de l'utilisateur — deviennent du même
+    coup indiscernables, comme dans search_api.py.
+
+    Un nom écarté l'est SILENCIEUSEMENT, sans exception : un worker de
+    fond ne doit jamais planter sur une donnée utilisateur périmée, et
+    une recherche enregistrée en est une par nature (elle survit à la
+    source qu'elle nomme).
+    """
+    if not source_names:
+        return None
+    names = source_names if isinstance(source_names, list) else [source_names]
+    autorisees = set(_searchable_source_names(username))
+    return [name for name in names if name in autorisees]
 
 
 def _folder_filter(folder: str | list[str] | None) -> dict | None:
@@ -242,11 +246,15 @@ def build_query_clauses(criteria: dict, username: str) -> dict:
     if folder_filter:
         filters.append(folder_filter)
 
-    source_names = _valid_source_names(criteria.get("source"))
-    if source_names:
+    # None = la recherche enregistrée ne filtrait sur aucune source ;
+    # liste vide = elle en nommait, mais plus aucune n'est atteignable, et
+    # le filtre doit alors ne rien matcher (voir _requested_source_names)
+    # — d'où le test sur None et non sur la vacuité.
+    source_names = _requested_source_names(criteria.get("source"), username)
+    if source_names is not None:
         filters.append({"terms": {"source": source_names}})
 
-    custom_facet_defs = _active_custom_facets(source_names, username)
+    custom_facet_defs = _active_custom_facets(source_names or [], username)
     for es_field in custom_facet_defs:
         values = (criteria.get("custom") or {}).get(es_field)
         if values:
