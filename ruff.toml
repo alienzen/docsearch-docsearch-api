@@ -26,11 +26,28 @@ target-version = "py312"
 #   B    bugbear — pièges réels (mutable par défaut, zip non strict…)
 #   C4   comprehensions inutiles
 #   SIM  simplifications sûres
+#   S    bandit — défauts de sécurité (ajouté le 2026-08-13)
 #
 # E501 (ligne trop longue) reste dehors : 383 signalements pour un 95e
 # centile réel à 84 caractères. `line-length` ci-dessus est la cible si on
 # l'active un jour.
-select = ["E4", "E7", "E9", "F", "B", "C4", "SIM"]
+#
+# ── Sur le `S` ──────────────────────────────────────────────
+# Il couvre ce pour quoi on installerait un analyseur dédié : mot de passe
+# en dur, requête SQL construite par concaténation (S608, soit la règle
+# « pas de f-string SQL » de ~/.claude/CLAUDE.md, vérifiée pour de bon),
+# désérialisation pickle, tarfile non filtré, subprocess avec shell=True.
+#
+# Ce qu'il ne fait PAS : l'analyse de flux. ruff voit une construction
+# dangereuse là où elle est écrite, pas une donnée utilisateur qui chemine
+# jusqu'à elle. C'est la limite à connaître ; c'est aussi la seule chose
+# que SonarQube ajouterait vraiment, et elle est réservée à son édition
+# payante (arbitrage du 2026-08-13).
+#
+# État au 2026-08-13 : 5 signalements sur app/, tous examinés, aucun
+# défaut réel. Chacun est écarté soit par un `ignore` motivé ci-dessous,
+# soit par un `noqa` commenté sur place — jamais en silence.
+select = ["E4", "E7", "E9", "F", "B", "C4", "SIM", "S"]
 
 ignore = [
     # try/except/pass → contextlib.suppress. Préférence de style, pas un
@@ -49,12 +66,39 @@ ignore = [
     # "tar.gz"`), plus lisibles en colonnes qu'étalées. 20 signalements,
     # aucun défaut.
     "E701",
+
+    # ── Règles S écartées ────────────────────────────────────
+    # try/except/pass sans journalisation. Même construction que SIM105
+    # ci-dessus, donc même arbitrage — et l'unique occurrence de app/
+    # (backfill_groups.py, sonde de mapping Elasticsearch qui retombe sur
+    # une valeur par défaut) n'a rien à journaliser : l'absence de champ
+    # `.keyword` est le cas NORMAL, pas un incident.
+    "S110",
+
+    # « Appel subprocess : vérifier l'exécution d'entrées non fiables ».
+    # S603 se déclenche sur TOUT appel subprocess, y compris ceux, comme
+    # ici, où la commande est une liste littérale passée sans shell —
+    # forme dans laquelle aucune injection n'est possible. L'unique appel
+    # de app/ (_convert_to_pdf, libreoffice) reçoit un chemin qui vient
+    # de l'index, après contrôle ACL par get_document(), jamais de l'URL.
+    "S603",
+
+    # Binaire appelé par son nom court ("libreoffice") plutôt que par un
+    # chemin absolu. Dans une image de conteneur, le PATH est celui que
+    # le Containerfile a construit ; coder /usr/bin/libreoffice en dur
+    # casserait au premier changement d'image de base pour zéro gain.
+    "S607",
 ]
 
 [lint.per-file-ignores]
 # `assert False, "message"` est une façon normale de forcer l'échec d'un
 # test. B011 vise le code de production, que `python -O` déasserterait.
-"tests/**" = ["B011"]
+#
+# S101 (`assert`) pour la même raison, à l'envers : bandit le signale
+# parce que `python -O` le supprime, ce qui vide un contrôle de sécurité
+# écrit en production. Dans un test, l'assertion EST le test. 289
+# occurrences, aucune dans app/ — et c'est bien app/ que la règle garde.
+"tests/**" = ["B011", "S101"]
 
 [lint.flake8-bugbear]
 # `def f(x = Depends(...))` est LA façon d'écrire une dépendance FastAPI.

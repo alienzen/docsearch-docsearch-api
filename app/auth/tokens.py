@@ -30,8 +30,12 @@ from cryptography.hazmat.primitives import serialization
 from auth import config
 from auth.base import ResolvedIdentity
 
-ACCESS_TOKEN_TYPE = "access"
-REFRESH_TOKEN_TYPE = "refresh"
+# noqa S105 sur les deux lignes : ce sont les valeurs de la revendication
+# `typ` des jetons, pas des secrets. La règle se déclenche sur le nom de
+# la constante (« TOKEN »), pas sur son contenu. Elle reste active partout
+# ailleurs — c'est elle qui attraperait un vrai mot de passe en dur.
+ACCESS_TOKEN_TYPE = "access"  # noqa: S105
+REFRESH_TOKEN_TYPE = "refresh"  # noqa: S105
 
 
 class KeyLoadError(Exception):
