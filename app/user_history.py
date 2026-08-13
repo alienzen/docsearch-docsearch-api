@@ -20,6 +20,7 @@
 # volontairement inexploité.
 
 import logging
+import unicodedata
 
 # Le module, pas la constante : `search_log.SEARCH_LOG_INDEX` est relu à
 # chaque appel, ce qui laisse un test faire porter les deux modules sur le
@@ -53,6 +54,46 @@ _RESERVES = set('.?+*|{}[]()"\\#@&<>~')
 # et le tiret sont échappés — non échappé, le tiret y formerait un
 # intervalle.
 _SEPARATEURS = r"[ ,;:/'\.\-]"
+
+
+def _replier(texte: str) -> str:
+    """Forme de comparaison : minuscules, accents ôtés.
+
+    Repli par décomposition Unicode plutôt que par table de
+    correspondance, qui oublierait toujours un caractère — même procédé
+    que pinned.normaliser(), qui, lui, réduit en plus les espaces : une
+    requête épinglée se compare en entier, alors qu'ici on compare des
+    débuts et des morceaux.
+    """
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texte)
+        if unicodedata.category(c) != "Mn"
+    ).casefold()
+
+
+# Lettre repliée → toutes ses variantes de casse ET d'accent. Lucene n'a
+# pas plus de drapeau « sans accent » que de drapeau « sans casse » :
+# l'une comme l'autre s'obtiennent par classe de caractères, et autant
+# les produire d'un seul tenant.
+#
+# La table est CONSTRUITE et non écrite : parcourir le latin étendu une
+# fois à l'import coûte moins cher qu'une liste à maintenir, et surtout
+# n'oublie personne — un « Ș » a autant le droit d'être tapé sans son
+# signe qu'un « é », et l'annuaire porte des noms de toute l'Europe.
+def _table_variantes() -> dict[str, str]:
+    table: dict[str, str] = {}
+    for point in range(ord("A"), 0x0250):   # latin de base, 1, étendu A et B
+        lettre = chr(point)
+        base = _replier(lettre)
+        # Écarte ce qui se replie en DEUX lettres (« ß » → « ss ») : dans
+        # une classe de caractères, chacune serait acceptée séparément,
+        # et « s » proposerait alors les termes en « ß ».
+        if lettre.isalpha() and len(base) == 1:
+            table[base] = table.get(base, "") + lettre
+    return table
+
+
+_VARIANTES = _table_variantes()
 
 
 def recent_queries(es, username: str, limit: int = 10) -> list[dict]:
@@ -145,15 +186,16 @@ def matching_queries(es, username: str, prefix: str, limit: int = 5) -> list[dic
     avoir cherché « budget 2025 », taper « 2025 » doit retrouver la
     recherche, sans quoi l'historique paraît trouer.
 
-    Comparaison en `casefold()`, donc insensible à la casse mais PAS aux
-    accents : « repartition » ne retrouve pas « répartition ». Un repli
-    d'accents demanderait de normaliser à l'écriture du journal, ce qui
-    n'est pas le sujet de cette route.
+    Comparaison repliée (voir `_replier`) : ni la casse ni les accents ne
+    séparent, « repartition » retrouve « répartition ». Le filtrage se
+    faisant en Python sur un lot déjà relu, les deux côtés se replient à
+    la lecture — contrairement à ce que disait cette note jusqu'au
+    2026-08-13, rien n'a besoin d'être normalisé à l'écriture du journal.
     """
-    saisie = prefix.casefold()
+    saisie = _replier(prefix)
     debut, ailleurs = [], []
     for entree in recent_queries(es, username, TAILLE_POOL):
-        texte = entree["query"].casefold()
+        texte = _replier(entree["query"])
         if texte == saisie:
             continue   # proposer à l'identique ce qui est déjà tapé n'aide personne
         if texte.startswith(saisie):
@@ -167,8 +209,13 @@ def regex_prefixe(prefix: str) -> str:
     """Préfixe de saisie → expression régulière Lucene, insensible à la
     casse, pour l'`include` d'une agrégation `terms`.
 
-    L'insensibilité à la casse s'obtient lettre par lettre (`[bB][uU]…`) :
-    la syntaxe de Lucene n'a pas de drapeau pour ça. Le reste est échappé
+    L'insensibilité à la casse ET aux accents s'obtient lettre par lettre
+    (`[bB]`, `[EeÉéÈè…]`) : la syntaxe de Lucene n'a de drapeau ni pour
+    l'une ni pour les autres, et les classes viennent de `_VARIANTES`.
+    Le repli joue dans les deux sens — « Emilie » propose « Émilie
+    Dubois », « Émilie » aussi — et il ne touche QUE la comparaison : le
+    terme proposé garde ses accents, puisque c'est celui de l'index.
+    Le reste est échappé
     — une parenthèse tapée par l'utilisateur produirait sinon une erreur
     400, et un `.*` collé dans la barre ferait balayer tout le
     dictionnaire de termes de l'index.
@@ -188,9 +235,15 @@ def regex_prefixe(prefix: str) -> str:
     """
     morceaux = []
     for caractere in prefix[:MAX_PREFIXE]:
-        minuscule, majuscule = caractere.lower(), caractere.upper()
-        if caractere.isalpha() and minuscule != majuscule:
-            morceaux.append(f"[{minuscule}{majuscule}]")
+        variantes = _VARIANTES.get(_replier(caractere), "")
+        if len(variantes) < 2 and caractere.isalpha():
+            # Hors du latin étendu — grec, cyrillique… — la table n'a
+            # rien : reste au moins la casse, comme avant le repli.
+            minuscule, majuscule = caractere.lower(), caractere.upper()
+            if minuscule != majuscule:
+                variantes = minuscule + majuscule
+        if len(variantes) > 1:
+            morceaux.append(f"[{variantes}]")
         elif caractere in _RESERVES:
             morceaux.append("\\" + caractere)
         else:
@@ -219,6 +272,11 @@ def regex_prefixe(prefix: str) -> str:
 # balayé ENTIER quelle que soit la saisie. Sans effet mesurable sur ces
 # deux champs — 4-6 ms avant, 2-4 ms après, à chaud, agrégations
 # cumulées — mais l'écart se creuserait sur un champ à forte cardinalité.
+#
+# Le repli d'accents du même jour élargit encore chaque classe (« e »
+# en compte une vingtaine), sans effet mesurable non plus : 2-5 ms,
+# `took` d'ES sur les mêmes agrégations. Ce qui coûte est le nombre de
+# TERMES parcourus, pas la largeur des classes qui les filtrent.
 #
 # D'où ce choix : auteur et mots-clés, pas le nom de fichier. Suggérer
 # des noms de fichier suppose un champ dédié (`search_as_you_type` ou
@@ -275,15 +333,16 @@ def corpus_terms(es, index: str, filtres: list, prefix: str, limit: int = 5) -> 
         },
         timeout=TIMEOUT_CORPUS,
     )
-    # Comparaison en `casefold()`, comme matching_queries : insensible à
-    # la casse, mais pas aux accents.
-    saisie = prefix.casefold()
+    # Repli identique à celui de l'expression, sans quoi le reclassement
+    # démentirait la sélection : « Émilie Dubois », proposé sur la saisie
+    # « emilie », doit aussi être reconnu comme COMMENÇANT par elle.
+    saisie = _replier(prefix)
     propositions = []
     for champ, nature in CHAMPS_CORPUS:
         debut, ailleurs = [], []
         for bucket in res["aggregations"][champ]["buckets"]:
             terme = {"text": bucket["key"], "kind": nature, "count": bucket["doc_count"]}
-            rang = debut if bucket["key"].casefold().startswith(saisie) else ailleurs
+            rang = debut if _replier(bucket["key"]).startswith(saisie) else ailleurs
             rang.append(terme)
         propositions += (debut + ailleurs)[:limit]
     return propositions

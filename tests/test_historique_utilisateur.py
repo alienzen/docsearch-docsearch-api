@@ -26,6 +26,7 @@
 # index neuf se crée en rouge et toute écriture échoue — voir l'en-tête
 # de test_temps_recherche.py.
 
+import re
 import time
 
 import pytest
@@ -155,6 +156,16 @@ def test_les_correspondances_en_debut_passent_devant(journal):
 
 
 @requiert_es
+def test_replie_les_accents_de_l_historique(journal):
+    """Personne ne pose d'accent dans une barre de recherche : « marche »
+    doit retrouver « marché de travaux », et « marché » aussi."""
+    sans = [e["query"] for e in user_history.matching_queries(journal, MOI, "marche", 5)]
+    avec = [e["query"] for e in user_history.matching_queries(journal, MOI, "marché", 5)]
+    assert "marché de travaux" in sans
+    assert "marché de travaux" in avec
+
+
+@requiert_es
 def test_ne_propose_pas_ce_qui_est_deja_tape(journal):
     """Proposer à l'identique la saisie en cours n'aide personne."""
     textes = [e["query"] for e in user_history.matching_queries(journal, MOI, "budget 2025", 5)]
@@ -216,6 +227,30 @@ def corpus(es):
             document={
                 "author": "Marc Durand",
                 "keywords": ["budget"],
+                "source": "sonde",
+                "acl": {"public": True, "groups": []},
+            },
+        )
+    # Un auteur accentué, et un second qui le porte en NOM et l'emporte
+    # au nombre de documents : de quoi vérifier que le repli d'accents
+    # sert aussi bien à sélectionner qu'à classer.
+    es.index(
+        index=INDEX_CORPUS,
+        id="accent",
+        document={
+            "author": "Émilie Dubois",
+            "keywords": ["procédure"],
+            "source": "sonde",
+            "acl": {"public": True, "groups": []},
+        },
+    )
+    for identifiant in ("accent-tri-1", "accent-tri-2"):
+        es.index(
+            index=INDEX_CORPUS,
+            id=identifiant,
+            document={
+                "author": "Jean Émilie",
+                "keywords": ["procédure"],
                 "source": "sonde",
                 "acl": {"public": True, "groups": []},
             },
@@ -303,6 +338,32 @@ def test_ce_qui_commence_par_la_saisie_passe_devant(corpus):
     assert auteurs == ["Durand Public", "Marc Durand"]
 
 
+@requiert_es
+def test_replie_les_accents_du_corpus(corpus):
+    """Dans les deux sens, et sans toucher au terme rendu : c'est celui
+    de l'index, accent compris, puisqu'il servira de filtre exact."""
+    sans = user_history.corpus_terms(corpus, INDEX_CORPUS, _filtre_acl([]), "emilie", 10)
+    avec = user_history.corpus_terms(corpus, INDEX_CORPUS, _filtre_acl([]), "Émilie", 10)
+    assert "Émilie Dubois" in [p["text"] for p in sans]
+    assert "Émilie Dubois" in [p["text"] for p in avec]
+
+
+@requiert_es
+def test_replie_les_accents_des_mots_cles(corpus):
+    propositions = user_history.corpus_terms(corpus, INDEX_CORPUS, _filtre_acl([]), "procedure", 10)
+    assert [p["text"] for p in propositions if p["kind"] == "keyword"] == ["procédure"]
+
+
+@requiert_es
+def test_le_repli_vaut_aussi_pour_le_classement(corpus):
+    """« Jean Émilie » porte deux documents contre un à « Émilie
+    Dubois » : sans repli au reclassement, la saisie non accentuée ne
+    reconnaîtrait aucun début de terme et laisserait l'ordre d'ES."""
+    propositions = user_history.corpus_terms(corpus, INDEX_CORPUS, _filtre_acl([]), "emilie", 10)
+    auteurs = [p["text"] for p in propositions if p["kind"] == "author"]
+    assert auteurs == ["Émilie Dubois", "Jean Émilie"]
+
+
 # ── 4. Échappement du préfixe ────────────────────────────────
 
 # Tête de l'expression produite par regex_prefixe() : le match a le droit
@@ -312,19 +373,53 @@ def test_ce_qui_commence_par_la_saisie_passe_devant(corpus):
 DEBUT_DE_MOT = r"(.*[ ,;:/'\.\-])?"
 
 
-def test_regex_insensible_a_la_casse_et_ouverte_aux_deux_bouts():
-    assert user_history.regex_prefixe("ab") == DEBUT_DE_MOT + "[aA][bB].*"
+def _correspond(saisie: str, terme: str) -> bool:
+    """Ce que l'expression VEUT DIRE, sans passer par Elasticsearch.
+
+    L'`include` doit couvrir le terme entier, d'où `fullmatch`. Les
+    constructions employées — classes de caractères, `.*`, groupe
+    optionnel — ont le même sens dans le module `re` que chez Lucene, ce
+    qui permet de vérifier le sens de l'expression même quand le moteur
+    est absent. Que Lucene, lui, l'ACCEPTE, reste vérifié plus bas contre
+    le vrai moteur : ces deux tests ne se remplacent pas.
+    """
+    return re.fullmatch(user_history.regex_prefixe(saisie), terme) is not None
+
+
+def test_regex_insensible_a_la_casse():
+    assert _correspond("du", "Dubois")
+    assert _correspond("DU", "dubois")
+
+
+def test_regex_insensible_aux_accents_dans_les_deux_sens():
+    """Les classes sont construites depuis le latin étendu (voir
+    _VARIANTES) : la saisie accentuée trouve le terme qui ne l'est pas,
+    et réciproquement."""
+    assert _correspond("emi", "Émilie Dubois")
+    assert _correspond("ÉMI", "Emilie Dubois")
+    assert _correspond("françois", "Francois Ledoux")
+    assert _correspond("francois", "François Ledoux")
+
+
+def test_regex_ne_confond_pas_deux_lettres_distinctes():
+    """Le repli rapproche les variantes d'une même lettre, pas les
+    lettres entre elles — sans quoi il rendrait n'importe quoi."""
+    assert not _correspond("emi", "Amélie Dubois")
+    assert not _correspond("du", "Bubois")
 
 
 def test_regex_echappe_les_caracteres_reserves():
     """Sans échappement, ce `.*` collé dans la barre de recherche ferait
-    balayer tout le dictionnaire de termes de l'index."""
+    balayer tout le dictionnaire de termes de l'index. Aucune lettre
+    ici, donc aucune classe : l'expression s'écrit en toutes lettres."""
     assert user_history.regex_prefixe(".*") == DEBUT_DE_MOT + "\\.\\*.*"
-    assert user_history.regex_prefixe("a(b") == DEBUT_DE_MOT + "[aA]\\([bB].*"
+    assert "\\(" in user_history.regex_prefixe("a(b")
 
 
 def test_regex_borne_la_saisie():
-    assert len(user_history.regex_prefixe("a" * 500)) < 500
+    """Un collage de 500 caractères ne doit pas produire 500 classes :
+    au-delà de MAX_PREFIXE, la saisie est tronquée."""
+    assert user_history.regex_prefixe("a" * 500) == user_history.regex_prefixe("a" * 60)
 
 
 @requiert_es
