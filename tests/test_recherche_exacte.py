@@ -22,6 +22,13 @@
 # défaillance décrit dans test_synonymes.py, et il justifie le même
 # traitement.
 #
+# S'y ajoute une cinquième propriété, qui n'est pas de l'analyse mais de
+# l'affichage : **une recherche exacte qui trouve un document doit en
+# montrer l'extrait**. Elle a sa section plus bas, et elle a manqué au
+# premier jet — la recherche trouvait, la carte de résultat n'affichait
+# rien sous le titre. Même mode de défaillance silencieux que les deux
+# premières : le hit revient sans fragment, pas en erreur.
+#
 # La construction de requête, elle, se teste sans moteur : ce qui s'y joue
 # est un choix de champs et de clauses, pas un comportement d'indexation.
 
@@ -250,6 +257,131 @@ def test_l_analyseur_exact_ne_produit_aucun_radical(es):
     # racinise (« deleg ») et supprime « de ». C'est précisément ce que la
     # recherche exacte doit cesser de faire.
     assert _jetons(es, francais, texte) == ["deleg", "congr", "congr", "congr"]
+
+
+# ── L'extrait affiché : ce que l'utilisateur voit ───────────────────
+#
+# Trouver un document sans pouvoir montrer POURQUOI il est là ne sert à
+# rien : l'extrait est la seule chose qui rattache un résultat à ce qui a
+# été tapé. Ces tests exigent le moteur pour la même raison que les
+# précédents — le surlignage est un comportement d'Elasticsearch, pas une
+# ligne de code à relire.
+
+
+def _extraits(es, requete: str, exact: bool) -> list[str]:
+    """Fragments rendus pour `requete`, avec la configuration de
+    surlignage de /search.
+
+    Le champ surligné et ses options viennent de search_api, jamais d'une
+    copie locale : c'est le couplage clause/champ qui est testé ici, et le
+    recopier ici testerait la copie. Les balises, elles, sont réduites à
+    « << >> » pour la lisibilité des assertions — celles de production
+    (`<mark class="highlight">`) sont l'affaire du frontend, qui a ses
+    propres tests (utils/highlight.spec.ts).
+    """
+    import search_api
+
+    champ, options = search_api._config_surlignage(exact)
+    res = es.search(
+        index=INDEX_SONDE,
+        query=search_query.build_text_clause(requete, "all", exact),
+        highlight={"fields": {champ: options}, "pre_tags": ["<<"], "post_tags": [">>"]},
+    )
+    return [fragment for h in res["hits"]["hits"] for fragment in search_api._extraits(h)]
+
+
+@requiert_es
+def test_la_recherche_exacte_rend_l_extrait_du_document_trouve(index):
+    # LE test du chantier, et celui qui manquait : « Délégations » est
+    # trouvé — ça, c'était déjà vrai — et l'extrait le MONTRE.
+    #
+    # La comparaison ci-dessous donne son sens à l'assertion, et rejoue
+    # exactement ce que faisait le code précédent : surligner `content`,
+    # analysé en français, pour une clause portant sur `content.exact`.
+    # Le document est bien trouvé (total = 1) mais AUCUN fragment ne
+    # revient — les termes extraits de la requête sont les formes exactes
+    # (« delegations ») et les jetons du champ sont racinisés (« deleg »),
+    # donc le surligneur ne reconnaît aucun passage. Ce n'était pas un
+    # extrait sans marques qui s'affichait, c'était rien du tout.
+    assert _extraits(index, "délégations", exact=True) == [
+        "<<Délégations>> de service public et Congrès annuel",
+    ]
+
+    ancien = index.search(
+        index=INDEX_SONDE,
+        query=search_query.build_text_clause("délégations", "all", exact=True),
+        highlight={"fields": {"content": {"require_field_match": False}}},
+    )
+    assert ancien["hits"]["total"]["value"] == 1
+    assert ancien["hits"]["hits"][0].get("highlight") is None
+
+
+@requiert_es
+@pytest.mark.parametrize("requete", ["Congrès", "congres", "CONGRES", "congrès"])
+def test_l_extrait_marque_le_mot_tel_qu_il_est_ecrit_dans_le_document(index, requete):
+    # Pendant d'affichage de test_les_accents_et_la_casse_sont_ignores :
+    # les quatre écritures trouvent le document, et l'extrait marque la
+    # forme du DOCUMENT (« Congrès »), pas celle qui a été tapée. Sans
+    # quoi l'utilisateur ne verrait pas ce qu'il a réellement trouvé.
+    assert _extraits(index, requete, exact=True) == [
+        "Délégations de service public et <<Congrès>> annuel",
+    ]
+
+
+@requiert_es
+def test_une_phrase_exacte_est_marquee_d_un_seul_tenant(index):
+    # Les deux dimensions se croisent aussi à l'affichage : une phrase
+    # exacte doit être surlignée comme UNE expression, mots outils
+    # compris, et non mot à mot. C'est ce que voit l'utilisateur qui a
+    # cherché « état de l'art » entre guillemets.
+    assert _extraits(index, '"état de l\'art"', exact=True) == [
+        "<<État de l'art>> des systèmes documentaires",
+    ]
+
+
+@requiert_es
+def test_la_recherche_ordinaire_garde_son_extrait(index):
+    # Garde-fou de non-régression : le champ surligné suit le mode, donc
+    # la recherche ORDINAIRE doit continuer de surligner `content`. Une
+    # correction qui basculerait tout le monde sur `content.exact` ferait
+    # disparaître l'extrait de « délégation » → « Délégations », que la
+    # racinisation rattrape et que l'exact, lui, ne rattrape pas.
+    assert _extraits(index, "délégation", exact=False) == [
+        "<<Délégations>> de service public et Congrès annuel",
+    ]
+
+
+def test_le_champ_surligne_suit_les_champs_interroges():
+    # Sans moteur : le couplage lui-même. Les options ne dépendent PAS du
+    # mode — en particulier max_analyzed_offset, dont l'absence fait
+    # échouer tous les shards portant un document trop long et rend la
+    # recherche entière vide.
+    import search_api
+
+    exact, options_exact = search_api._config_surlignage(True)
+    ordinaire, options_ordinaire = search_api._config_surlignage(False)
+
+    assert (exact, ordinaire) == ("content.exact", "content")
+    assert options_exact == options_ordinaire
+    assert options_exact["max_analyzed_offset"] == 1000000
+    # `require_field_match` n'a plus à être forcé : il ne servait qu'à
+    # tenter de faire surligner `content` par une clause visant
+    # `content.exact`. Le laisser à False ferait surligner dans le corps
+    # les termes trouvés via le titre ou l'auteur.
+    assert "require_field_match" not in options_exact
+
+
+def test_les_fragments_se_lisent_quel_que_soit_le_champ_surligne():
+    # ES range les fragments sous le nom du champ surligné. Les lire sous
+    # une clé écrite en dur ne ferait que déplacer le défaut d'un cran :
+    # la liste serait vide dans l'un des deux modes.
+    import search_api
+
+    assert search_api._extraits({"highlight": {"content": ["a"]}}) == ["a"]
+    assert search_api._extraits({"highlight": {"content.exact": ["b"]}}) == ["b"]
+    # Un hit sans surlignage n'est pas une erreur : le document peut avoir
+    # été trouvé par son titre ou son nom de fichier.
+    assert search_api._extraits({}) == []
 
 
 # ── La construction de requête : sans moteur ────────────────────────

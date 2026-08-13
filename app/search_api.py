@@ -858,6 +858,83 @@ def _documents_epingles(requete: str, username: str) -> list[dict]:
     ]
 
 
+def _config_surlignage(exact: bool) -> tuple[str, dict]:
+    """Champ à surligner pour l'extrait, et les options du surlignage.
+
+    Source unique de /search et de /search/export, qui portaient chacun
+    leur copie de ces réglages.
+
+    LE CHAMP SUIT LA CLAUSE. En recherche exacte, celle-ci vise
+    `content.exact`, analysé sans racinisation ; surligner `content`,
+    analysé en français, revient à chercher les jetons de l'un dans ceux
+    de l'autre. Les termes extraits de la requête sont les formes exactes
+    (« annuelles »), les jetons du champ sont racinisés (« annuel ») :
+    aucune intersection, donc ES ne trouve AUCUN passage et ne renvoie
+    PAS DE FRAGMENT — pas un extrait sans marques, pas d'extrait du tout.
+    La carte de résultat n'affichait alors rien sous le titre.
+
+    Le défaut ne se voyait pas sur tous les mots, d'où son aspect
+    aléatoire : il disparaît dès que le radical est égal à la forme
+    exacte (« budget » → « budget »), et c'est sur ce genre de requête
+    qu'il avait été cru corrigé. Mesuré sur le corpus de développement
+    avant correction : « budget » rendait ses extraits, « délégations »,
+    « millions », « annuelles » et « systèmes » n'en rendaient aucun.
+
+    `require_field_match` reste à son défaut (True), et le `False` posé
+    ici auparavant disparaît : il n'était que la tentative de faire
+    surligner `content` par une clause portant sur `content.exact`, ce
+    qui ne pouvait pas fonctionner (voir ci-dessus). Le défaut est de
+    surcroît le comportement voulu — un terme trouvé via le titre ou
+    l'auteur n'a jamais eu à être surligné dans le corps.
+
+    Un index qui n'a pas reçu la migration (`./manage.sh migrer-exact
+    --apply`) n'a pas de sous-champ `content.exact` : ES ignore
+    silencieusement un champ de surlignage absent du mapping, sans
+    erreur ni shard en échec. Ces index-là restent donc muets en extrait
+    exactement comme ils le sont déjà en recherche exacte — le
+    `multi_match` n'y matche rien non plus.
+    """
+    return (
+        "content.exact" if exact else "content",
+        {
+            "fragment_size":        200,
+            "number_of_fragments":  2,
+            # max_analyzed_offset : sans lui, dès qu'un document du lot
+            # (ex: gros PST/PDF) dépasse index.highlight.max_analyzed_offset
+            # (1 000 000 caractères), ES fait échouer TOUS les shards
+            # portant ce document, et le highlighting renvoie alors
+            # hits.hits=[] pour la requête entière (total correct, mais
+            # aucun résultat) — d'où des recherches qui semblaient soudain
+            # ne plus rien retourner. On tronque explicitement l'analyse du
+            # surlignage à cette limite.
+            "max_analyzed_offset":  1000000,
+        },
+    )
+
+
+def _extraits(hit: dict) -> list[str]:
+    """Fragments surlignés d'un hit, quel que soit le champ dont ils
+    viennent.
+
+    ES range les fragments sous le NOM DU CHAMP surligné : `content` en
+    recherche ordinaire, `content.exact` en recherche exacte. Les lire
+    sous une clé écrite en dur rendrait la liste vide dans l'un des deux
+    modes — le défaut que corrige _config_surlignage(), simplement déplacé
+    d'un cran.
+
+    D'où la lecture des deux clés plutôt que le passage du champ retenu
+    jusqu'ici : une seule des deux peut être présente (une requête ne
+    surligne qu'un champ), et aucun appelant ne peut se désynchroniser de
+    _config_surlignage() en oubliant de propager son choix.
+
+    Le format rendu, lui, ne dépend pas du mode : une liste plate de
+    fragments, sous « highlight » pour l'interface et concaténée dans la
+    colonne « Extrait » de l'export.
+    """
+    surlignage = hit.get("highlight", {})
+    return surlignage.get("content") or surlignage.get("content.exact") or []
+
+
 @app.post("/search")
 def search(
     req: SearchQuery,
@@ -1028,6 +1105,9 @@ def search(
         else [{req.sort: {"order": "desc", "missing": "_last"}}, {"_score": "desc"}]
     )
 
+    # Le champ surligné suit les champs interrogés — voir _config_surlignage.
+    champ_extrait, options_extrait = _config_surlignage(req.exact)
+
     try:
         res = es.search(
             index=ES_SEARCH_ALIAS,
@@ -1039,32 +1119,7 @@ def search(
             # eux-mêmes cessent de respecter TOUS les filtres actifs.
             post_filter={"bool": {"filter": active_facet_filters}},
             highlight={
-                "fields": {
-                    # max_analyzed_offset : sans lui, dès qu'un document du
-                    # lot (ex: gros PST/PDF) dépasse index.highlight.max_analyzed_offset
-                    # (1 000 000 caractères), ES fait échouer TOUS les shards
-                    # portant ce document, et le highlighting renvoie alors
-                    # hits.hits=[] pour la requête entière (total correct,
-                    # mais aucun résultat) — d'où des recherches qui
-                    # semblaient soudain ne plus rien retourner. On tronque
-                    # explicitement l'analyse du surlignage à cette limite.
-                    "content": {
-                        "fragment_size": 200,
-                        "number_of_fragments": 2,
-                        "max_analyzed_offset": 1000000,
-                        # En recherche exacte, la clause vise
-                        # `content.exact` et non `content` : sans ceci, ES
-                        # n'y reconnaît aucun terme à surligner et rend
-                        # des extraits sans la moindre marque — le
-                        # résultat semble alors sans rapport avec ce qui a
-                        # été cherché. Posé UNIQUEMENT dans ce cas :
-                        # l'activer partout ferait aussi surligner dans le
-                        # corps les termes trouvés via le titre ou
-                        # l'auteur, ce qui change le rendu de toutes les
-                        # recherches ordinaires sans qu'on l'ait demandé.
-                        **({"require_field_match": False} if req.exact else {}),
-                    }
-                },
+                "fields": {champ_extrait: options_extrait},
                 # Sans ceci, ES utilise ses balises par défaut (<em>...</em>),
                 # qui ne correspondent à AUCUNE règle CSS du frontend — les
                 # termes trouvés n'étaient donc jamais visuellement surlignés,
@@ -1207,7 +1262,7 @@ def search(
                 # de clic — visait alors un document inexistant.
                 "id":        h["_id"],
                 "score":     round(h["_score"], 4),
-                "highlight": h.get("highlight", {}).get("content", []),
+                "highlight": _extraits(h),
             }
             for h in hits
             # Un document épinglé qui figure aussi dans les résultats
@@ -1320,7 +1375,7 @@ def _export_results_xlsx(query_text: str, hits: list) -> StreamingResponse:
                "Date de modification", "Taille (o)", "Chemin", "Extrait"])
     for h in hits:
         s = h["_source"]
-        snippet = " … ".join(h.get("highlight", {}).get("content", []))
+        snippet = " … ".join(_extraits(h))
         ws.append([
             s.get("filename", ""),
             s.get("extension", ""),
@@ -1392,6 +1447,9 @@ def export_search_results(req: SearchExportQuery, user: str = Depends(current_us
     username = user
     query = _build_search_query(req, username)
 
+    # Le champ surligné suit les champs interrogés — voir _config_surlignage.
+    champ_extrait, options_extrait = _config_surlignage(req.exact)
+
     sort_clause = (
         [{"_score": "desc"}]
         if req.sort == "_score"
@@ -1409,20 +1467,13 @@ def export_search_results(req: SearchExportQuery, user: str = Depends(current_us
             # qu'une liste figée, pour la même raison.
             source_excludes=["content", "content_vector"],
             highlight={
-                # max_analyzed_offset : voir le commentaire équivalent dans
-                # /search — sans lui, un seul document trop long dans les
-                # 500 lignes de l'export fait échouer le highlighting sur
-                # tous les shards qui le portent, et hits.hits revient
-                # vide (total correct, mais 0 ligne exportée).
-                "fields": {"content": {
-                    "fragment_size": 200,
-                    "number_of_fragments": 2,
-                    "max_analyzed_offset": 1000000,
-                    # Voir le commentaire équivalent dans /search : sans
-                    # ceci, la colonne « extrait » de l'export serait vide
-                    # sur toute recherche exacte.
-                    **({"require_field_match": False} if req.exact else {}),
-                }},
+                # Mêmes champ et options qu'à l'écran (dont
+                # max_analyzed_offset, qui évite ici qu'un seul document
+                # trop long parmi les 500 lignes fasse échouer le
+                # highlighting sur tous les shards qui le portent et
+                # rende un export à 0 ligne) : la colonne « Extrait »
+                # doit dire ce que la carte de résultat affichait.
+                "fields": {champ_extrait: options_extrait},
                 # Pas de balises de surlignage ici (texte brut pour un export,
                 # contrairement à /search qui les affiche en HTML).
                 "pre_tags": [""], "post_tags": [""],
