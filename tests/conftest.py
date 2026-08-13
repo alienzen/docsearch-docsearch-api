@@ -21,7 +21,9 @@
 # ⚠️  auth/config.py lit l'environnement À L'IMPORT, comme tout le reste de
 # docsearch-api. Les tests ne modifient donc pas os.environ (trop tard),
 # mais les attributs du module `config` — ce que fait la fixture
-# `env_auth`.
+# `env_auth`. Seule exception, et elle confirme la règle : le
+# os.environ.setdefault("REDIS_HOST", ...) plus bas, qui n'est pas dans un
+# test mais dans ce fichier, AVANT le premier import de `auth`.
 
 import os
 import sys
@@ -32,6 +34,25 @@ import pytest
 
 APP_DIR = Path(__file__).resolve().parent.parent / "app"
 sys.path.insert(0, str(APP_DIR))
+
+# Redis sur la boucle locale par défaut, AVANT l'import de `auth` ci-dessous.
+#
+# auth/store.py lit REDIS_HOST à l'import et retombe sur "redis" — le nom
+# d'hôte du réseau de conteneurs, qui ne résout pas quand les tests
+# tournent sur la VM. Chaque get_client() payait alors ~3,5 s d'échec de
+# résolution DNS, sans mise en cache du refus, et la fixture
+# `clean_auth_keys` en appelle deux par test (avant et après) : ~7 s de
+# setup/teardown sur CHAQUE test, soit une vingtaine de minutes pour la
+# suite au lieu d'une minute.
+#
+# Plus grave que la lenteur : Redis injoignable faisait SAUTER les ~29
+# tests marqués `requires_redis`, donc toute la couverture des sessions et
+# de la configuration, en silence — une suite verte qui ne prouvait pas ce
+# qu'elle prétendait.
+#
+# setdefault et non affectation : la CI et les conteneurs, qui définissent
+# déjà REDIS_HOST, gardent la main.
+os.environ.setdefault("REDIS_HOST", "localhost")
 
 # Import APRÈS l'ajout de `app/` au chemin, forcément : les modules de
 # l'API sont à plat, pas dans un paquet installable (COPY app/ . dans le
