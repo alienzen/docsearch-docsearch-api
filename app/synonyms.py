@@ -26,9 +26,11 @@
 # l'utilisateur qui en tape ne s'attend pas à ce qu'on élargisse sa
 # requête.
 
+import hashlib
 import logging
 import os
 import re
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +51,52 @@ class RegleInvalide(ValueError):
     """Message destiné à l'administrateur, affiché tel quel."""
 
 
+def _termes(regle: str) -> list[str]:
+    return [t.strip() for t in regle.split(",") if t.strip()]
+
+
+def _canonique(regle: str) -> str:
+    """Identité d'une règle : son ENSEMBLE de termes, insensible à l'ordre
+    et à la casse. « DRH, service du personnel » et « Service du
+    personnel, drh » décrivent le même groupe d'équivalence — les garder
+    tous les deux ferait deux règles au comportement identique.
+
+    La casse seule est repliée, PAS les accents : le filtre de synonymes
+    reçoit des jetons passés par `lowercase` et rien d'autre (voir ANALYSE
+    dans docsearch-ingestion/app/indexer.py), donc « congés » et
+    « conges » y sont deux termes distincts, aux effets distincts. Les
+    confondre ici ferait disparaître une règle qui, dans le moteur, en
+    couvre une autre."""
+    return ",".join(sorted(t.casefold() for t in _termes(regle)))
+
+
 def _identifiant(regle: str) -> str:
-    """Identifiant stable dérivé du premier terme — c'est lui qui permet
-    de modifier ou supprimer une règle sans réécrire tout le jeu."""
-    premier = regle.split(",")[0].strip().casefold()
-    nettoye = re.sub(r"[^a-z0-9]+", "_", premier).strip("_")
-    return nettoye or "regle"
+    """Identifiant stable dérivé de TOUS les termes — c'est lui qui permet
+    de supprimer une règle sans réécrire tout le jeu.
+
+    ⚠️ Il ne dérivait au départ que du PREMIER terme, et deux règles
+    partageant leur tête recevaient donc le même identifiant : ajouter
+    « DRH, service du personnel » après « DRH, direction des ressources
+    humaines » faisait disparaître la première EN SILENCE, sans erreur ni
+    trace, l'administrateur croyant avoir deux règles. Rien ne le
+    justifiait côté moteur : Elasticsearch cumule les expansions de
+    plusieurs règles partageant un terme — ce qui se produisait d'ailleurs
+    déjà, sans que personne l'ait voulu, dès que le terme commun n'était
+    PAS en tête (« service du personnel, DRH » cohabitait, lui, très bien
+    avec « DRH, … »). L'identifiant portait une sémantique qui n'était pas
+    la sienne.
+
+    Le condensat porte l'unicité ; le préfixe lisible n'est là que pour
+    reconnaître la règle dans une URL de suppression ou une trace, d'où le
+    repli des accents, qui n'a aucune portée fonctionnelle ici."""
+    canonique = _canonique(regle)
+    sans_accent = "".join(
+        c for c in unicodedata.normalize("NFD", canonique.split(",")[0])
+        if unicodedata.category(c) != "Mn"
+    )
+    lisible = re.sub(r"[^a-z0-9]+", "_", sans_accent).strip("_")[:40].strip("_")
+    condensat = hashlib.sha256(canonique.encode()).hexdigest()[:12]
+    return f"{lisible}_{condensat}" if lisible else f"regle_{condensat}"
 
 
 def valider(regle: str) -> str:
@@ -69,13 +111,13 @@ def valider(regle: str) -> str:
             "d'origine au lieu de les compléter. Écrire « a, b » pour que les "
             "deux se trouvent l'un l'autre."
         )
-    termes = [t.strip() for t in regle.split(",")]
-    if len([t for t in termes if t]) < 2:
+    termes = _termes(regle)
+    if len(termes) < 2:
         raise RegleInvalide(
             "Une règle relie au moins deux termes, séparés par une virgule — "
             "par exemple « DRH, direction des ressources humaines »."
         )
-    return ", ".join(t for t in termes if t)
+    return ", ".join(termes)
 
 
 def lister(es) -> list[dict]:
@@ -120,10 +162,19 @@ def _ecrire(es, regles: list[dict]) -> dict:
 
 
 def ajouter(es, regle: str) -> dict:
+    """Ajoute la règle. Seule une règle portant exactement les mêmes
+    termes est remplacée ; toutes les autres restent en place, y compris
+    celles qui partagent un terme avec la nouvelle.
+
+    Le dédoublonnage se fait sur les TERMES et non sur l'identifiant :
+    c'est ce qui rattrape les règles écrites avant que l'identifiant ne
+    dépende de tous les termes (« drh » plutôt que « drh_xxxxxxxx »), dont
+    l'identifiant historique ne se recalcule plus. Sans cela, réécrire une
+    telle règle en produirait deux exemplaires."""
     regle = valider(regle)
-    identifiant = _identifiant(regle)
-    regles = [r for r in lister(es) if r["id"] != identifiant]
-    regles.append({"id": identifiant, "regle": regle})
+    canonique = _canonique(regle)
+    regles = [r for r in lister(es) if _canonique(r["regle"]) != canonique]
+    regles.append({"id": _identifiant(regle), "regle": regle})
     return _ecrire(es, regles)
 
 

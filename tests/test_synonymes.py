@@ -156,6 +156,44 @@ def test_normalise_les_espaces():
     )
 
 
+# ── Identité d'une règle ─────────────────────────────────────
+
+def test_deux_regles_de_meme_premier_terme_ont_des_identifiants_distincts():
+    """L'identifiant ne dérivait que du premier terme : « DRH, service du
+    personnel » écrasait alors « DRH, direction des ressources humaines »
+    EN SILENCE, sans erreur ni trace."""
+    assert synonyms._identifiant("drh, direction des ressources humaines") != (
+        synonyms._identifiant("drh, service du personnel")
+    )
+
+
+def test_deux_premiers_termes_voisins_ne_se_confondent_pas():
+    """Le nettoyage du préfixe lisible ramène tout à [a-z0-9_] : deux
+    premiers termes distincts s'y écrasaient (« ressources humaines » et
+    « ressources-humaines » donnaient un seul « ressources_humaines »).
+    Ce sont pourtant deux jetons distincts pour le moteur."""
+    assert synonyms._identifiant("ressources humaines, rh") != (
+        synonyms._identifiant("ressources-humaines, rh")
+    )
+
+
+def test_l_identifiant_ignore_l_ordre_et_la_casse():
+    """L'équivalence est symétrique : réécrire une règle dans un autre
+    ordre remplace la précédente au lieu de la doubler."""
+    assert synonyms._identifiant("drh, service du personnel") == (
+        synonyms._identifiant("Service du Personnel, DRH")
+    )
+
+
+def test_l_identifiant_distingue_les_accents():
+    """Le filtre de synonymes ne voit que `lowercase` — pas de repli
+    d'accents. « congés » et « conges » y sont deux termes aux effets
+    distincts, et confondre les deux règles en ferait disparaître une."""
+    assert synonyms._identifiant("congés, vacances") != (
+        synonyms._identifiant("conges, vacances")
+    )
+
+
 # ── Le moteur ────────────────────────────────────────────────
 
 @requiert_es
@@ -204,6 +242,41 @@ def test_la_recherche_entre_guillemets_ne_s_elargit_pas(thesaurus):
     assert _trouve(es, {"match": {"content": "drh"}}) == 1
     # …avec, la phrase est prise au pied de la lettre.
     assert _trouve(es, {"multi_match": {"query": "drh", "fields": ["content"], "type": "phrase"}}) == 0
+
+
+@requiert_es
+def test_deux_regles_partageant_leur_premier_terme_cohabitent(thesaurus):
+    """La règle ajoutée en second ne remplace plus la première, et le
+    moteur cumule bien les deux expansions — ce qu'il faisait déjà quand
+    le terme commun n'était pas en tête."""
+    es = thesaurus
+    synonyms.ajouter(es, "drh, service du personnel")
+
+    regles = {r["regle"] for r in synonyms.lister(es)}
+    assert "drh, direction des ressources humaines" in regles
+    assert "drh, service du personnel" in regles
+
+    # Les deux expansions sortent ensemble, racinisées : « personnel »
+    # ressort en « personel », d'où le préfixe court.
+    jetons = synonyms.tester(es, INDEX_SONDE, "drh")["jetons"]
+    assert any(jeton.startswith("person") for jeton in jetons)
+    assert any(jeton.startswith("resourc") or jeton.startswith("ressourc") for jeton in jetons)
+    assert _trouve(es, {"match": {"content": "drh"}}) == 1
+
+
+@requiert_es
+def test_reecrire_une_regle_dans_un_autre_ordre_ne_la_duplique_pas(thesaurus):
+    """Le dédoublonnage porte sur les termes, pas sur l'identifiant : une
+    règle réécrite dans un autre ordre remplace la précédente."""
+    es = thesaurus
+    synonyms.ajouter(es, "Service du personnel, DRH")
+
+    equivalentes = [
+        r for r in synonyms.lister(es)
+        if synonyms._canonique(r["regle"]) == synonyms._canonique("drh, service du personnel")
+    ]
+    assert len(equivalentes) == 1
+    assert equivalentes[0]["regle"] == "Service du personnel, DRH"
 
 
 @requiert_es
