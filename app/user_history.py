@@ -47,6 +47,13 @@ MAX_PREFIXE = 60
 # balayer tout le dictionnaire de termes.
 _RESERVES = set('.?+*|{}[]()"\\#@&<>~')
 
+# Séparateurs de mots À L'INTÉRIEUR d'un terme keyword, devant lesquels
+# une saisie a le droit de commencer : « Bruno Marchand », « Dupont,
+# Martin », « Jean-Pierre Roy ». Classe de caractères Lucene, où le point
+# et le tiret sont échappés — non échappé, le tiret y formerait un
+# intervalle.
+_SEPARATEURS = r"[ ,;:/'\.\-]"
+
 
 def recent_queries(es, username: str, limit: int = 10) -> list[dict]:
     """Les dernières recherches DE CET UTILISATEUR, dédoublonnées par
@@ -169,6 +176,15 @@ def regex_prefixe(prefix: str) -> str:
     L'expression doit correspondre au terme ENTIER (c'est la règle de
     `include`), d'où le `.*` final : sans lui, « bud » ne trouverait que
     l'auteur nommé exactement « bud ».
+
+    Et d'où, symétriquement, le groupe optionnel de tête : les champs
+    agrégés sont des `keyword`, donc NON tokenisés — l'auteur y est un
+    terme unique « Bruno Marchand ». Ancrée au seul début du terme,
+    l'expression ne trouvait cet auteur que sur son prénom, alors que la
+    recherche elle-même le trouve sur son nom (elle interroge le
+    sous-champ analysé `author.text`). Le groupe autorise le match après
+    un séparateur interne, sans autoriser le match n'importe où :
+    « chand » ne doit pas proposer « Marchand ».
     """
     morceaux = []
     for caractere in prefix[:MAX_PREFIXE]:
@@ -179,7 +195,7 @@ def regex_prefixe(prefix: str) -> str:
             morceaux.append("\\" + caractere)
         else:
             morceaux.append(caractere)
-    return "".join(morceaux) + ".*"
+    return f"(.*{_SEPARATEURS})?" + "".join(morceaux) + ".*"
 
 
 # Champs du corpus proposés en autocomplétion, et pourquoi ceux-là
@@ -197,6 +213,13 @@ def regex_prefixe(prefix: str) -> str:
 # métier quand le corpus grandit ; le troisième croît avec lui, et à
 # 4 000 000 de documents ce serait plusieurs secondes à chaque frappe.
 #
+# Ce raisonnement vaut d'autant plus depuis que regex_prefixe() admet le
+# match en frontière de mot (2026-08-13) : son `.*` de tête prive
+# l'automate du saut par préfixe, et le dictionnaire est désormais
+# balayé ENTIER quelle que soit la saisie. Sans effet mesurable sur ces
+# deux champs — 4-6 ms avant, 2-4 ms après, à chaud, agrégations
+# cumulées — mais l'écart se creuserait sur un champ à forte cardinalité.
+#
 # D'où ce choix : auteur et mots-clés, pas le nom de fichier. Suggérer
 # des noms de fichier suppose un champ dédié (`search_as_you_type` ou
 # `completion`), donc une réindexation — à traiter avec le lot C du plan
@@ -209,9 +232,27 @@ CHAMPS_CORPUS = (("author", "author"), ("keywords", "keyword"))
 # seconde plus tard, alors que l'utilisateur a fini de taper.
 TIMEOUT_CORPUS = "300ms"
 
+# L'agrégation trie par nombre de documents, alors que la liste rendue
+# trie d'abord par position du match (voir corpus_terms). Lui demander
+# exactement `limit` buckets ferait donc trancher ES sur un critère qui
+# n'est pas celui du classement final : un auteur commençant par la
+# saisie, mais rare, serait coupé au profit d'un auteur fréquent qui ne
+# la porte qu'en second mot. On en demande plus qu'il n'en faut, et on
+# tranche après reclassement.
+FACTEUR_BUCKETS = 4
+
 
 def corpus_terms(es, index: str, filtres: list, prefix: str, limit: int = 5) -> list[dict]:
-    """Auteurs et mots-clés du corpus commençant par la saisie.
+    """Auteurs et mots-clés du corpus correspondant à la saisie.
+
+    Correspondre veut dire « commencer par la saisie », mais aussi « la
+    voir commencer un de ses mots » : « Marchand » propose « Bruno
+    Marchand », faute de quoi les suggestions démentiraient la recherche,
+    qui, elle, trouve cet auteur par son nom (voir regex_prefixe).
+
+    Les termes qui COMMENCENT par la saisie sont rendus en premier —
+    c'est ce qu'on attend d'une autocomplétion, et c'est déjà la règle de
+    matching_queries() pour la moitié « historique » de la même liste.
 
     ⚠️ `filtres` DOIT contenir le filtre ACL de l'appelant et la
     restriction aux sources cherchables — ce sont les mêmes que ceux de
@@ -227,13 +268,22 @@ def corpus_terms(es, index: str, filtres: list, prefix: str, limit: int = 5) -> 
         size=0,
         query={"bool": {"filter": filtres}},
         aggs={
-            champ: {"terms": {"field": champ, "include": regex, "size": limit}}
+            champ: {"terms": {
+                "field": champ, "include": regex, "size": limit * FACTEUR_BUCKETS,
+            }}
             for champ, _ in CHAMPS_CORPUS
         },
         timeout=TIMEOUT_CORPUS,
     )
+    # Comparaison en `casefold()`, comme matching_queries : insensible à
+    # la casse, mais pas aux accents.
+    saisie = prefix.casefold()
     propositions = []
     for champ, nature in CHAMPS_CORPUS:
+        debut, ailleurs = [], []
         for bucket in res["aggregations"][champ]["buckets"]:
-            propositions.append({"text": bucket["key"], "kind": nature, "count": bucket["doc_count"]})
+            terme = {"text": bucket["key"], "kind": nature, "count": bucket["doc_count"]}
+            rang = debut if bucket["key"].casefold().startswith(saisie) else ailleurs
+            rang.append(terme)
+        propositions += (debut + ailleurs)[:limit]
     return propositions

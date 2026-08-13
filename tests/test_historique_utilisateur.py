@@ -205,6 +205,21 @@ def corpus(es):
             "acl": {"public": False, "groups": ["finance"]},
         },
     )
+    # Deux documents pour que « Marc Durand » l'emporte sur « Durand
+    # Public » au nombre de documents, qui est l'ordre rendu par
+    # l'agrégation — et que le reclassement de corpus_terms ait donc
+    # quelque chose à inverser.
+    for identifiant in ("tri-1", "tri-2"):
+        es.index(
+            index=INDEX_CORPUS,
+            id=identifiant,
+            document={
+                "author": "Marc Durand",
+                "keywords": ["budget"],
+                "source": "sonde",
+                "acl": {"public": True, "groups": []},
+            },
+        )
     es.indices.refresh(index=INDEX_CORPUS)
     yield es
     _supprimer(es, INDEX_CORPUS)
@@ -248,17 +263,64 @@ def test_propose_les_mots_cles_avec_leur_nature(corpus):
     assert [p["text"] for p in mots_cles] == ["budget"]
 
 
+@requiert_es
+def test_trouve_un_auteur_par_son_second_mot(corpus):
+    """Le champ agrégé est un `keyword` : « Durand Public » y est un seul
+    terme. Sans quoi taper un nom de famille ne proposerait personne,
+    alors que la recherche, elle, trouve l'auteur (`author.text`)."""
+    propositions = user_history.corpus_terms(corpus, INDEX_CORPUS, _filtre_acl([]), "public", 10)
+    assert "Durand Public" in [p["text"] for p in propositions]
+
+
+@requiert_es
+def test_ne_propose_pas_sur_un_milieu_de_mot(corpus):
+    """La contrepartie voulue : le match commence un mot, ou rien. Un
+    `.*` de tête nu proposerait « Durand Public » sur « urand », qui
+    n'est le début de rien."""
+    assert user_history.corpus_terms(corpus, INDEX_CORPUS, _filtre_acl([]), "urand", 10) == []
+
+
+@requiert_es
+def test_le_second_mot_ne_contourne_pas_les_droits(corpus):
+    """Élargir l'expression élargit ce qu'une agrégation peut divulguer :
+    « Duchemin Secret » ne doit pas devenir visible par son second mot."""
+    visibles = user_history.corpus_terms(corpus, INDEX_CORPUS, _filtre_acl([]), "secret", 10)
+    assert visibles == []
+
+    avec_droits = user_history.corpus_terms(
+        corpus, INDEX_CORPUS, _filtre_acl(["finance"]), "secret", 10
+    )
+    assert "Duchemin Secret" in [p["text"] for p in avec_droits]
+
+
+@requiert_es
+def test_ce_qui_commence_par_la_saisie_passe_devant(corpus):
+    """« Marc Durand » porte deux documents contre un à « Durand
+    Public » : l'agrégation le rend donc en premier, et c'est le
+    reclassement — pas ES — qui doit remettre dans l'ordre."""
+    propositions = user_history.corpus_terms(corpus, INDEX_CORPUS, _filtre_acl([]), "durand", 10)
+    auteurs = [p["text"] for p in propositions if p["kind"] == "author"]
+    assert auteurs == ["Durand Public", "Marc Durand"]
+
+
 # ── 4. Échappement du préfixe ────────────────────────────────
 
-def test_regex_insensible_a_la_casse_et_ancree_a_la_fin():
-    assert user_history.regex_prefixe("ab") == "[aA][bB].*"
+# Tête de l'expression produite par regex_prefixe() : le match a le droit
+# de commencer après un séparateur interne au terme. Écrite en toutes
+# lettres plutôt qu'importée du module — un test qui relit la constante
+# qu'il vérifie ne vérifie plus rien.
+DEBUT_DE_MOT = r"(.*[ ,;:/'\.\-])?"
+
+
+def test_regex_insensible_a_la_casse_et_ouverte_aux_deux_bouts():
+    assert user_history.regex_prefixe("ab") == DEBUT_DE_MOT + "[aA][bB].*"
 
 
 def test_regex_echappe_les_caracteres_reserves():
     """Sans échappement, ce `.*` collé dans la barre de recherche ferait
     balayer tout le dictionnaire de termes de l'index."""
-    assert user_history.regex_prefixe(".*") == "\\.\\*.*"
-    assert user_history.regex_prefixe("a(b") == "[aA]\\([bB].*"
+    assert user_history.regex_prefixe(".*") == DEBUT_DE_MOT + "\\.\\*.*"
+    assert user_history.regex_prefixe("a(b") == DEBUT_DE_MOT + "[aA]\\([bB].*"
 
 
 def test_regex_borne_la_saisie():
