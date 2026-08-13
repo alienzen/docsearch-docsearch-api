@@ -35,6 +35,8 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | GET  | `/alerts` | Notifications in-app de l'utilisateur (nouveaux résultats détectés par `alert_worker.py`) |
 | POST | `/alerts/{id}/seen`, `/alerts/mark-all-seen` | Marque une/toutes les notifications comme lues |
 | GET  | `/me/searches` | Historique de recherche de l'utilisateur courant (le sien, et rien d'autre) |
+| GET  | `/me/recent-documents` | Derniers documents qu'il a ouverts, relus à travers l'ACL |
+| POST | `/collections/{id}/share`, `.../duplicate` | Partage d'une collection avec ses groupes, et copie |
 | GET  | `/search/suggest` | Suggestions de saisie : ses recherches passées, puis auteurs et mots-clés visibles |
 | GET  | `/searchable-sources` | Sources cherchables, pour la présélection avant recherche |
 | GET/POST/DELETE | `/collections` | Collections de documents personnelles ("📋 Mes collections") |
@@ -180,6 +182,38 @@ Une recherche **sans texte libre** (filtres seuls) n'entre pas dans
 l'historique : elle s'y afficherait comme une ligne vide, et le format
 n'en porte pas de quoi la rejouer — `search_logs` enregistre les critères
 à titre informatif, mais pas les facettes personnalisées des sources SQL.
+
+## Collections partagées et documents récemment consultés
+
+**`GET /me/recent-documents`** relit les clics déjà journalisés (voir
+`POST /click`) pour en tirer les derniers documents ouverts par
+l'appelant. Les identifiants viennent du journal, mais les **documents
+sont relus à travers le filtre ACL** : un document dont les droits ont
+changé depuis la consultation, ou supprimé de l'index, n'est pas rendu.
+Un historique de consultation ne rouvre pas une porte qui s'est fermée.
+
+**`POST /collections/{id}/share`** partage une collection avec des
+groupes (liste vide = retour au personnel). Trois règles :
+
+1. ⚠️ **Partager donne la RÉFÉRENCE, pas le droit de lecture.** Une
+   collection ne stocke que des identifiants ; chaque document est relu
+   par `GET /document/{id}`, qui applique l'ACL. Deux personnes ouvrant
+   la même collection n'y voient donc pas forcément le même nombre de
+   documents — l'interface l'annonce (« 3 documents ne vous sont pas
+   accessibles ») plutôt que de masquer l'écart, sans quoi le
+   propriétaire croit avoir partagé dix documents quand le destinataire
+   en voit sept.
+2. **Seul le propriétaire écrit.** Renommer, ajouter, retirer,
+   supprimer et repartager lui restent réservés — pas de verrouillage à
+   écrire. Le destinataire, lui, **duplique**
+   (`POST /collections/{id}/duplicate`) : la copie lui appartient.
+3. **On ne partage qu'avec un groupe dont on est soi-même membre.** Sans
+   cette borne, le premier usage serait de pousser une collection à
+   toute l'organisation.
+
+Suspendable par `collections_shared_enabled` : désactivé, les
+collections partagées cessent d'apparaître chez leurs destinataires sans
+être modifiées — le réglage se rallume et tout revient.
 
 ## Aide au zéro résultat
 

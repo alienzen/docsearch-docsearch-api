@@ -272,3 +272,50 @@ def test_elasticsearch_accepte_un_prefixe_hostile(corpus):
     ses doigts en tapant une parenthèse."""
     for saisie in ['a(b', 'c[d', 'e"f', 'g\\h', '.*', 'i{2}', 'j~k']:
         assert user_history.corpus_terms(corpus, INDEX_CORPUS, _filtre_acl([]), saisie, 5) == []
+
+
+# ── 5. Documents récemment consultés ─────────────────────────
+#
+# La donnée existe déjà : chaque clic sur un résultat est enregistré en
+# `nested` sous la recherche qui l'a produit (voir POST /click). On ne
+# collecte rien de neuf, on le rend à son auteur.
+
+@pytest.fixture
+def clics(es, journal):
+    """Deux recherches de MOI portant des clics, une d'AUTRE."""
+    es.index(index=INDEX_JOURNAL, document={
+        "username": MOI, "query": "budget", "timestamp": "2026-08-10T09:00:00+00:00",
+        "clicks": [
+            {"doc_id": "doc-ancien", "position": 0, "timestamp": "2026-08-10T09:00:10+00:00"},
+            {"doc_id": "doc-recent", "position": 1, "timestamp": "2026-08-10T09:00:20+00:00"},
+        ],
+    })
+    es.index(index=INDEX_JOURNAL, document={
+        "username": MOI, "query": "budget", "timestamp": "2026-08-11T09:00:00+00:00",
+        "clicks": [
+            {"doc_id": "doc-recent", "position": 0, "timestamp": "2026-08-11T09:00:05+00:00"},
+        ],
+    })
+    es.index(index=INDEX_JOURNAL, document={
+        "username": AUTRE, "query": "dossier", "timestamp": "2026-08-12T09:00:00+00:00",
+        "clicks": [
+            {"doc_id": "doc-de-lautre", "position": 0, "timestamp": "2026-08-12T09:00:05+00:00"},
+        ],
+    })
+    es.indices.refresh(index=INDEX_JOURNAL)
+    return es
+
+
+@requiert_es
+def test_les_documents_consultes_sont_dedoublonnes_et_recents_d_abord(clics):
+    """Un document ouvert deux fois n'apparaît qu'une fois, à la date de
+    la dernière consultation."""
+    assert user_history.recent_documents(clics, MOI, 10) == ["doc-recent", "doc-ancien"]
+
+
+@requiert_es
+def test_les_consultations_des_autres_ne_remontent_pas(clics):
+    """Même cloisonnement que l'historique de recherche : c'est le
+    journal de toute l'installation qui est lu."""
+    assert "doc-de-lautre" not in user_history.recent_documents(clics, MOI, 10)
+    assert user_history.recent_documents(clics, AUTRE, 10) == ["doc-de-lautre"]

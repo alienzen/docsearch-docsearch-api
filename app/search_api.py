@@ -242,6 +242,10 @@ class SavedCollectionDocumentAdd(BaseModel):
     doc_id: str
 
 
+class SavedCollectionSharing(BaseModel):
+    groups: list[str] = []
+
+
 # ── Filtre ACL ───────────────────────────────────────────────
 def build_acl_filter(username: str) -> dict:
     """
@@ -1495,6 +1499,53 @@ def get_my_searches(limit: int = 10, user: str = Depends(current_user)):
         raise HTTPException(status_code=503, detail=f"Historique indisponible : {e}") from e
 
 
+def _require_recent_documents_enabled() -> None:
+    if not ui_config.get_config().get("recent_documents_enabled", False):
+        raise HTTPException(status_code=403, detail="Les documents récemment consultés sont désactivés.")
+
+
+@app.get("/me/recent-documents")
+def get_my_recent_documents(limit: int = 10, user: str = Depends(current_user)):
+    """Les derniers documents que l'utilisateur courant a ouverts.
+
+    ⚠️ Les identifiants viennent du journal, mais les DOCUMENTS sont
+    relus à travers le filtre ACL : un document dont les droits ont
+    changé depuis le clic, ou qui a été supprimé de l'index, disparaît
+    de cette liste. Un historique de consultation ne rouvre pas une
+    porte qui s'est fermée depuis.
+    """
+    _require_recent_documents_enabled()
+    borne = max(1, min(limit, 50))
+    try:
+        identifiants = user_history.recent_documents(es, user, borne)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Historique indisponible : {e}") from e
+    if not identifiants:
+        return {"documents": []}
+
+    try:
+        res = es.search(
+            index=ES_SEARCH_ALIAS,
+            size=len(identifiants),
+            query={"bool": {"filter": [
+                {"ids": {"values": identifiants}},
+                build_acl_filter(user),
+                {"terms": {"source": _searchable_source_names(user)}},
+            ]}},
+            source_excludes=["content", "content_vector"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Documents indisponibles : {e}") from e
+
+    trouves = {h["_id"]: h["_source"] for h in res["hits"]["hits"]}
+    # L'ordre de consultation, pas celui d'Elasticsearch.
+    return {"documents": [
+        {**trouves[identifiant], "id": identifiant}
+        for identifiant in identifiants
+        if identifiant in trouves
+    ]}
+
+
 @app.get("/search/suggest")
 def suggest(q: str = "", limit: int = 8, user: str = Depends(current_user)):
     """Suggestions de saisie : ses propres recherches d'abord, puis les
@@ -1620,6 +1671,21 @@ def purge_alerts(user: str = Depends(current_user)):
 # consultation, plutôt que de ne bloquer que la création (cohérent avec
 # l'intention d'un flag "fonctionnalité désactivée" plutôt que "création
 # désactivée").
+def _groupes_de_partage(username: str) -> list[str]:
+    """Groupes effectifs de l'utilisateur, ou liste vide si le partage de
+    collections est désactivé — auquel cas les collections partagées
+    cessent d'apparaître, sans que celles déjà partagées soient
+    modifiées : le réglage se rallume et tout revient."""
+    if not ui_config.get_config().get("collections_shared_enabled", False):
+        return []
+    return get_effective_groups(username)
+
+
+def _require_collections_shared_enabled() -> None:
+    if not ui_config.get_config().get("collections_shared_enabled", False):
+        raise HTTPException(status_code=403, detail="Le partage de collections est désactivé.")
+
+
 def _require_collections_enabled() -> None:
     if not ui_config.get_config().get("collections_enabled", True):
         raise HTTPException(status_code=403, detail="Les collections de documents sont désactivées.")
@@ -1629,7 +1695,7 @@ def _require_collections_enabled() -> None:
 def get_collections(user: str = Depends(current_user)):
     _require_collections_enabled()
     username = user
-    return saved_collections.list_collections(es, username)
+    return saved_collections.list_collections(es, username, _groupes_de_partage(username))
 
 
 @app.post("/collections")
@@ -1692,6 +1758,56 @@ def remove_collection_document(collection_id: str, doc_id: str, user: str = Depe
     username = user
     try:
         return saved_collections.remove_document(es, username, collection_id, doc_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.post("/collections/{collection_id}/share")
+def share_collection(
+    collection_id: str, body: SavedCollectionSharing, user: str = Depends(current_user),
+):
+    """Partage une collection avec des groupes, ou la repasse en
+    personnel (liste vide).
+
+    ⚠️ Partager donne la RÉFÉRENCE, pas le droit de lecture : chaque
+    document reste relu à travers l'ACL du lecteur. Deux personnes
+    ouvrant la même collection n'y voient donc pas forcément le même
+    nombre de documents, et l'interface le dit plutôt que de masquer
+    l'écart.
+
+    On ne partage qu'avec un groupe dont on est soi-même membre — sans
+    cette borne, le premier usage serait de s'adresser à toute
+    l'organisation.
+    """
+    _require_collections_enabled()
+    _require_collections_shared_enabled()
+    username = user
+    try:
+        return saved_collections.set_sharing(
+            es, username, collection_id, body.groups, get_effective_groups(username),
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from None
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.post("/collections/{collection_id}/duplicate")
+def duplicate_collection(collection_id: str, user: str = Depends(current_user)):
+    """Recopie dans ses propres collections une collection visible.
+
+    C'est la porte de sortie du destinataire : il ne modifie pas la
+    collection d'un autre, il s'en fait une copie."""
+    _require_collections_enabled()
+    username = user
+    try:
+        return saved_collections.duplicate_collection(
+            es, username, collection_id, _groupes_de_partage(username),
+        )
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e)) from None
     except RuntimeError as e:
@@ -2923,6 +3039,8 @@ class UiConfigUpdate(BaseModel):
     alerts_enabled:      bool | None = None
     search_history_enabled: bool | None = None
     autocomplete_enabled: bool | None = None
+    recent_documents_enabled: bool | None = None
+    collections_shared_enabled: bool | None = None
     sort_enabled:        bool | None = None
     search_time_enabled: bool | None = None
     acl_visible_enabled: bool | None = None
@@ -3024,6 +3142,10 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("search_history_enabled", body.search_history_enabled)
         if body.autocomplete_enabled is not None:
             config = ui_config.set_param("autocomplete_enabled", body.autocomplete_enabled)
+        if body.recent_documents_enabled is not None:
+            config = ui_config.set_param("recent_documents_enabled", body.recent_documents_enabled)
+        if body.collections_shared_enabled is not None:
+            config = ui_config.set_param("collections_shared_enabled", body.collections_shared_enabled)
         if body.sort_enabled is not None:
             config = ui_config.set_param("sort_enabled", body.sort_enabled)
         if body.search_time_enabled is not None:

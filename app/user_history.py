@@ -93,6 +93,43 @@ def recent_queries(es, username: str, limit: int = 10) -> list[dict]:
     ]
 
 
+def recent_documents(es, username: str, limit: int = 10) -> list[str]:
+    """Identifiants des derniers documents que CET utilisateur a ouverts,
+    du plus récent au plus ancien, sans doublon.
+
+    Aucune collecte nouvelle : les clics sont enregistrés depuis toujours
+    dans `search_logs`, en `nested` sous chaque recherche (voir
+    `POST /click`). On ne fait que les relire pour leur auteur.
+
+    ⚠️ Ne rend que des IDENTIFIANTS. C'est l'appelant qui relit les
+    documents à travers le filtre ACL : un document dont les droits ont
+    changé depuis le clic, ou qui a été supprimé, ne doit pas
+    réapparaître ici sous prétexte qu'il a été consulté un jour.
+    """
+    res = es.search(
+        index=search_log.SEARCH_LOG_INDEX,
+        size=0,
+        query={"bool": {"filter": [{"term": {"username": username}}]}},
+        aggs={
+            "clics": {
+                "nested": {"path": "clicks"},
+                "aggs": {
+                    "documents": {
+                        "terms": {
+                            "field": "clicks.doc_id",
+                            "size": limit,
+                            "order": {"dernier": "desc"},
+                        },
+                        "aggs": {"dernier": {"max": {"field": "clicks.timestamp"}}},
+                    }
+                },
+            }
+        },
+    )
+    buckets = res["aggregations"]["clics"]["documents"]["buckets"]
+    return [bucket["key"] for bucket in buckets]
+
+
 def matching_queries(es, username: str, prefix: str, limit: int = 5) -> list[dict]:
     """Ses recherches passées qui correspondent à ce qu'il tape.
 

@@ -66,6 +66,19 @@ DEFAULT_UI_CONFIG = {
                                     # recherche. Désactivé, la route renvoie 403. False par défaut
                                     # pour la même raison que search_time_enabled ci-dessous : elle
                                     # AJOUTE un élément à l'écran, elle ne masque rien d'existant.
+    "recent_documents_enabled": False,  # « Vos derniers documents consultés » sur l'écran
+                                    # d'accueil de la recherche (GET /me/recent-documents).
+                                    # Lit les clics déjà enregistrés dans search_logs ; chaque
+                                    # document est ensuite RELU à travers l'ACL, un droit retiré
+                                    # depuis la consultation le faisant disparaître. False par
+                                    # défaut, comme les deux bascules voisines : elle ajoute un
+                                    # élément à l'écran.
+    "collections_shared_enabled": False,  # partage d'une collection avec un ou plusieurs groupes
+                                    # (POST /collections/{id}/share). Désactivé, les collections
+                                    # déjà partagées cessent d'apparaître chez leurs destinataires
+                                    # sans être modifiées — le réglage se rallume et tout revient.
+                                    # Partager donne la RÉFÉRENCE, jamais le droit de lecture :
+                                    # chaque document reste filtré par l'ACL de son lecteur.
     "autocomplete_enabled": False,  # suggestions sous la barre de recherche (GET /suggest) : les
                                     # recherches passées de l'utilisateur, puis les auteurs et
                                     # mots-clés du corpus qu'il a le droit de voir. Désactivé, la
@@ -77,11 +90,12 @@ DEFAULT_UI_CONFIG = {
     "search_time_enabled": False,  # affichage du temps de recherche à côté du décompte de
                                     # résultats, et bouton qui permet à chacun de le masquer
                                     # (la préférence est ensuite retenue par poste, côté
-                                    # navigateur). SEUL flag de ce fichier à valoir False par
-                                    # défaut, et c'est délibéré : tous les autres masquent une
-                                    # fonctionnalité qui existait déjà, alors que celui-ci
-                                    # AJOUTERAIT une information sur l'écran de tous les
-                                    # utilisateurs sans que personne l'ait demandée. Ne le
+                                    # navigateur). PREMIER flag de ce fichier à avoir valu False
+                                    # par défaut, et il a fait règle depuis (voir les quatre
+                                    # ci-dessus) : un flag qui MASQUE une fonctionnalité déjà
+                                    # présente démarre à True, un flag qui en AJOUTE une sur
+                                    # l'écran de tous les utilisateurs démarre à False, et
+                                    # s'allume à la demande d'un administrateur. Ne le
                                     # "corrigez" pas vers True par souci d'uniformité.
                                     # N'influe que sur l'affichage : la mesure, la ligne de
                                     # journal des recherches lentes et l'enregistrement dans
