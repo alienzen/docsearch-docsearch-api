@@ -194,6 +194,12 @@ class SearchQuery(BaseModel):
     keywords:        str | list[str] | None = None   # sélection cumulative, comme extension/author/folder/source
     source:          str | list[str] | None = None   # nom(s) de source (file_sources_config.py) — absent = recherche fédérée sur toutes
     search_in:       str = "all"   # "all" | "title" | "author" | "keywords" | "filepath" — restreint le champ interrogé
+    # Recherche exacte : les mots sont cherchés tels qu'écrits, sans
+    # racinisation ni synonymes ni tolérance aux fautes — mais toujours
+    # aux accents et à la casse près (« Congrès » = « CONGRES »). Se
+    # combine avec les guillemets, qui restent la façon d'exiger en plus
+    # l'ordre et l'adjacence des mots (voir build_text_clause).
+    exact:           bool = False
     # Facettes personnalisées par source SQL (voir sql_sources_config.py:
     # FieldMapping.facet) — {es_field: [valeurs sélectionnées]}, sélection
     # cumulative comme les autres facettes. Les clés qui ne correspondent
@@ -214,6 +220,11 @@ class SavedSearchCreate(BaseModel):
     name:      str
     query:     str
     search_in: str = "all"
+    # Rejoué tel quel par la vérification d'alertes (voir
+    # build_query_clauses) : une recherche exacte enregistrée avec une
+    # alerte doit notifier sur les mêmes documents qu'elle affiche, et
+    # oublier ce critère ici la ferait notifier bien plus large.
+    exact:     bool = False
     ext:       str | list[str] = "all"
     author:    str | list[str] | None = None
     folder:    str | list[str] | None = None
@@ -619,6 +630,7 @@ def _journaliser_temps(
     username: str,
     took_ms: int | None,
     duration_ms: float,
+    exact: bool = False,
 ) -> None:
     """Trace le temps d'une recherche dans le journal du service.
 
@@ -627,15 +639,22 @@ def _journaliser_temps(
     la DÉCISION d'écrire ou non, et c'est elle qui doit être testée.
 
     Au-delà de SLOW_SEARCH_MS, une ligne WARNING avec de quoi rejouer le
-    cas (requête, champ, volume, utilisateur). En deçà, une ligne DEBUG,
-    muette en exploitation normale, qui permet d'observer une période
-    précise en abaissant LOG_LEVEL sans redéployer quoi que ce soit.
+    cas (requête, champ, mode, volume, utilisateur). En deçà, une ligne
+    DEBUG, muette en exploitation normale, qui permet d'observer une
+    période précise en abaissant LOG_LEVEL sans redéployer quoi que ce
+    soit.
+
+    `exact` figure dans la trace parce qu'il change les champs
+    interrogés (`.exact` au lieu des champs ordinaires) : sans lui, deux
+    lignes rigoureusement identiques pourraient décrire deux requêtes ES
+    différentes, et « pourquoi celle-ci est-elle lente » n'aurait pas de
+    réponse dans le journal.
     """
     if SLOW_SEARCH_MS and duration_ms >= SLOW_SEARCH_MS:
         logger.warning(
             f"[search] Recherche lente : {duration_ms} ms (moteur {took_ms} ms) "
-            f"pour '{query}' (search_in={search_in}, {total} résultats, "
-            f"utilisateur {username})"
+            f"pour '{query}' (search_in={search_in}, exact={exact}, "
+            f"{total} résultats, utilisateur {username})"
         )
     else:
         logger.debug(
@@ -856,45 +875,27 @@ def search(
     username   = user
     acl_filter = build_acl_filter(username)
 
-    # Champs et poids : source unique dans search_query.field_sets(),
-    # partagée avec la vérification d'alertes. Les poids étant réglables
-    # depuis l'administration, une copie littérale ici divergerait du
-    # classement affiché dès le premier réglage.
-    sets = search_query.field_sets()
-    fields = sets.get(req.search_in, sets["all"])
-
-    # Convention habituelle des moteurs de recherche : entourer les
-    # termes de guillemets ("terme exact") force une correspondance
-    # exacte (type "phrase" — ordre et adjacence des mots respectés,
-    # sans tolérance aux fautes de frappe), plutôt que la recherche
-    # floue par défaut (fuzziness "AUTO", qui tolère les variantes).
+    # Champs, poids et clause de texte : source unique dans
+    # search_query.py, partagée avec l'export et la vérification
+    # d'alertes. Les poids étant réglables depuis l'administration, une
+    # copie littérale ici divergerait du classement affiché dès le
+    # premier réglage — et la même remarque vaut désormais pour les
+    # règles de guillemets/flou/exactitude.
+    #
+    # Une requête vide (champ de recherche vide mais filtres actifs — ex:
+    # syntaxe avancée "auteur:...", "type:..." utilisée seule) y donne un
+    # match_all : les filtres ci-dessous restent alors seuls responsables
+    # de la restriction.
     query_text = req.query.strip()
-    is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
+    is_exact_phrase = search_query.est_phrase(query_text)
+    must = [search_query.build_text_clause(query_text, req.search_in, req.exact)]
 
-    if not query_text:
-        # Champ de recherche vide mais des filtres actifs (ex: syntaxe
-        # avancée "auteur:...", "type:...", "source:...", "dossier:..."
-        # utilisée seule, sans texte libre — voir index.html,
-        # parseAdvancedQuery()) : matche tous les documents, les filtres
-        # ci-dessous restent seuls responsables de la restriction.
-        must = [{"match_all": {}}]
-    elif is_exact_phrase:
-        phrase = query_text[1:-1].strip()
-        must = [{
-            "multi_match": {
-                "query":  phrase,
-                "fields": fields,
-                "type":   "phrase",
-            }
-        }]
-    else:
-        must = [{
-            "multi_match": {
-                "query":     query_text,
-                "fields":    fields,
-                "fuzziness": "AUTO",
-            }
-        }]
+    # Même jeu de champs que la clause ci-dessus (d'où le même `exact`) :
+    # l'aide au zéro résultat compte des résultats qu'elle propose ensuite
+    # d'aller voir, et annoncer « 12 résultats sans ce filtre » sur des
+    # champs que la recherche n'interroge pas mènerait à un écran vide.
+    sets = search_query.field_sets(exact=req.exact)
+    fields = sets.get(req.search_in, sets["all"])
 
     # Filtres "de base" : toujours appliqués, jamais concernés par
     # l'exclusion décrite ci-dessous (ACL, pièces jointes, période,
@@ -1051,6 +1052,17 @@ def search(
                         "fragment_size": 200,
                         "number_of_fragments": 2,
                         "max_analyzed_offset": 1000000,
+                        # En recherche exacte, la clause vise
+                        # `content.exact` et non `content` : sans ceci, ES
+                        # n'y reconnaît aucun terme à surligner et rend
+                        # des extraits sans la moindre marque — le
+                        # résultat semble alors sans rapport avec ce qui a
+                        # été cherché. Posé UNIQUEMENT dans ce cas :
+                        # l'activer partout ferait aussi surligner dans le
+                        # corps les termes trouvés via le titre ou
+                        # l'auteur, ce qui change le rendu de toutes les
+                        # recherches ordinaires sans qu'on l'ait demandé.
+                        **({"require_field_match": False} if req.exact else {}),
                     }
                 },
                 # Sans ceci, ES utilise ses balises par défaut (<em>...</em>),
@@ -1123,6 +1135,7 @@ def search(
     _journaliser_temps(
         query=req.query,
         search_in=req.search_in,
+        exact=req.exact,
         total=total,
         username=username,
         took_ms=took_ms,
@@ -1248,24 +1261,12 @@ def _build_search_query(req: SearchQuery, username: str) -> dict:
     à /search, sans objet pour un export).
     """
     acl_filter = build_acl_filter(username)
-    # Champs et poids : source unique dans search_query.field_sets(),
-    # partagée avec la vérification d'alertes. Les poids étant réglables
-    # depuis l'administration, une copie littérale ici divergerait du
-    # classement affiché dès le premier réglage.
-    sets = search_query.field_sets()
-    fields = sets.get(req.search_in, sets["all"])
-
-    query_text = req.query.strip()
-    is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
-    if not query_text:
-        # Voir le commentaire équivalent dans /search — champ vide + filtres
-        # actifs (syntaxe avancée seule) doit matcher tout, pas rien.
-        must = [{"match_all": {}}]
-    elif is_exact_phrase:
-        phrase = query_text[1:-1].strip()
-        must = [{"multi_match": {"query": phrase, "fields": fields, "type": "phrase"}}]
-    else:
-        must = [{"multi_match": {"query": query_text, "fields": fields, "fuzziness": "AUTO"}}]
+    # Champs, poids et règles de guillemets/flou/exactitude : source
+    # unique dans search_query.py, partagée avec /search et la
+    # vérification d'alertes. Une copie littérale ici divergerait du
+    # classement affiché dès le premier réglage des poids depuis
+    # l'administration — un export doit contenir ce que l'écran montrait.
+    must = [search_query.build_text_clause(req.query.strip(), req.search_in, req.exact)]
 
     filters = [acl_filter, {"terms": {"source": _searchable_source_names(username)}}]
     if req.has_attachments:
@@ -1417,6 +1418,10 @@ def export_search_results(req: SearchExportQuery, user: str = Depends(current_us
                     "fragment_size": 200,
                     "number_of_fragments": 2,
                     "max_analyzed_offset": 1000000,
+                    # Voir le commentaire équivalent dans /search : sans
+                    # ceci, la colonne « extrait » de l'export serait vide
+                    # sur toute recherche exacte.
+                    **({"require_field_match": False} if req.exact else {}),
                 }},
                 # Pas de balises de surlignage ici (texte brut pour un export,
                 # contrairement à /search qui les affiche en HTML).

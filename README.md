@@ -57,11 +57,37 @@ est recommandé partout où cette maquette pourrait passer pour une
 fonctionnalité réelle. Voir `docsearch-infra/FEATURES.md` et
 `docsearch-infra/PLAN-EVOLUTIONS.md` (§5, en attente d'arbitrage).
 
-**Recherche exacte** : entourer la requête de guillemets (`"terme exact"`)
-force une correspondance de phrase exacte (ordre et adjacence des mots
-respectés, sans tolérance aux fautes de frappe), au lieu de la
+**Recherche de phrase** : entourer la requête de guillemets
+(`"terme exact"`) force une correspondance de phrase (ordre et adjacence
+des mots respectés, sans tolérance aux fautes de frappe), au lieu de la
 recherche floue par défaut (`fuzziness: "AUTO"`, qui tolère les
 variantes et fautes de frappe).
+
+**Recherche exacte** : `exact: true` (booléen, `false` par défaut)
+interroge les sous-champs `.exact` au lieu des champs ordinaires. Ces
+sous-champs sont analysés sans racinisation, sans mots vides et sans
+synonymes, mais avec `lowercase` + `asciifolding` : `Congrès`,
+`congres` et `CONGRES` sont une seule et même requête, tandis que
+`délégations` cesse de répondre à `délégation`. La tolérance aux fautes
+est désactivée — elle rattraperait précisément les écarts que ce mode
+sert à conserver.
+
+⚠️ **Les deux dimensions sont indépendantes et se combinent.** Les
+guillemets portent sur l'enchaînement des mots (« dans cet ordre »),
+`exact` sur la façon dont chaque mot est comparé (« tel qu'écrit ») :
+les quatre combinaisons ont un sens. Côté interface, `exact` est porté
+par une case à cocher près de la barre de recherche et par l'opérateur
+`exact:` de la syntaxe avancée, qui produisent le même critère.
+
+⚠️ **Les sous-champs `.exact` n'existent que sur les index migrés.** Un
+`multi_match` visant un champ absent du mapping ne lève aucune erreur :
+il ne matche rien. Une source qui n'a pas reçu
+`./manage.sh migrer-exact --apply` est donc **silencieusement muette**
+en recherche exacte, sans le moindre signal dans les journaux. La
+migration couvre les trois familles d'index (fichiers, SQL, web), pose
+l'analyseur (fermeture/réouverture de l'index, quelques secondes) et
+réécrit sur place les documents déjà indexés (`_update_by_query`, sans
+Tika ni relecture disque, lancé en tâche de fond côté Elasticsearch).
 
 **Recherche restreinte à un champ** : `search_in` (`"all"` par défaut,
 `"title"`, `"author"` ou `"filepath"`) limite la recherche en texte

@@ -28,7 +28,7 @@ import web_sources_config
 import runtime_config
 
 
-def field_sets() -> dict:
+def field_sets(exact: bool = False) -> dict:
     """Champs interrogés par `search_in`, avec leurs poids.
 
     SOURCE UNIQUE des trois points d'usage — /search et l'export dans
@@ -45,24 +45,89 @@ def field_sets() -> dict:
     analysé `author.text` et non `author`, en keyword — non tokenisé, une
     recherche en texte libre dessus ne matcherait jamais un nom partiel
     comme « Dupont » contre « Martin Dupont ».
+
+    `exact=True` bascule sur les sous-champs `.exact` (voir CHAMP_EXACT
+    dans docsearch-ingestion/app/indexer.py) : même texte, analysé sans
+    racinisation, sans mots vides et sans synonymes, mais toujours en
+    minuscules et sans accents. Les POIDS sont les mêmes des deux côtés :
+    ils disent qu'un mot trouvé dans un titre compte plus que dans le
+    corps, ce qui ne dépend pas de la façon dont le texte est analysé.
+
+    ⚠️ Un `multi_match` sur un champ absent du mapping ne lève AUCUNE
+    erreur — il ne matche rien. Un index qui n'a pas reçu la migration
+    (`./manage.sh migrer-exact --apply`) est donc simplement muet en
+    recherche exacte, sans le moindre signal.
     """
     cfg = runtime_config.get_runtime_config()
     filename = cfg.get("search_boost_filename", 6)
     title = cfg.get("search_boost_title", 4)
     keywords = cfg.get("search_boost_keywords", 2)
+
+    def champ(nom: str, ordinaire: str, poids=None) -> str:
+        base = f"{nom}.exact" if exact else ordinaire
+        return f"{base}^{poids}" if poids else base
+
     return {
         "all": [
-            "content",
-            f"title^{title}",
-            f"filename^{filename}",
-            "author.text",
-            f"keywords.text^{keywords}",
+            champ("content",  "content"),
+            champ("title",    "title",         title),
+            champ("filename", "filename",      filename),
+            champ("author",   "author.text"),
+            champ("keywords", "keywords.text", keywords),
         ],
-        "title":    ["title"],
-        "author":   ["author.text"],
-        "keywords": ["keywords.text"],
-        "filepath": ["filepath.text"],
+        "title":    [champ("title",    "title")],
+        "author":   [champ("author",   "author.text")],
+        "keywords": [champ("keywords", "keywords.text")],
+        "filepath": [champ("filepath", "filepath.text")],
     }
+
+
+def est_phrase(query_text: str) -> bool:
+    """Vrai si la requête est encadrée de guillemets, donc à chercher
+    comme une phrase (ordre et adjacence des mots respectés).
+
+    Une seule définition pour les trois points d'usage, l'aide au zéro
+    résultat comprise : c'est elle qui décide si les guillemets doivent
+    être retirés avant d'afficher la requête à l'utilisateur.
+    """
+    return len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
+
+
+def build_text_clause(query_text: str, search_in: str = "all", exact: bool = False) -> dict:
+    """Clause `must` du texte libre — source unique de /search, de
+    l'export et de la vérification d'alertes.
+
+    Deux dimensions INDÉPENDANTES s'y croisent, et les confondre est
+    l'erreur naturelle :
+
+    - les **guillemets** disent « ces mots, dans cet ordre » (adjacence) ;
+    - le mode **exact** dit « ces mots, tels qu'écrits » (pas de
+      racinisation, pas de synonymes, pas de tolérance aux fautes).
+
+    On peut donc vouloir l'un sans l'autre, et les quatre combinaisons
+    ont un sens. En particulier `exact` sans guillemets reste une
+    recherche en OU sur les mots, comme la recherche ordinaire : ce qui
+    change est la façon dont chaque mot est comparé, pas le nombre de
+    mots exigés.
+
+    La tolérance aux fautes (`fuzziness`) est incompatible avec les deux :
+    une recherche exacte qui rattraperait les fautes de frappe ne serait
+    exacte pour personne.
+    """
+    sets = field_sets(exact=exact)
+    fields = sets.get(search_in, sets["all"])
+
+    if not query_text:
+        return {"match_all": {}}
+    if est_phrase(query_text):
+        return {"multi_match": {
+            "query":  query_text[1:-1].strip(),
+            "fields": fields,
+            "type":   "phrase",
+        }}
+    if exact:
+        return {"multi_match": {"query": query_text, "fields": fields}}
+    return {"multi_match": {"query": query_text, "fields": fields, "fuzziness": "AUTO"}}
 
 
 def build_acl_filter(username: str) -> dict:
@@ -193,29 +258,11 @@ def build_query_clauses(criteria: dict, username: str) -> dict:
     vérification.
     """
     query_text = (criteria.get("query") or "").strip()
-    search_in = criteria.get("search_in") or "all"
-    sets = field_sets()
-    fields = sets.get(search_in, sets["all"])
-
-    is_exact_phrase = len(query_text) >= 2 and query_text.startswith('"') and query_text.endswith('"')
-    if not query_text:
-        must = [{"match_all": {}}]
-    elif is_exact_phrase:
-        must = [{
-            "multi_match": {
-                "query":  query_text[1:-1].strip(),
-                "fields": fields,
-                "type":   "phrase",
-            }
-        }]
-    else:
-        must = [{
-            "multi_match": {
-                "query":     query_text,
-                "fields":    fields,
-                "fuzziness": "AUTO",
-            }
-        }]
+    must = [build_text_clause(
+        query_text,
+        criteria.get("search_in") or "all",
+        bool(criteria.get("exact")),
+    )]
 
     filters = [
         build_acl_filter(username),
