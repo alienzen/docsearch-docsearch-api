@@ -12,14 +12,19 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install ruff==0.16.2
-      - run: ruff check app/ --output-format=github
+      # tests/ en plus de app/ : ruff.toml couvre les deux depuis le
+      # 2026-08-12 (avec ses per-file-ignores pour les assertions), la CI
+      # ne regardait que app/.
+      - run: ruff check app/ tests/ --output-format=github
 
   test:
     runs-on: ubuntu-latest
-    # Redis réel : les sessions et les compteurs de tentatives n'ont aucun
-    # sens simulés (voir tests/conftest.py). L'annuaire LDAP et le KDC,
-    # eux, n'existent pas ici — les tests qui les exigent se sautent
-    # proprement par leurs marqueurs `requires_ldap` / `requires_kerberos`.
+    # Redis ET Elasticsearch réels : les sessions, les compteurs de
+    # tentatives, le correcteur orthographique et les agrégations n'ont
+    # aucun sens simulés (principe 1 de tests/conftest.py). L'annuaire LDAP
+    # et le KDC, eux, n'existent pas ici — les tests qui les exigent se
+    # sautent proprement par leurs marqueurs `requires_ldap` /
+    # `requires_kerberos`.
     services:
       redis:
         image: redis:7-alpine
@@ -29,11 +34,45 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 5
+
+      # Ajouté le 2026-08-13, avec ce qu'il fallait pour qu'il serve : les
+      # 48 tests répartis sur 7 fichiers (historique utilisateur, zéro
+      # résultat, rétention, synonymes, épinglés, écritures bloquées,
+      # temps de recherche) qui l'exigent faisaient échouer ce job depuis
+      # le 2026-08-12. Ils SAUTENT désormais proprement quand
+      # Elasticsearch manque (voir pytest_collection_modifyitems dans
+      # tests/conftest.py) — mais un job qui saute un cinquième de la
+      # suite ne prouve pas grand-chose, d'où ce service.
+      #
+      # Même version que la VM de dev et que la production (voir
+      # docsearch-infra/quadlet/dev/docsearch-es01.container) : un
+      # correcteur orthographique et des agrégations valident mal sur une
+      # autre version majeure.
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:9.4.3
+        ports: ["9200:9200"]
+        env:
+          discovery.type: single-node
+          # HTTP en clair : les tests parlent à http://127.0.0.1:9200. La
+          # sécurité est active par défaut depuis la 8.x, et la laisser
+          # imposerait mot de passe et certificat pour un cluster jetable
+          # qui vit le temps d'un job.
+          xpack.security.enabled: "false"
+          # Le runner GitHub est à vm.max_map_count=65530, très en dessous
+          # des 262144 attendus par le stockage mmap — et une `services:`
+          # démarre avant le premier `run:`, donc avant tout sysctl qu'on
+          # pourrait poser. On désactive mmap plutôt que de tenter de
+          # régler l'hôte : sur un index de sonde, le coût est nul.
+          node.store.allow_mmap: "false"
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        options: >-
+          --health-cmd "curl -fs http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
     env:
       REDIS_HOST: 127.0.0.1
-      # Elasticsearch n'est pas démarré : le journal des connexions échoue
-      # à écrire et le dit en warning, sans jamais faire échouer une
-      # connexion — c'est précisément ce que vérifie l'un des tests.
       ES_HOST: http://127.0.0.1:9200
     steps:
       - uses: actions/checkout@v4
@@ -43,8 +82,25 @@ jobs:
       # paquets que dans le Dockerfile. Sans eux, `pip install` échoue sur
       # cette seule ligne de requirements.txt.
       - run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
-      - run: pip install -r requirements.txt pytest
-      - run: python -m pytest
+      # requirements-dev.txt plutôt que `requirements.txt pytest` : il
+      # tire déjà requirements.txt, et les versions de l'outillage de
+      # test n'existent qu'à un seul endroit.
+      - run: pip install -r requirements-dev.txt
+      # Seuil et périmètre de la couverture dans .coveragerc — pytest-cov
+      # sort en échec tout seul sous le seuil. Le rapport XML est là pour
+      # être relu après coup, pas pour être envoyé quelque part : la
+      # production est hors ligne, aucun service de couverture externe.
+      - run: python -m pytest --cov --cov-report=term-missing --cov-report=xml
+
+      # Conservé même quand le job échoue : c'est ce rapport qui dit
+      # QUEL module a perdu sa couverture quand le seuil saute.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: couverture-api
+          path: coverage.xml
+          retention-days: 14
+          if-no-files-found: ignore
 
   build:
     runs-on: ubuntu-latest

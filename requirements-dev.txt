@@ -7,10 +7,18 @@
 -r requirements.txt
 
 # Linter. Configuration et justification des règles dans ruff.toml.
-# Ce venv porte aussi ruff pour docsearch-ingestion, qui n'en a pas :
-# c'est un binaire autonome, il n'importe pas le code qu'il analyse.
+# Ce venv porte aussi le ruff de docsearch-ingestion : c'est un binaire
+# autonome, il n'importe pas le code qu'il analyse. Ce dépôt-là a
+# désormais son propre ruff.toml, aligné sur celui d'ici.
 #
 # Même version que celle épinglée dans .github/workflows/ci.yml : un
 # linter dont la version flotte finit par échouer en CI sur une règle que
 # personne n'a choisie.
 ruff==0.16.2
+
+# Tests et couverture. Bornes minimales et non versions exactes, à
+# l'inverse de ruff ci-dessus : le résultat d'un test ne dépend pas de la
+# version de pytest comme celui du linter dépend de la sienne. Les seuils
+# de couverture sont dans .coveragerc.
+pytest>=9.1
+pytest-cov>=7.1

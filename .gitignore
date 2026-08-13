@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+.ruff_cache/
+
+# Couverture (pytest --cov, voir .coveragerc)
+.coverage
+htmlcov/
+coverage.xml

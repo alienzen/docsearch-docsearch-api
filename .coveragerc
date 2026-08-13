@@ -1,0 +1,56 @@
+# ── docsearch-api — couverture de tests ──────────────────────
+# Configuration posée le 2026-08-13. Outillage : pytest-cov, voir
+# requirements-dev.txt.
+#
+#   .venv/bin/python -m pytest --cov          # chiffres + seuil
+#   .venv/bin/python -m pytest                # suite seule, sans mesure
+#
+# `--cov` n'est PAS dans les addopts de pytest.ini : la mesure ralentit
+# chaque exécution, et tout le monde ne veut pas la payer pour lancer un
+# fichier de tests. On la demande quand on la veut ; la CI la demande
+# toujours.
+
+[run]
+source = app
+branch = true
+omit =
+    # Script à lancer à la main pour un rattrapage ponctuel de groupes,
+    # jamais importé par l'API en fonctionnement.
+    app/backfill_groups.py
+
+[report]
+show_missing = true
+skip_covered = true
+exclude_also =
+    # Blocs de démarrage : `python search_api.py` n'est pas le chemin de
+    # production (uvicorn importe l'application).
+    if __name__ == .__main__.:
+    # Branches réservées à la vérification de types, sans exécution.
+    if TYPE_CHECKING:
+
+# ── Le seuil ─────────────────────────────────────────────────
+# Un cliquet, pas un objectif : il interdit de PERDRE de la couverture,
+# il n'oblige à en gagner nulle part. On le relève quand la mesure monte
+# durablement — jamais on ne le baisse en silence.
+#
+# Mesure du 2026-08-13, suite complète, Redis ET Elasticsearch joignables :
+# 42,6 % (218 tests passés, 9 sautés, ~60 s). Seuil posé un peu plus de
+# deux points en dessous pour absorber le bruit.
+#
+#   .venv/bin/python -m pytest --cov
+#
+# Ce chiffre suppose Redis joignable, ce dont tests/conftest.py se charge
+# depuis le commit ea3e0fa (os.environ.setdefault avant l'import de
+# `auth`). Avant lui, les tests marqués requires_redis se sautaient en
+# silence et la mesure aurait été très en dessous.
+#
+# ⚠️  Ce seuil suppose que les tests qui exigent Elasticsearch TOURNENT.
+# Ils sont 48, répartis sur 7 fichiers (historique utilisateur, zéro
+# résultat, rétention, synonymes, épinglés, écritures bloquées, temps de
+# recherche), tous nés des évolutions du 2026-08-12, et aucun ne porte de
+# marqueur de saut comparable à `requires_ldap`. Sans Elasticsearch ils
+# tombent en ERREUR, la couverture s'effondre bien sous ce seuil — et le
+# workflow, qui ne déclare aujourd'hui qu'un service Redis, est dans ce
+# cas. À corriger côté .github/workflows/ci.yml (service Elasticsearch)
+# avant que ce cliquet ne veuille dire quelque chose en CI.
+fail_under = 40
