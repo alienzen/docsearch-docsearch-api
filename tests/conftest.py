@@ -127,23 +127,73 @@ def _ldap_reachable() -> bool:
         return False
 
 
-@pytest.fixture(autouse=True)
-def _skip_by_marker(request):
-    if request.node.get_closest_marker("requires_redis") and not _redis_reachable():
-        pytest.skip("Redis injoignable")
-    if request.node.get_closest_marker("requires_elasticsearch") and not _elasticsearch_reachable():
-        pytest.skip("Elasticsearch injoignable")
-    if request.node.get_closest_marker("requires_ldap"):
+def _raison_de_sauter(marqueur: str) -> str | None:
+    """Raison de sauter les tests portant `marqueur`, ou None s'ils peuvent
+    tourner."""
+    if marqueur == "requires_redis":
+        return None if _redis_reachable() else "Redis injoignable"
+
+    if marqueur == "requires_elasticsearch":
+        return None if _elasticsearch_reachable() else "Elasticsearch injoignable"
+
+    if marqueur == "requires_ldap":
         if not (LDAP_DEV["LDAP_PASS"] and LDAP_PASSWORD):
-            pytest.skip(
+            return (
                 "Mots de passe de l'annuaire de test absents — exporter "
                 "DOCSEARCH_TEST_LDAP_BIND_PASSWORD et "
                 "DOCSEARCH_TEST_LDAP_USER_PASSWORD (voir l'en-tête de ce fichier)"
             )
         if not _ldap_reachable():
-            pytest.skip("Annuaire de dev injoignable (~/ldap-test-stack)")
-    if request.node.get_closest_marker("requires_kerberos"):
-        pytest.skip("Aucun KDC sur cette VM — voir PLAN-AUTH-SSO.md, « À trancher »")
+            return "Annuaire de dev injoignable (~/ldap-test-stack)"
+        return None
+
+    if marqueur == "requires_kerberos":
+        return "Aucun KDC sur cette VM — voir PLAN-AUTH-SSO.md, « À trancher »"
+
+    raise AssertionError(f"Marqueur de dépendance inconnu : {marqueur}")
+
+
+# Ordre significatif : c'est la PREMIÈRE dépendance manquante qui donne sa
+# raison au saut, comme le faisait la cascade de `if` qui précédait.
+MARQUEURS_DE_DEPENDANCE = (
+    "requires_redis",
+    "requires_elasticsearch",
+    "requires_ldap",
+    "requires_kerberos",
+)
+
+
+def pytest_collection_modifyitems(items):
+    """Marque « à sauter », dès la collecte, les tests dont la dépendance
+    n'est pas là.
+
+    ⚠️  À la COLLECTE, et non dans une fixture autouse comme jusqu'au
+    2026-08-13 : une fixture, quoi qu'elle fasse, est de portée `function`,
+    donc construite APRÈS les fixtures de portée `module` ou `session` du
+    test. Or ce sont justement celles-là qui ouvrent les connexions —
+    l'`es` de test_zero_resultat.py, par exemple. Le saut arrivait trop
+    tard : la connexion avait déjà échoué, et pytest comptait une ERREUR
+    de fixture là où on avait écrit un saut. 48 tests sur 7 fichiers
+    étaient dans ce cas dès qu'Elasticsearch manquait, ce qui rendait la
+    suite inutilisable sans lui — et rouge en CI, qui ne le démarrait pas.
+    `pytest_collection_modifyitems` s'exécute avant toute fixture, quelle
+    que soit sa portée.
+
+    Effet de bord bienvenu : chaque dépendance n'est sondée qu'UNE fois par
+    exécution, et seulement si un test collecté la réclame. La fixture, elle,
+    rouvrait une connexion à chaque test — 29 allers-retours pour le seul
+    `requires_redis`.
+    """
+    raisons: dict[str, str | None] = {}
+    for item in items:
+        for marqueur in MARQUEURS_DE_DEPENDANCE:
+            if item.get_closest_marker(marqueur) is None:
+                continue
+            if marqueur not in raisons:
+                raisons[marqueur] = _raison_de_sauter(marqueur)
+            if raisons[marqueur] is not None:
+                item.add_marker(pytest.mark.skip(reason=raisons[marqueur]))
+                break
 
 
 @pytest.fixture(scope="session")
