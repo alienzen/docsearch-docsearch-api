@@ -983,6 +983,54 @@ def _extraits(hit: dict) -> list[str]:
     return surlignage.get("content") or surlignage.get("content.exact") or []
 
 
+def _verifier_shards(res: dict, contexte: str) -> None:
+    """Refuse une réponse Elasticsearch PARTIELLE plutôt que de la lire
+    comme un résultat.
+
+    ES n'échoue pas quand une partie seulement des shards interrogés
+    échoue : `allow_partial_search_results` vaut vrai par défaut, il
+    répond 200 avec les shards survivants et range les autres sous
+    `_shards.failures`. `hits.total` et les agrégations ne portent alors
+    que sur les survivants — indiscernable, pour l'appelant, d'un corpus
+    qui ne contient rien.
+
+    Cas vécu (2026-08-13) : une facette personnalisée déclarée sur un
+    champ `text` (voir _active_custom_facets) posait une agrégation
+    `terms` sur un champ sans doc_values. 13 shards sur 14 échouaient, et
+    la recherche fédérée répondait « 0 résultat » sur un corpus de 23 000
+    documents — en 5 ms, sans erreur, sans une ligne de log, toutes
+    facettes vides. Une recherche restreinte à une source sans facette
+    personnalisée répondant normalement, le défaut a été cherché du côté
+    des ACL, de l'annuaire et du registre des sources avant d'être trouvé
+    là.
+
+    D'où le refus plutôt que le rendu partiel assorti d'un avertissement :
+    un compte faux coûte plus cher qu'une erreur, précisément parce qu'il
+    ne se remarque pas. `contexte` nomme la route pour que le journal
+    distingue /search de /search/export.
+    """
+    shards = res.get("_shards") or {}
+    echecs = shards.get("failed") or 0
+    if not echecs:
+        return
+
+    # Une même cause frappe en général tous les shards touchés (un champ
+    # non agrégeable l'est dans chaque index) : on remonte le premier
+    # motif et le nombre de shards, pas N fois le même message.
+    failures = shards.get("failures") or []
+    premier  = (failures[0] if failures else {}).get("reason") or {}
+    motif    = premier.get("reason") or premier.get("type") or "cause non précisée par Elasticsearch"
+    index    = (failures[0] if failures else {}).get("index") or "?"
+
+    detail = (
+        f"Résultat incomplet : {echecs} shard(s) sur {shards.get('total')} en échec "
+        f"— les documents qu'ils portent sont absents du compte et des facettes. "
+        f"Premier motif ([{index}]) : {motif}"
+    )
+    logger.error(f"[{contexte}] {detail}")
+    raise HTTPException(status_code=500, detail=detail)
+
+
 @app.post("/search")
 def search(
     req: SearchQuery,
@@ -1218,6 +1266,10 @@ def search(
             f"après {round((time.perf_counter() - t0) * 1000)} ms : {e}"
         )
         raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}") from e
+
+    # AVANT toute lecture de la réponse : un shard en échec fait mentir à
+    # la fois `total`, les résultats de la page et toutes les facettes.
+    _verifier_shards(res, "search")
 
     hits  = res["hits"]["hits"]
     total = res["hits"]["total"]["value"]
@@ -1530,6 +1582,11 @@ def export_search_results(req: SearchExportQuery, user: str = Depends(current_us
     except Exception as e:
         logger.error(f"[search/export] Erreur ES pour la requête '{req.query}' : {e}")
         raise HTTPException(status_code=400, detail=f"Erreur de recherche : {e}") from e
+
+    # Même règle qu'à l'écran (voir _verifier_shards), et le silence y
+    # serait pire : un tableur amputé d'un index se relit comme complet,
+    # et se transmet.
+    _verifier_shards(res, "search/export")
 
     hits = res["hits"]["hits"]
     if req.format == "docx":
