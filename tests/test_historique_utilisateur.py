@@ -32,7 +32,9 @@ import time
 import pytest
 
 import cluster_status
+import search_api
 import search_log
+import sql_sources_config
 import user_history
 
 requiert_es = pytest.mark.requires_elasticsearch
@@ -187,6 +189,17 @@ def corpus(es):
                 "author": {"type": "keyword"},
                 "keywords": {"type": "keyword"},
                 "source": {"type": "keyword"},
+                # Ce qu'une source SQL peut déclarer en facette : le
+                # `keyword` qui se suggère, le `boolean` qui en a le droit
+                # mais ne se suggère pas, et le `text` qui n'a rien à faire
+                # là mais qu'une configuration périmée peut désigner (voir
+                # champs_agregables).
+                "bureau": {"type": "keyword"},
+                "actif": {"type": "boolean"},
+                "resume": {"type": "text"},
+                # Sept facettes pour un plafond de six — voir le test du
+                # plafond, qui a besoin d'un champ de trop.
+                **{f"facette_{i}": {"type": "keyword"} for i in range(1, 8)},
                 "acl": {
                     "properties": {
                         "public": {"type": "boolean"},
@@ -203,6 +216,9 @@ def corpus(es):
             "author": "Durand Public",
             "keywords": ["budget"],
             "source": "sonde",
+            "bureau": "Paris",
+            "actif": True,
+            "resume": "Paris et sa région",
             "acl": {"public": True, "groups": []},
         },
     )
@@ -213,7 +229,31 @@ def corpus(es):
             "author": "Duchemin Secret",
             "keywords": ["budget"],
             "source": "sonde",
+            "bureau": "Parme Secret",
             "acl": {"public": False, "groups": ["finance"]},
+        },
+    )
+    # Un troisième auteur commençant lui aussi par « Du », dans un bureau
+    # qui commence pareil : de quoi vérifier que le tour de rôle laisse une
+    # place à la facette même quand les auteurs pourraient tout prendre.
+    es.index(
+        index=INDEX_CORPUS,
+        id="tour-de-role",
+        document={
+            "author": "Dupont Martin",
+            "keywords": ["budget"],
+            "source": "sonde",
+            "bureau": "Dunkerque",
+            "acl": {"public": True, "groups": []},
+        },
+    )
+    es.index(
+        index=INDEX_CORPUS,
+        id="plafond",
+        document={
+            "source": "sonde",
+            **{f"facette_{i}": "Zurich" for i in range(1, 8)},
+            "acl": {"public": True, "groups": []},
         },
     )
     # Deux documents pour que « Marc Durand » l'emporte sur « Durand
@@ -256,7 +296,23 @@ def corpus(es):
             },
         )
     es.indices.refresh(index=INDEX_CORPUS)
+    # `field_caps` lit l'état du cluster, qui SUIT la création de l'index
+    # au lieu de la précéder — sur cette VM, un index neuf met parfois
+    # plusieurs secondes à se déclarer (voir DELAI_ES). Sans cette
+    # attente, champs_agregables() ne voit aucun champ et n'en propose
+    # aucun : c'est son contrat (dégrader en silence plutôt que priver
+    # l'utilisateur des auteurs), mais un test ne doit pas courir contre.
+    # Observé une fois sur une quinzaine d'exécutions avant cette attente.
+    for _ in range(int(DELAI_ES / 0.2)):
+        if "facette_7" in es.field_caps(index=INDEX_CORPUS, fields=["facette_7"])["fields"]:
+            break
+        time.sleep(0.2)
+    # Le relevé de types est mémorisé une minute (TTL_TYPES) : un index
+    # jetable recréé sous le même nom entre deux exécutions verrait sinon
+    # les types de l'exécution précédente.
+    user_history._types_connus.clear()
     yield es
+    user_history._types_connus.clear()
     _supprimer(es, INDEX_CORPUS)
 
 
@@ -362,6 +418,192 @@ def test_le_repli_vaut_aussi_pour_le_classement(corpus):
     propositions = user_history.corpus_terms(corpus, INDEX_CORPUS, _filtre_acl([]), "emilie", 10)
     auteurs = [p["text"] for p in propositions if p["kind"] == "author"]
     assert auteurs == ["Émilie Dubois", "Jean Émilie"]
+
+
+# ── 3 bis. Facettes personnalisées du corpus ─────────────────
+#
+# Mêmes agrégations que les auteurs et les mots-clés, dans la MÊME
+# requête, mais sur des champs que la CONFIGURATION désigne — d'où deux
+# risques que les champs fixes n'avaient pas : un champ qu'Elasticsearch
+# ne sait pas agréger (qui ferait échouer la requête entière, auteurs
+# compris), et un nombre de champs qui ne dépend plus du code.
+
+BUREAU = {"bureau": "Bureau"}
+
+
+@requiert_es
+def test_propose_les_valeurs_d_une_facette_personnalisee(corpus):
+    """`field` et `label` en plus du texte : l'interface doit savoir
+    QUELLE facette cocher, ce qu'un texte seul ne dit pas."""
+    propositions = user_history.corpus_terms(
+        corpus, INDEX_CORPUS, _filtre_acl([]), "paris", 10, champs_custom=BUREAU,
+    )
+    assert propositions == [
+        {"text": "Paris", "kind": "custom", "count": 1, "field": "bureau", "label": "Bureau"}
+    ]
+
+
+@requiert_es
+def test_les_valeurs_de_facette_respectent_les_droits(corpus):
+    """Une agrégation de facette fuit exactement comme celle des auteurs :
+    « Parme Secret » ne vit que dans le document réservé au groupe
+    « finance »."""
+    visibles = user_history.corpus_terms(
+        corpus, INDEX_CORPUS, _filtre_acl([]), "parme", 10, champs_custom=BUREAU,
+    )
+    assert visibles == []
+
+    avec_droits = user_history.corpus_terms(
+        corpus, INDEX_CORPUS, _filtre_acl(["finance"]), "parme", 10, champs_custom=BUREAU,
+    )
+    assert "Parme Secret" in [p["text"] for p in avec_droits]
+
+
+@requiert_es
+def test_ne_retient_que_les_champs_reellement_agregables(corpus):
+    """Le juge est le moteur et non le type déclaré en configuration : un
+    index survit à sa reconfiguration, et c'est ce qu'il PORTE qui décide.
+    `resume` est en `text`, `actif` en `boolean`, `absent` n'existe pas."""
+    retenus = user_history.champs_agregables(
+        corpus, INDEX_CORPUS, ["bureau", "resume", "actif", "absent"],
+    )
+    assert retenus == frozenset({"bureau"})
+
+
+@requiert_es
+def test_une_agregation_regex_sur_un_champ_text_echoue_vraiment(corpus):
+    """Ce que le garde-fou précédent évite, vérifié contre le vrai moteur
+    plutôt que supposé : la requête échoue ENTIÈREMENT, elle ne se
+    contente pas de rendre zéro bucket pour ce champ-là."""
+    from elasticsearch import BadRequestError
+
+    with pytest.raises(BadRequestError):
+        corpus.search(
+            index=INDEX_CORPUS,
+            size=0,
+            aggs={"x": {"terms": {"field": "resume", "include": "par.*"}}},
+        )
+
+
+@requiert_es
+def test_un_champ_mal_type_ne_prive_pas_des_auteurs(corpus):
+    """La conséquence de l'échec ci-dessus, et la raison d'être du
+    garde-fou : une facette mal typée ne doit pas emporter avec elle les
+    auteurs et les mots-clés, qui n'y sont pour rien."""
+    propositions = user_history.corpus_terms(
+        corpus, INDEX_CORPUS, _filtre_acl([]), "du", 10,
+        champs_custom={"resume": "Résumé", "bureau": "Bureau"},
+    )
+    assert "Durand Public" in [p["text"] for p in propositions]
+    assert "Dunkerque" in [p["text"] for p in propositions]
+    assert all(p.get("field") != "resume" for p in propositions)
+
+
+@requiert_es
+def test_le_tour_de_role_laisse_une_place_a_la_facette(corpus):
+    """Deux lignes seulement, et trois auteurs commençant par « Du » : par
+    concaténation — l'ordre d'avant le 2026-08-13 — les auteurs prenaient
+    toute la place et aucune facette n'était jamais visible."""
+    propositions = user_history.corpus_terms(
+        corpus, INDEX_CORPUS, _filtre_acl([]), "du", 2, champs_custom=BUREAU,
+    )
+    assert [p["kind"] for p in propositions] == ["author", "custom"]
+    assert propositions[1]["text"] == "Dunkerque"
+
+
+@requiert_es
+def test_le_nombre_de_facettes_agregees_est_plafonne(corpus):
+    """Sept facettes déclarées, six agrégées (MAX_CHAMPS_CUSTOM) : le
+    coût se paie à chaque frappe, et rien n'empêche une configuration d'en
+    déclarer quinze. La septième est écartée, pas tronquée en aval."""
+    champs = {f"facette_{i}": f"Facette {i}" for i in range(1, 8)}
+    propositions = user_history.corpus_terms(
+        corpus, INDEX_CORPUS, _filtre_acl([]), "zurich", 10, champs_custom=champs,
+    )
+    assert [p["text"] for p in propositions] == ["Zurich"] * 6
+    assert "facette_7" not in {p["field"] for p in propositions}
+
+
+# ── 3 ter. Quelles facettes ont le droit d'être proposées ────
+#
+# Tri fait sur la CONFIGURATION (search_api._suggestable_custom_facets),
+# avant toute requête : inutile d'interroger le moteur sur un champ dont
+# on sait déjà qu'il n'a rien à faire dans cette liste. Ce que la
+# configuration ne peut PAS dire — le type réellement en place dans les
+# index — est vérifié plus haut, par champs_agregables().
+#
+# Le registre des sources et les groupes de l'appelant sont remplacés, et
+# rien d'autre : ce sont les deux entrées de la fonction testée, pas sa
+# logique (même principe qu'en tête de test_acces_sources.py). Des
+# sources pour de vrai supposeraient d'écrire dans le Redis de
+# configuration de l'installation de dev, que ces tests ne salissent
+# jamais.
+
+def _champ(es_field: str, es_type: str = "keyword", facet: bool = True, libelle=None):
+    return sql_sources_config.FieldMapping(
+        column=es_field, es_field=es_field, es_type=es_type,
+        facet=facet, facet_label=libelle,
+    )
+
+
+def _source_sql(nom: str, *champs, groupes: tuple = ()):
+    return sql_sources_config.SqlSource(
+        name=nom, db_type="postgresql", connection_ref="DSN_SONDE",
+        query="SELECT 1", id_column="id", es_index=f"idx_{nom}",
+        poll_interval_seconds=300, fields=champs, allowed_groups=groupes,
+    )
+
+
+@pytest.fixture
+def sources_sql(monkeypatch):
+    def _poser(*sources, groupes=("docsearch-users",)):
+        registre = {s.name: s for s in sources}
+        monkeypatch.setattr(sql_sources_config, "get_sources", lambda: registre)
+        monkeypatch.setattr(sql_sources_config, "get_source", lambda nom: registre[nom])
+        monkeypatch.setattr(search_api, "get_effective_groups", lambda username: list(groupes))
+    return _poser
+
+
+def test_une_facette_keyword_est_proposable(sources_sql):
+    sources_sql(_source_sql("agents", _champ("bureau", libelle="Bureau")))
+    assert search_api._suggestable_custom_facets(MOI) == {"bureau": "Bureau"}
+
+
+def test_une_facette_booleenne_n_est_pas_proposable(sources_sql):
+    """`boolean` est un type de facette légitime — la sidebar l'affiche —
+    mais l'`include` d'une agrégation `terms` est une expression
+    régulière, qu'Elasticsearch refuse hors des champs textuels. Et
+    proposer « true » sous une barre de recherche n'aiderait personne."""
+    sources_sql(_source_sql("agents", _champ("actif", es_type="boolean", libelle="Actif")))
+    assert search_api._suggestable_custom_facets(MOI) == {}
+
+
+def test_un_champ_deja_propose_ne_l_est_pas_deux_fois(sources_sql):
+    """Une source SQL a le droit de mapper une colonne sur `author`, que
+    le volet fixe propose déjà : l'agréger une seconde fois afficherait
+    chaque auteur deux fois, sous deux libellés."""
+    sources_sql(_source_sql("agents", _champ("author", libelle="Rédacteur")))
+    assert search_api._suggestable_custom_facets(MOI) == {}
+
+
+def test_un_champ_declare_sous_deux_types_est_ecarte(sources_sql):
+    """Deux sources, un seul nom de champ, deux mappings sur l'alias :
+    l'agrégation échouerait, et emporterait tout le volet corpus. Le
+    conflit ne dépend pas de qui regarde — la source fautive est ici
+    invisible pour l'appelant, et pèse quand même."""
+    sources_sql(
+        _source_sql("agents", _champ("bureau", libelle="Bureau")),
+        _source_sql("notes", _champ("bureau", es_type="text", facet=False), groupes=("dsi",)),
+    )
+    assert search_api._suggestable_custom_facets(MOI) == {}
+
+
+def test_une_facette_d_une_source_interdite_reste_cachee(sources_sql):
+    """Le seul NOM d'une facette décrit le schéma de sa source — « Motif
+    de la sanction » en dit long — et cette source est cachée partout
+    ailleurs à qui n'a pas le groupe."""
+    sources_sql(_source_sql("rh", _champ("motif", libelle="Motif"), groupes=("rh",)))
+    assert search_api._suggestable_custom_facets(MOI) == {}
 
 
 # ── 4. Échappement du préfixe ────────────────────────────────

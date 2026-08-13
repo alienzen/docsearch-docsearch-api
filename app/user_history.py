@@ -20,6 +20,7 @@
 # volontairement inexploité.
 
 import logging
+import time
 import unicodedata
 
 # Le module, pas la constante : `search_log.SEARCH_LOG_INDEX` est relu à
@@ -284,6 +285,31 @@ def regex_prefixe(prefix: str) -> str:
 # d'évolutions, pas ici.
 CHAMPS_CORPUS = (("author", "author"), ("keywords", "keyword"))
 
+# Les facettes personnalisées des sources SQL s'ajoutent aux deux champs
+# ci-dessus, une agrégation chacune, dans la MÊME requête (voir
+# `champs_custom` de corpus_terms et _suggestable_custom_facets() dans
+# search_api.py). Le raisonnement de cardinalité ci-dessus vaut pour
+# elles à une différence près : leur nombre n'est pas fixé par le code
+# mais par la configuration, et rien n'interdit à un administrateur de
+# marquer quinze colonnes en facette. D'où ce plafond — les suivantes ne
+# sont pas agrégées, dans l'ordre de déclaration des sources.
+#
+# Six parce que c'est deux fois ce que déclare la source la plus fournie
+# de l'installation de dev (« agents » : bureau, fonction, téléphone), et
+# que le coût se paie à chaque frappe. Mesuré le 2026-08-13 sur cette
+# pile (24 019 documents, alias `docsearch-all`, `took` d'ES, à chaud) :
+#
+#   auteur + mots-clés seuls            1-4 ms
+#   + les 3 facettes de « agents »      2-5 ms
+#
+# et ce, bien que `telephone` compte 995 valeurs distinctes — une par
+# agent, exactement le profil de cardinalité qui a fait écarter le nom de
+# fichier plus haut. L'écart est donc dans le bruit à cette taille ; le
+# plafond n'est pas là pour ce corpus-ci mais pour la configuration qui
+# marquerait quinze colonnes en facette sur un index bien plus gros. À
+# relever si une source légitime dépasse — en mesurant, pas au jugé.
+MAX_CHAMPS_CUSTOM = 6
+
 # Elasticsearch rend ce qu'il a trouvé quand ce délai est dépassé, plutôt
 # que de faire attendre. Une suggestion est par nature du meilleur
 # effort : mieux vaut trois propositions tout de suite que cinq une
@@ -299,9 +325,98 @@ TIMEOUT_CORPUS = "300ms"
 # tranche après reclassement.
 FACTEUR_BUCKETS = 4
 
+# Validité du relevé de types (voir champs_agregables) : assez court pour
+# qu'une source réindexée redevienne suggérable dans la minute, assez
+# long pour qu'une saisie entière ne rouvre pas la question à chaque
+# frappe.
+TTL_TYPES = 60.0
+_types_connus: dict[tuple, tuple[float, frozenset[str]]] = {}
 
-def corpus_terms(es, index: str, filtres: list, prefix: str, limit: int = 5) -> list[dict]:
-    """Auteurs et mots-clés du corpus correspondant à la saisie.
+
+def champs_agregables(es, index: str, champs: list[str]) -> frozenset[str]:
+    """Parmi `champs`, ceux qu'Elasticsearch peut RÉELLEMENT agréger avec
+    un `include` régex sur cet index — c'est-à-dire les `keyword`, et eux
+    seuls.
+
+    Pourquoi interroger le moteur plutôt que se fier au type déclaré dans
+    la configuration de la source : les deux divergent dès qu'un index
+    survit à un changement de configuration. `sql_indexer.create_index()`
+    ne pose le mapping qu'à la CRÉATION de l'index ; passer une colonne
+    de `text` à `keyword` dans l'administration ne remappe pas l'existant,
+    et la configuration annoncerait alors un champ agrégeable là où l'index
+    porte encore du texte.
+
+    Ce que coûte l'erreur justifie l'appel : l'agrégation de corpus est
+    UNE requête pour tous les champs, et un seul champ non agrégeable
+    (`text` sans doc_values, `boolean`, `long`) la fait échouer en 400
+    ENTIÈRE — plus d'auteurs, plus de mots-clés, plus rien, pour un champ
+    de facette mal typé. Deux cas concrets, tous deux atteignables depuis
+    l'administration seule : une colonne SQL nommée comme un champ du
+    schéma fixe (`content`, `title`, `size`…), et deux sources qui
+    déclarent le même nom de champ sous deux types — l'alias porte alors
+    les deux mappings, et `field_caps` est le seul endroit où cela se
+    voit.
+
+    Un type unique EST exigé (`== ["keyword"]`) : un champ vu à la fois
+    en `keyword` et en `text` sur l'alias est précisément le conflit
+    ci-dessus.
+
+    Meilleur effort, comme tout ce qui sert cette route : moteur muet ou
+    en erreur → ensemble vide, donc aucune facette suggérée, jamais une
+    exception qui priverait l'utilisateur des auteurs et des mots-clés.
+    """
+    if not champs:
+        return frozenset()
+    cle = (index, tuple(sorted(champs)))
+    maintenant = time.monotonic()
+    connu = _types_connus.get(cle)
+    if connu and maintenant - connu[0] < TTL_TYPES:
+        return connu[1]
+    try:
+        caps = es.field_caps(index=index, fields=champs)["fields"]
+    except Exception as e:
+        logger.warning(f"[suggest] Types indisponibles pour {sorted(champs)} : {e}")
+        return frozenset()
+    retenus = frozenset(
+        champ for champ in champs
+        if list(caps.get(champ, {})) == ["keyword"] and caps[champ]["keyword"]["aggregatable"]
+    )
+    _types_connus[cle] = (maintenant, retenus)
+    return retenus
+
+
+def _tour_de_role(files: list[list[dict]], limit: int) -> list[dict]:
+    """Fusionne les propositions champ par champ, à tour de rôle, jusqu'à
+    `limit` au total.
+
+    Et non par concaténation, qui était l'ordre jusqu'ici : avec deux
+    champs et huit lignes, tout tenait ; avec les facettes personnalisées
+    en plus, un auteur prolifique remplirait la liste à lui seul et les
+    dernières facettes déclarées ne seraient JAMAIS visibles. Le tour de
+    rôle donne une place à chaque champ avant d'en donner une deuxième à
+    quiconque.
+
+    L'ordre PROPRE à un champ est conservé (on dépile par la tête) : le
+    reclassement de corpus_terms tient toujours.
+    """
+    retenus: list[dict] = []
+    restants = [list(file) for file in files]
+    while len(retenus) < limit and any(restants):
+        for file in restants:
+            if not file:
+                continue
+            retenus.append(file.pop(0))
+            if len(retenus) >= limit:
+                break
+    return retenus
+
+
+def corpus_terms(
+    es, index: str, filtres: list, prefix: str, limit: int = 5,
+    champs_custom: dict[str, str] | None = None,
+) -> list[dict]:
+    """Auteurs, mots-clés et valeurs de facettes personnalisées du corpus
+    correspondant à la saisie.
 
     Correspondre veut dire « commencer par la saisie », mais aussi « la
     voir commencer un de ses mots » : « Marchand » propose « Bruno
@@ -311,25 +426,58 @@ def corpus_terms(es, index: str, filtres: list, prefix: str, limit: int = 5) -> 
     Les termes qui COMMENCENT par la saisie sont rendus en premier —
     c'est ce qu'on attend d'une autocomplétion, et c'est déjà la règle de
     matching_queries() pour la moitié « historique » de la même liste.
+    Cette règle passe AVANT le champ dont vient le terme : ce qui commence
+    par la saisie sort en premier, tous champs confondus, et les
+    correspondances en frontière de mot ensuite (voir _tour_de_role).
+
+    `champs_custom` — {champ ES: libellé} — ajoute les facettes
+    personnalisées des sources SQL, qui sortent avec `kind: "custom"` et
+    portent en plus `field` et `label` : l'interface doit savoir QUELLE
+    facette cocher, ce qu'un simple texte ne dit pas. Les champs sont
+    plafonnés (MAX_CHAMPS_CUSTOM) puis vérifiés auprès du moteur
+    (champs_agregables) — un champ mal typé ferait échouer l'agrégation
+    des auteurs et des mots-clés avec la sienne.
+
+    ⚠️ Rend au plus `limit` propositions AU TOTAL. C'était `limit` par
+    champ jusqu'au 2026-08-13, quand ils étaient deux et connus à
+    l'avance ; leur nombre dépend désormais de la configuration, et un
+    appelant ne peut plus déduire de sa borne combien de lignes il va
+    recevoir.
 
     ⚠️ `filtres` DOIT contenir le filtre ACL de l'appelant et la
     restriction aux sources cherchables — ce sont les mêmes que ceux de
     `/search`, et ils sont passés par l'appelant plutôt que reconstruits
     ici pour qu'il n'existe qu'une seule définition de « ce que cet
     utilisateur a le droit de voir ». Une agrégation non filtrée
-    divulguerait le nom d'un auteur ou d'un mot-clé d'un document
-    interdit : une agrégation fuit exactement autant qu'un résultat.
+    divulguerait le nom d'un auteur, d'un mot-clé ou d'un bureau d'un
+    document interdit : une agrégation fuit exactement autant qu'un
+    résultat.
     """
+    customs = list((champs_custom or {}).items())[:MAX_CHAMPS_CUSTOM]
+    if customs:
+        surs = champs_agregables(es, index, [champ for champ, _ in customs])
+        customs = [(champ, libelle) for champ, libelle in customs if champ in surs]
+
+    # (nom d'agrégation, champ ES, nature, libellé). Le nom d'agrégation
+    # est préfixé pour les facettes — même convention que les
+    # `by_custom__*` de /search — plutôt que d'être le nom du champ :
+    # rien n'interdit à une source SQL de nommer une colonne `author`, et
+    # deux agrégations homonymes s'écraseraient silencieusement.
+    champs = [(champ, champ, nature, None) for champ, nature in CHAMPS_CORPUS]
+    champs += [
+        (f"custom__{champ}", champ, "custom", libelle) for champ, libelle in customs
+    ]
+
     regex = regex_prefixe(prefix)
     res = es.search(
         index=index,
         size=0,
         query={"bool": {"filter": filtres}},
         aggs={
-            champ: {"terms": {
+            nom: {"terms": {
                 "field": champ, "include": regex, "size": limit * FACTEUR_BUCKETS,
             }}
-            for champ, _ in CHAMPS_CORPUS
+            for nom, champ, _, _ in champs
         },
         timeout=TIMEOUT_CORPUS,
     )
@@ -337,12 +485,18 @@ def corpus_terms(es, index: str, filtres: list, prefix: str, limit: int = 5) -> 
     # démentirait la sélection : « Émilie Dubois », proposé sur la saisie
     # « emilie », doit aussi être reconnu comme COMMENÇANT par elle.
     saisie = _replier(prefix)
-    propositions = []
-    for champ, nature in CHAMPS_CORPUS:
-        debut, ailleurs = [], []
-        for bucket in res["aggregations"][champ]["buckets"]:
+    debuts: list[list[dict]] = []
+    ailleurs: list[list[dict]] = []
+    for nom, champ, nature, libelle in champs:
+        commence, contient = [], []
+        for bucket in res["aggregations"][nom]["buckets"]:
             terme = {"text": bucket["key"], "kind": nature, "count": bucket["doc_count"]}
-            rang = debut if _replier(bucket["key"]).startswith(saisie) else ailleurs
+            if nature == "custom":
+                terme["field"], terme["label"] = champ, libelle
+            rang = commence if _replier(bucket["key"]).startswith(saisie) else contient
             rang.append(terme)
-        propositions += (debut + ailleurs)[:limit]
-    return propositions
+        debuts.append(commence)
+        ailleurs.append(contient)
+
+    propositions = _tour_de_role(debuts, limit)
+    return propositions + _tour_de_role(ailleurs, limit - len(propositions))

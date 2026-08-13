@@ -170,12 +170,58 @@ est la variante tentante et fuyante de la même fonctionnalité. Une
 requête porte régulièrement le nom d'un dossier, d'une affaire ou d'une
 personne que son auteur est seul à connaître.
 
-Les suggestions du corpus (`/search/suggest`) portent sur **l'auteur et les
-mots-clés**, filtrés par l'ACL de l'appelant et les sources cherchables —
-exactement les filtres de `/search`, passés à `user_history.py` par
-l'appelant plutôt que reconstruits, pour qu'il n'existe qu'une seule
-définition de « ce que cet utilisateur a le droit de voir ». Une
-agrégation divulgue autant qu'un résultat de recherche.
+Les suggestions du corpus (`/search/suggest`) portent sur **l'auteur, les
+mots-clés et les facettes SQL personnalisées**, filtrés par l'ACL de
+l'appelant et les sources cherchables — exactement les filtres de
+`/search`, passés à `user_history.py` par l'appelant plutôt que
+reconstruits, pour qu'il n'existe qu'une seule définition de « ce que cet
+utilisateur a le droit de voir ». Une agrégation divulgue autant qu'un
+résultat de recherche.
+
+### Facettes personnalisées suggérées (2026-08-13)
+
+Toute colonne marquée « facette » dans le mapping d'une source SQL voit
+ses valeurs proposées sous la barre, à côté des auteurs et des mots-clés,
+et la proposition retenue coche cette facette-là. La suggestion porte donc
+`kind: "custom"` **plus `field` et `label`** : sans le champ, l'interface
+saurait qu'il faut cocher une facette, pas laquelle.
+
+Trois garde-fous, chacun pour une raison distincte — voir
+`_suggestable_custom_facets()` (search_api.py) et `champs_agregables()`
+(user_history.py) :
+
+- **Le nom d'une facette est un morceau du schéma de sa source** (« Motif
+  de la sanction »), et se filtre donc par `allowed_groups` comme le reste
+  de la source. Les *valeurs*, elles, sont couvertes par les filtres ACL
+  déjà passés à l'agrégation.
+- **Seuls les `keyword` sont suggérés.** Une facette a le droit d'être
+  `boolean` (la barre latérale l'affiche), mais l'`include` d'une
+  agrégation `terms` est une expression régulière, qu'Elasticsearch refuse
+  hors des champs textuels — et « true » n'a rien à faire sous une barre
+  de recherche.
+- **Le type déclaré ne suffit pas : le moteur est interrogé** (`field_caps`,
+  mémorisé 60 s, ~6 ms). Un index n'est remappé qu'à sa création : changer
+  le type d'une colonne dans l'administration ne touche pas l'existant, et
+  la configuration annoncerait un champ agrégeable là où l'index porte
+  encore du texte. Deux sources déclarant le même nom de champ sous deux
+  types produisent le même conflit sur l'alias. L'enjeu n'est pas la
+  facette fautive : l'agrégation de corpus est **une seule requête**, et un
+  champ mal typé la fait échouer entière — plus d'auteurs, plus de
+  mots-clés, plus rien.
+
+Les champs agrégés sont **plafonnés à six** (`MAX_CHAMPS_CUSTOM`) et les
+propositions sont réparties **à tour de rôle** entre les champs : par
+concaténation, un auteur prolifique remplissait les huit lignes et les
+dernières facettes n'étaient jamais visibles. La règle « ce qui commence
+par la saisie d'abord » passe avant le tour de rôle, tous champs
+confondus.
+
+Coût mesuré le 2026-08-13 sur la pile de développement (24 019 documents,
+`took` d'ES, à chaud) : **1-4 ms** pour auteur + mots-clés seuls, **2-5 ms**
+en ajoutant les trois facettes de la source `agents` — dont `telephone`,
+qui compte 995 valeurs distinctes, soit une par agent. Le plafond n'est
+donc pas là pour ce corpus-ci, mais pour la configuration qui marquerait
+quinze colonnes en facette sur un index bien plus gros.
 
 **Pourquoi pas le nom de fichier ni le titre** — mesuré le 2026-08-12 sur
 la pile de développement (23 016 documents) : le coût d'un `include`

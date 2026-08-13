@@ -505,6 +505,54 @@ def _active_custom_facets(source_names: list[str], username: str | None = None) 
     return result
 
 
+def _suggestable_custom_facets(username: str) -> dict[str, str]:
+    """
+    Facettes personnalisées dont les VALEURS peuvent être proposées en
+    autocomplétion (voir GET /search/suggest) — {es_field: label}, un
+    sous-ensemble de _active_custom_facets().
+
+    Trois retraits, et chacun a sa raison :
+
+    1. **Ce qui n'est pas `keyword`.** La validation admet aussi
+       `boolean` en facette (sql_sources_config.py) : agrégeable, certes,
+       mais l'`include` d'une agrégation `terms` est une expression
+       régulière, qu'Elasticsearch REFUSE sur un champ non textuel. Et
+       proposer « true » sous la barre de recherche n'aurait de toute
+       façon aucun sens.
+    2. **`author` et `keywords`.** Une source SQL a le droit de mapper une
+       colonne sur ces noms ; ils sont déjà proposés par le volet fixe
+       (user_history.CHAMPS_CORPUS), et les agréger une seconde fois
+       afficherait chaque auteur deux fois, sous deux libellés.
+    3. Rien d'autre — le contrôle du TYPE RÉELLEMENT EN PLACE dans les
+       index appartient à user_history.champs_agregables(), qui interroge
+       le moteur. Le type lu ici est celui que la configuration DÉCLARE,
+       et les deux divergent dès qu'un index survit à une reconfiguration.
+       Ce filtre-ci évite d'interroger le moteur pour un champ dont on
+       sait déjà qu'il n'a rien à faire là ; il ne prétend pas trancher.
+
+    Le filtrage par groupes vient de _active_custom_facets(), à qui le
+    `username` est passé : le seul NOM d'une facette décrit le schéma
+    d'une source, qu'on cache par ailleurs à qui n'y a pas droit. Les
+    VALEURS, elles, sont protégées par les filtres passés à
+    corpus_terms() — ACL et sources cherchables, ceux de /search.
+    """
+    # Les types de TOUTES les sources SQL, pas seulement de celles que cet
+    # utilisateur voit : deux sources qui déclarent le même nom de champ
+    # sous deux types se disputent le mapping de l'alias, et le conflit ne
+    # dépend pas de qui regarde. D'où l'ensemble, et l'exigence qu'il ne
+    # contienne que `keyword`.
+    types: dict[str, set[str]] = {}
+    for source in sql_sources_config.get_sources().values():
+        for f in source.fields:
+            types.setdefault(f.es_field, set()).add(f.es_type)
+    fixes = {champ for champ, _ in user_history.CHAMPS_CORPUS}
+    return {
+        es_field: label
+        for es_field, label in _active_custom_facets([], username).items()
+        if types.get(es_field) == {"keyword"} and es_field not in fixes
+    }
+
+
 def _collectable_source_names() -> set[str]:
     """
     Noms de TOUTES les sources dont les documents peuvent actuellement
@@ -1605,7 +1653,8 @@ def get_my_recent_documents(limit: int = 10, user: str = Depends(current_user)):
 @app.get("/search/suggest")
 def suggest(q: str = "", limit: int = 8, user: str = Depends(current_user)):
     """Suggestions de saisie : ses propres recherches d'abord, puis les
-    auteurs et mots-clés du corpus QU'IL PEUT VOIR.
+    auteurs, mots-clés et valeurs de facettes personnalisées du corpus
+    QU'IL PEUT VOIR.
 
     Sous `/search/` et non à la racine, pour deux raisons : le préfixe est
     déjà proxifié par les deux Nginx et par le proxy de développement
@@ -1646,7 +1695,8 @@ def suggest(q: str = "", limit: int = 8, user: str = Depends(current_user)):
             ]
             deja_vu = {p["text"].casefold() for p in propositions}
             for proposition in user_history.corpus_terms(
-                es, ES_SEARCH_ALIAS, filtres, saisie, borne - len(propositions)
+                es, ES_SEARCH_ALIAS, filtres, saisie, borne - len(propositions),
+                champs_custom=_suggestable_custom_facets(user),
             ):
                 if proposition["text"].casefold() not in deja_vu:
                     propositions.append(proposition)
