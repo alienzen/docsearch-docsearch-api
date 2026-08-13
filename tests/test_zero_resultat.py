@@ -104,7 +104,13 @@ def _aide(api, *, texte="rapport", obligatoires=None, facettes=None, relachables
         obligatoires=obligatoires if obligatoires is not None else [ACL_OUVERTE],
         relachables=relachables or {},
         facet_filters=facettes or {},
-        fields=["content"],
+        # L'aide rejoue la clause de /search sur la requête corrigée : elle
+        # reçoit donc de quoi la reconstruire, et non une liste de champs.
+        # L'index de sonde n'a ni `title` ni sous-champs `.exact` — un
+        # `multi_match` sur un champ absent ne matche rien et ne lève rien,
+        # seul `content` répond, ce que ces tests attendent.
+        search_in="all",
+        exact=False,
         query_text=texte,
     )
 

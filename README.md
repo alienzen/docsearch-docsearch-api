@@ -60,8 +60,20 @@ fonctionnalité réelle. Voir `docsearch-infra/FEATURES.md` et
 **Recherche de phrase** : entourer la requête de guillemets
 (`"terme exact"`) force une correspondance de phrase (ordre et adjacence
 des mots respectés, sans tolérance aux fautes de frappe), au lieu de la
-recherche floue par défaut (`fuzziness: "AUTO"`, qui tolère les
-variantes et fautes de frappe).
+recherche par défaut, qui tolère les variantes et les fautes de frappe.
+
+**Tolérance aux fautes** : la recherche ordinaire rend un `bool` à deux
+branches en OU — les champs ordinaires (racinisation + thésaurus) sans
+`fuzziness`, et les sous-champs `.exact` avec `fuzziness: "AUTO:5,99"`.
+Ce n'est pas un raffinement : Lucene abandonne la `fuzziness` sur toute
+position élargie par le thésaurus, donc une clause unique perdait la
+tolérance aux fautes sur les termes mêmes que l'administrateur venait
+d'enrichir — avec MOINS de résultats qu'avant l'ajout de la règle. Le
+plafond `AUTO:5,99` (aucune correction sous cinq caractères, une seule
+au-delà) remplace le `AUTO` d'Elasticsearch, trop lâche sur un corpus
+français où `délégation`/`dérogation` et `convention`/`conviction` sont
+à deux corrections l'un de l'autre. Voir `build_text_clause` dans
+`app/search_query.py`.
 
 **Recherche exacte** : `exact: true` (booléen, `false` par défaut)
 interroge les sous-champs `.exact` au lieu des champs ordinaires. Ces

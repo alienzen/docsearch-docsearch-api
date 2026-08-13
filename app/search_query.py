@@ -82,6 +82,34 @@ def field_sets(exact: bool = False) -> dict:
     }
 
 
+# Tolérance aux fautes de frappe. Le `AUTO` d'Elasticsearch vaut
+# `AUTO:3,6` : une correction dès 3 caractères, DEUX à partir de 6.
+# Beaucoup trop lâche sur ce corpus, et pour deux raisons distinctes :
+#
+# - la clause ordinaire interroge des champs RACINISÉS, donc la distance
+#   d'édition s'applique à un radical et non à un mot : « congés » y est
+#   devenu « cong », et une correction sur 4 caractères ramenait `cont`,
+#   `conv`, `long`, `gong`, `congo`… soit 7303 documents pour 1971
+#   réellement concernés (mesuré sur l'index de la VM de dev) ;
+# - à deux corrections, le vocabulaire administratif français est plein
+#   de faux amis exactement à cette distance : « délégation » ramenait
+#   `dérogation`, `délation`, `allégation`, `délectation` ; « convention »
+#   ramenait `conception`, `conviction`, `conversion`, `congestion`.
+#
+# `AUTO:5,99` se lit : aucune correction en dessous de 5 caractères, une
+# seule au-delà. Le second seuil est volontairement hors d'atteinte —
+# c'est la façon d'écrire « jamais deux corrections » avec `AUTO`, dont
+# on garde le premier seuil qui, lui, est indispensable (sans lui,
+# « loi » appellerait `roi`, `lot`, `voi`…).
+FUZZINESS = "AUTO:5,99"
+
+# Poids de la branche de rattrapage orthographique (voir
+# build_text_clause). Inférieur à 1 à dessein : un document qui ne
+# répond QUE par une faute de frappe ne doit pas passer devant un
+# document qui contient réellement le mot, ou l'un de ses synonymes.
+BOOST_FLOU = 0.5
+
+
 def est_phrase(query_text: str) -> bool:
     """Vrai si la requête est encadrée de guillemets, donc à chercher
     comme une phrase (ordre et adjacence des mots respectés).
@@ -113,6 +141,10 @@ def build_text_clause(query_text: str, search_in: str = "all", exact: bool = Fal
     La tolérance aux fautes (`fuzziness`) est incompatible avec les deux :
     une recherche exacte qui rattraperait les fautes de frappe ne serait
     exacte pour personne.
+
+    La recherche ORDINAIRE, elle, rend un `bool` à deux branches en OU et
+    non un `multi_match` — voir ci-dessous pourquoi les deux ne peuvent
+    pas tenir dans la même clause.
     """
     sets = field_sets(exact=exact)
     fields = sets.get(search_in, sets["all"])
@@ -127,7 +159,52 @@ def build_text_clause(query_text: str, search_in: str = "all", exact: bool = Fal
         }}
     if exact:
         return {"multi_match": {"query": query_text, "fields": fields}}
-    return {"multi_match": {"query": query_text, "fields": fields, "fuzziness": "AUTO"}}
+
+    # Deux branches en OU, et c'est la SEULE façon d'avoir à la fois le
+    # thésaurus et la tolérance aux fautes.
+    #
+    # ⚠️ Lucene abandonne la fuzziness sur toute position portant
+    # plusieurs jetons, EN SILENCE. Une position à jeton unique passe par
+    # `newTermQuery`, qui applique la fuzziness ; une position élargie par
+    # le thésaurus passe par `newSynonymQuery`, qui construit une
+    # `SynonymQuery` de termes bruts, sans distance d'édition. Ajouter
+    # « DRH, congés » au thésaurus transformait donc la requête « congés »
+    # de `(cong~1 …43 termes…)` en `Synonym(cong drh)` : la règle ajoutait
+    # 2 documents et en retirait 5330, sans erreur ni trace, et
+    # l'administrateur constatait MOINS de résultats après avoir ajouté un
+    # synonyme. Le panneau de test du thésaurus ne pouvait pas le montrer,
+    # les jetons produits (`drh`, `cong`) étant, eux, parfaitement corrects.
+    #
+    # La branche floue porte donc sur les sous-champs `.exact`, les seuls
+    # sans filtre de synonymes (voir ANALYSE dans
+    # docsearch-ingestion/app/indexer.py) : la fuzziness y survit quel que
+    # soit le contenu du thésaurus. Elle y travaille de surcroît sur des
+    # mots entiers et non sur des radicaux, seul niveau où une distance
+    # d'édition veut dire quelque chose.
+    #
+    # ⚠️ Un index qui n'a pas reçu `./manage.sh migrer-exact --apply` n'a
+    # pas de sous-champs `.exact` : la branche de rattrapage y est
+    # simplement muette (un `multi_match` sur un champ absent ne lève
+    # rien), et la recherche s'y comporte comme la seule première branche
+    # — sans tolérance aux fautes, mais sans erreur non plus. Même angle
+    # mort que la recherche exacte, et même remède.
+    exacts = field_sets(exact=True)
+    return {"bool": {
+        "should": [
+            {"multi_match": {"query": query_text, "fields": fields}},
+            {"multi_match": {
+                "query":     query_text,
+                "fields":    exacts.get(search_in, exacts["all"]),
+                "fuzziness": FUZZINESS,
+                "boost":     BOOST_FLOU,
+            }},
+        ],
+        # Explicite : un `should` seul vaut déjà 1, mais cette clause est
+        # imbriquée dans le `must` d'un autre `bool` et la règle « should
+        # devient facultatif dès qu'il y a un must » est assez proche
+        # pour qu'on ne veuille pas laisser la question ouverte.
+        "minimum_should_match": 1,
+    }}
 
 
 def build_acl_filter(username: str) -> dict:

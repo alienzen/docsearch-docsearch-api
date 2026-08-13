@@ -760,11 +760,17 @@ def _corriger_requete(texte: str, entrees: list) -> str | None:
 
 def _aide_zero_resultat(
     *, must: list, obligatoires: list, relachables: dict,
-    facet_filters: dict, fields: list, query_text: str,
+    facet_filters: dict, search_in: str, exact: bool, query_text: str,
 ) -> dict:
     """Ce qu'on peut proposer à quelqu'un dont la recherche n'a rien
     donné. Meilleur effort : toute panne d'Elasticsearch ici rend un
-    objet vide, l'écran retombant sur le message d'origine."""
+    objet vide, l'écran retombant sur le message d'origine.
+
+    `search_in` et `exact` sont ceux de la recherche qui n'a rien donné,
+    et servent à REJOUER sa clause de texte sur la requête corrigée (voir
+    plus bas) : cette aide compte des résultats qu'elle propose ensuite
+    d'aller voir, une clause plus large que celle de l'écran mènerait
+    droit à une liste vide."""
     droppables = {nom: f for nom, f in {**facet_filters, **relachables}.items() if f}
 
     recherches: list[dict] = []
@@ -839,15 +845,22 @@ def _aide_zero_resultat(
     # pourrait être proposé. On ne rend donc la correction que si elle
     # donne des résultats VISIBLES PAR CET UTILISATEUR — ce qui la
     # débarrasse du même coup des corrections qui ne mènent nulle part.
+    #
+    # La clause est celle de /search, rejouée sur la requête corrigée, et
+    # non une copie littérale : elle portait ici sa propre `fuzziness`,
+    # qui a divergé le jour où la clause de recherche a été plafonnée et
+    # dédoublée (voir build_text_clause). Une correction validée par une
+    # clause plus lâche que celle de l'écran est exactement la promesse
+    # non tenue que ce comptage existe pour éviter.
     if aide["suggestion"]:
         try:
             visibles = es.count(
                 index=ES_SEARCH_ALIAS,
                 query={
                     "bool": {
-                        "must": [{"multi_match": {
-                            "query": aide["suggestion"], "fields": fields, "fuzziness": "AUTO",
-                        }}],
+                        "must": [search_query.build_text_clause(
+                            aide["suggestion"], search_in, exact,
+                        )],
                         "filter": obligatoires,
                     }
                 },
@@ -1062,13 +1075,6 @@ def search(
     query_text = req.query.strip()
     is_exact_phrase = search_query.est_phrase(query_text)
     must = [search_query.build_text_clause(query_text, req.search_in, req.exact)]
-
-    # Même jeu de champs que la clause ci-dessus (d'où le même `exact`) :
-    # l'aide au zéro résultat compte des résultats qu'elle propose ensuite
-    # d'aller voir, et annoncer « 12 résultats sans ce filtre » sur des
-    # champs que la recherche n'interroge pas mènerait à un écran vide.
-    sets = search_query.field_sets(exact=req.exact)
-    fields = sets.get(req.search_in, sets["all"])
 
     # Filtres "de base" : toujours appliqués, jamais concernés par
     # l'exclusion décrite ci-dessous (ACL, pièces jointes, période,
@@ -1326,7 +1332,8 @@ def search(
         obligatoires=filtres_obligatoires,
         relachables=filtres_relachables,
         facet_filters=facet_filters,
-        fields=fields,
+        search_in=req.search_in,
+        exact=req.exact,
         query_text=query_text[1:-1].strip() if is_exact_phrase else query_text,
     ) if total == 0 else {}
 

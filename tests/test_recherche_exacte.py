@@ -416,8 +416,36 @@ def test_la_recherche_exacte_ne_tolere_aucune_faute():
     assert "fuzziness" not in clause["multi_match"]
     assert clause["multi_match"]["fields"] == search_query.field_sets(exact=True)["all"]
 
+    # La recherche ORDINAIRE, elle, tolère les fautes — mais dans une
+    # branche séparée, portée par les sous-champs `.exact` : c'est le seul
+    # endroit où la fuzziness survit au thésaurus (voir
+    # build_text_clause). Les deux emplois de `.exact` ne se contredisent
+    # pas : le mode exact interroge ces champs SANS fuzziness, la branche
+    # de rattrapage les interroge AVEC.
     ordinaire = search_query.build_text_clause("délégation", "all", exact=False)
-    assert ordinaire["multi_match"]["fuzziness"] == "AUTO"
+    branches = ordinaire["bool"]["should"]
+
+    assert "fuzziness" not in branches[0]["multi_match"]
+    assert branches[0]["multi_match"]["fields"] == search_query.field_sets()["all"]
+
+    assert branches[1]["multi_match"]["fuzziness"] == search_query.FUZZINESS
+    assert branches[1]["multi_match"]["fields"] == search_query.field_sets(exact=True)["all"]
+
+
+def test_le_flou_ne_corrige_pas_les_mots_courts():
+    """`AUTO` seul vaut `AUTO:3,6` : une correction dès 3 caractères, deux
+    à partir de 6. Sur ce corpus, les deux seuils sont faux — « loi »
+    appellerait `roi` et `lot`, et à deux corrections « délégation »
+    appelle `dérogation`, `délation`, `allégation`. Le plafond n'est pas
+    un réglage esthétique : c'est ce qui sépare une tolérance aux fautes
+    d'un générateur de faux positifs."""
+    seuil_bas, seuil_haut = search_query.FUZZINESS.removeprefix("AUTO:").split(",")
+
+    assert int(seuil_bas) >= 5
+    # Seuil haut hors d'atteinte de tout mot réel = jamais deux
+    # corrections. C'est la façon d'écrire ce plafond avec `AUTO`, dont on
+    # garde le premier seuil.
+    assert int(seuil_haut) > 40
 
 
 def test_guillemets_et_mode_exact_sont_independants():
@@ -455,8 +483,13 @@ def test_une_alerte_rejoue_le_mode_exact_de_la_recherche_enregistree(monkeypatch
     )["bool"]["must"][0]["multi_match"]
     ordinaire = search_query.build_query_clauses(
         {"query": "délégation"}, "sonde",
-    )["bool"]["must"][0]["multi_match"]
+    )["bool"]["must"][0]
 
     assert "fuzziness" not in exacte
     assert exacte["fields"] == search_query.field_sets(exact=True)["all"]
-    assert ordinaire["fuzziness"] == "AUTO"
+    # Une alerte ordinaire porte les deux branches, thésaurus et
+    # rattrapage : c'est ce que l'écran affiche, donc ce qu'elle doit
+    # notifier.
+    assert [b["multi_match"].get("fuzziness") for b in ordinaire["bool"]["should"]] == [
+        None, search_query.FUZZINESS,
+    ]

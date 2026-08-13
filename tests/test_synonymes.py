@@ -15,6 +15,11 @@
 # 3. **La recherche entre guillemets ne s'élargit pas.** « terme exact »
 #    veut dire exact ; l'utilisateur qui en tape ne s'attend pas à ce
 #    qu'on élargisse sa requête.
+# 4. **Ajouter une règle n'enlève jamais de résultats.** Lucene abandonne
+#    la fuzziness sur les positions élargies par le thésaurus — sans
+#    précaution, une règle bien écrite RÉDUIT le nombre de résultats du
+#    terme qu'elle enrichit. Silencieusement, là encore, et à
+#    contre-sens de tout ce qu'un administrateur peut imaginer.
 #
 # Le jeu de synonymes est celui de la sonde, jamais celui de
 # l'installation (principe 2 de conftest.py) : les modules concernés sont
@@ -23,6 +28,7 @@
 import pytest
 
 import cluster_status
+import search_query
 import synonyms
 
 requiert_es = pytest.mark.requires_elasticsearch
@@ -43,6 +49,14 @@ ANALYSE = {
             "tokenizer": "standard",
             "filter": ["lowercase", "synonymes_fr", "french_stop", "french_stemmer"],
         },
+        # Sans filtre de synonymes, à dessein : c'est là-dessus que porte
+        # la branche de rattrapage orthographique de build_text_clause,
+        # dont toute la raison d'être est d'échapper au thésaurus (voir
+        # test_ajouter_une_regle_n_enleve_jamais_de_resultats).
+        "exact": {
+            "tokenizer": "standard",
+            "filter": ["lowercase", "asciifolding"],
+        },
     },
     "filter": {
         "french_stop": {"type": "stop", "stopwords": "_french_"},
@@ -55,12 +69,20 @@ ANALYSE = {
     },
 }
 
+# Le sous-champ `.exact` est peuplé À L'INDEXATION : il doit exister dès
+# la création de l'index, contrairement à l'analyseur de RECHERCHE que la
+# migration pose après coup. Un sous-champ ajouté plus tard resterait vide
+# pour tous les documents déjà indexés — et la branche de rattrapage,
+# muette, sans que rien ne le signale.
+SOUS_CHAMP_EXACT = {"exact": {"type": "text", "analyzer": "exact"}}
+
 MAPPING_CONTENT = {
     "content": {
         "type": "text",
         "analyzer": "french",
         "search_analyzer": "french_search",
         "search_quote_analyzer": "french",
+        "fields": SOUS_CHAMP_EXACT,
     }
 }
 
@@ -97,17 +119,34 @@ def thesaurus(es, monkeypatch_module=None):
             "number_of_shards": 1,
             "number_of_replicas": 0,
             "analysis": {
-                "analyzer": ANALYSE["analyzer"]["french"] and {"french": ANALYSE["analyzer"]["french"]},
+                "analyzer": {
+                    "french": ANALYSE["analyzer"]["french"],
+                    "exact":  ANALYSE["analyzer"]["exact"],
+                },
                 "filter": {k: v for k, v in ANALYSE["filter"].items() if k != "synonymes_fr"},
             },
         },
-        mappings={"properties": {"content": {"type": "text", "analyzer": "french"}}},
+        mappings={"properties": {"content": {
+            "type": "text", "analyzer": "french", "fields": SOUS_CHAMP_EXACT,
+        }}},
     )
-    es.index(
-        index=INDEX_SONDE,
-        document={"content": "note de la direction des ressources humaines"},
-        refresh=True,
-    )
+    for contenu in (
+        "note de la direction des ressources humaines",
+        "arrêté portant délégation de signature",
+        # Faute de frappe, et pas n'importe laquelle : « déléagation » se
+        # racinise en `deleag`, à UNE correction de `deleg`. C'est donc
+        # exactement le document que l'ancienne clause trouvait par sa
+        # fuzziness, et que l'ajout d'une règle faisait disparaître — le
+        # cas qui donnait MOINS de résultats après enrichissement du
+        # thésaurus. Une faute plus grossière (« délégatoin » → `delegatoin`)
+        # ne prouverait rien : l'ancienne clause ne la trouvait pas non plus.
+        "arrêté portant déléagation de signature",
+        # Ne partage aucun mot avec les autres tests du fichier : la sonde
+        # est partagée, et un « drh » de plus ici ferait mentir leurs
+        # comptages.
+        "note de mutation interne",
+    ):
+        es.index(index=INDEX_SONDE, document={"content": contenu}, refresh=True)
 
     yield es
 
@@ -218,6 +257,50 @@ def test_une_regle_ajoutee_prend_effet_a_chaud(thesaurus):
 
     synonyms.ajouter(es, "rh, ressources humaines")
     assert _trouve(es, {"match": {"content": "rh"}}) == 1
+
+
+@requiert_es
+def test_ajouter_une_regle_n_enleve_jamais_de_resultats(thesaurus):
+    """LE contre-sens du thésaurus, et la raison d'être des deux branches
+    de build_text_clause : une règle bien écrite FAISAIT CHUTER le nombre
+    de résultats du terme qu'elle enrichit.
+
+    Lucene n'applique la fuzziness que dans `newTermQuery`, appelé pour
+    les positions à jeton unique ; une position élargie par le thésaurus
+    passe par `newSynonymQuery`, qui construit une `SynonymQuery` de
+    termes bruts. La règle échangeait donc, en silence, la tolérance aux
+    fautes contre l'expansion — sur l'index de la VM de dev, « congés »
+    perdait 5330 documents pour en gagner 2, et l'administrateur n'avait
+    aucun moyen de relier la chute à la règle qu'il venait d'écrire.
+
+    Ni l'ordre des filtres ni les jetons produits n'y étaient pour quoi
+    que ce soit : le panneau de test du thésaurus affichait `drh, cong`,
+    parfaitement corrects. C'est la CLAUSE qui devait changer, pas
+    l'analyse — d'où la branche floue portée par les sous-champs
+    `.exact`, seuls champs hors de portée du thésaurus.
+    """
+    es = thesaurus
+    _migrer(es)
+
+    def chercher(mot: str) -> set[str]:
+        es.indices.refresh(index=INDEX_SONDE)
+        reponse = es.search(
+            index=INDEX_SONDE, query=search_query.build_text_clause(mot, "all"),
+        )
+        return {hit["_source"]["content"] for hit in reponse["hits"]["hits"]}
+
+    avant = chercher("délégation")
+    assert any("déléagation" in contenu for contenu in avant), (
+        "la faute de frappe doit être rattrapée AVANT la règle — sans quoi "
+        "le test ne prouve rien de ce qu'il prétend prouver"
+    )
+
+    synonyms.ajouter(es, "délégation, mutation")
+    apres = chercher("délégation")
+
+    # Le point du test : une règle AJOUTE, elle ne retire pas.
+    assert avant <= apres
+    assert any("mutation" in contenu for contenu in apres)
 
 
 @requiert_es
