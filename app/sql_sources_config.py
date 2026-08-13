@@ -237,6 +237,9 @@ def _validate_fields(fields: list[dict], id_column: str) -> list[dict]:
         raise ValueError("Le mapping 'fields' ne peut pas être vide.")
 
     columns = set()
+    # es_field -> (colonne, type) déjà rencontrés, pour refuser deux
+    # mappages vers le même champ ES (voir plus bas).
+    champs_es: dict[str, tuple[str, str]] = {}
     for f in fields:
         if "column" not in f or "es_field" not in f or "es_type" not in f:
             raise ValueError(
@@ -260,6 +263,32 @@ def _validate_fields(fields: list[dict], id_column: str) -> list[dict]:
                 f"La colonne '{f['column']}' ne peut pas être une facette : seuls les "
                 f"types 'keyword' et 'boolean' le permettent (type actuel : '{f['es_type']}')."
             )
+        # Un champ ES mappé deux fois est ambigu de bout en bout, et la
+        # contradiction ne se voit nulle part : sql_indexer.py construit
+        # aussi bien le mapping (properties[f.es_field] = ...) que le
+        # document ({f.es_field: ... for f in source.fields}) par
+        # écrasement successif, donc le DERNIER mappage gagne — mais
+        # seulement à la création de l'index, ES refusant ensuite de
+        # changer le type d'un champ existant.
+        #
+        # Le contrôle de facette juste au-dessus devient alors un
+        # mensonge : il valide le type DÉCLARÉ par l'entrée, pendant que
+        # l'agrégation ira frapper le type RÉEL du champ dans l'index.
+        # C'est très exactement ce qui a mis la recherche fédérée à zéro
+        # résultat le 2026-08-13 — une source déclarant « titre -> title
+        # (text) » puis « titre -> title (keyword, facette) », d'où une
+        # agrégation terms sur un champ text et 13 shards sur 14 en
+        # échec (voir _verifier_shards() dans search_api.py).
+        if f["es_field"] in champs_es:
+            colonne_precedente, type_precedent = champs_es[f["es_field"]]
+            raise ValueError(
+                f"Le champ Elasticsearch '{f['es_field']}' est mappé deux fois : "
+                f"colonne '{colonne_precedente}' en '{type_precedent}', puis colonne "
+                f"'{f['column']}' en '{f['es_type']}'. Un champ ES ne peut avoir qu'un "
+                f"seul type et qu'une seule source de valeur — gardez le mappage utile "
+                f"et supprimez l'autre."
+            )
+        champs_es[f["es_field"]] = (f["column"], f["es_type"])
         columns.add(f["column"])
 
     if id_column not in columns:
