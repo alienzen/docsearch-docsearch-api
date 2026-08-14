@@ -9,3 +9,12 @@ __pycache__/
 .coverage
 htmlcov/
 coverage.xml
+
+# Espace de travail des sessions Claude Code : aujourd'hui `worktrees/`,
+# des copies de travail jetables créées le temps d'une tâche. Rien de ce
+# qui s'y trouve n'a de sens pour quelqu'un d'autre, et une copie du
+# dépôt versionnée dans le dépôt n'était bonne à rien.
+# ⚠️ Emporte aussi une éventuelle configuration partagée du projet
+# (`.claude/settings.json`, agents, compétences) : la versionner
+# demanderait de dé-ignorer ces fichiers un par un.
+.claude/
