@@ -100,6 +100,14 @@ DEFAULT_UI_CONFIG = {
                                     # N'influe que sur l'affichage : la mesure, la ligne de
                                     # journal des recherches lentes et l'enregistrement dans
                                     # l'index search_logs ont lieu quel que soit ce flag.
+    "score_enabled":       True,   # badge de pourcentage de pertinence sur chaque carte de
+                                    # résultat ("87 %", dérivé du score Elasticsearch). True par
+                                    # défaut, suivant la règle énoncée juste au-dessus : ce badge
+                                    # existait avant sa bascule, un flag qui MASQUE une
+                                    # fonctionnalité déjà présente démarre à True.
+                                    # Purement un affichage : le CLASSEMENT par pertinence, lui,
+                                    # ne dépend pas de ce flag — désactivé, les résultats restent
+                                    # dans le même ordre, seul le pourcentage disparaît.
     "acl_visible_enabled": True,   # section "Droits d'accès" de la fiche détail (propriétaire,
                                     # groupes autorisés) visible des utilisateurs NON administrateurs.
                                     # Désactivé, elle n'apparaît plus que pour les membres d'ADMIN_GROUP.

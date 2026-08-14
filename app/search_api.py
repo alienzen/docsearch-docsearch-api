@@ -3269,6 +3269,7 @@ class UiConfigUpdate(BaseModel):
     collections_shared_enabled: bool | None = None
     sort_enabled:        bool | None = None
     search_time_enabled: bool | None = None
+    score_enabled:       bool | None = None
     acl_visible_enabled: bool | None = None
     shortcuts_link_enabled: bool | None = None
     empty_state_animation_enabled: bool | None = None
@@ -3376,6 +3377,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("sort_enabled", body.sort_enabled)
         if body.search_time_enabled is not None:
             config = ui_config.set_param("search_time_enabled", body.search_time_enabled)
+        if body.score_enabled is not None:
+            config = ui_config.set_param("score_enabled", body.score_enabled)
         if body.acl_visible_enabled is not None:
             config = ui_config.set_param("acl_visible_enabled", body.acl_visible_enabled)
         if body.shortcuts_link_enabled is not None:
