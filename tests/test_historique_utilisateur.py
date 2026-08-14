@@ -16,6 +16,10 @@
 #    dans la barre de recherche produirait une 400, et un `.*` collé
 #    ferait balayer tout le dictionnaire de termes. Vérifié contre le VRAI
 #    moteur — c'est lui qui accepte ou refuse, pas ma relecture.
+# 4. **L'anonymisation à l'effacement** (section 6). Effacer ses
+#    recherches réécrit le journal, définitivement : un test doit dire ce
+#    qui part, ce qui reste, et sur qui — une anonymisation incomplète
+#    laisserait un nom là où l'écran promet qu'il n'y en a plus.
 #
 # Elasticsearch est le vrai (principe 1 de conftest.py), sur des index
 # jetables supprimés avant ET après (principe 2) : jamais `search_logs`
@@ -28,16 +32,19 @@
 
 import re
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 import cluster_status
+import history_purge
 import search_api
 import search_log
 import sql_sources_config
 import user_history
 
 requiert_es = pytest.mark.requires_elasticsearch
+requiert_redis = pytest.mark.requires_redis
 
 INDEX_JOURNAL = "docsearch_test_sonde_historique"
 INDEX_CORPUS = "docsearch_test_sonde_suggestions"
@@ -718,3 +725,321 @@ def test_les_consultations_des_autres_ne_remontent_pas(clics):
     journal de toute l'installation qui est lu."""
     assert "doc-de-lautre" not in user_history.recent_documents(clics, MOI, 10)
     assert user_history.recent_documents(clics, AUTRE, 10) == ["doc-de-lautre"]
+
+
+# ── 6. Effacement de l'historique par l'utilisateur ──────────
+#
+# Les deux gestes RÉÉCRIVENT le journal, chacun à sa façon (voir
+# history_purge.py, qui dit pourquoi elles diffèrent) :
+#
+#   - effacer ses RECHERCHES les ANONYMISE — nom d'utilisateur et adresse
+#     IP ôtés, le reste conservé, groupes compris ;
+#   - effacer ses DOCUMENTS CONSULTÉS SUPPRIME le détail des clics
+#     antérieurs et n'en garde que le nombre (`clicks_erased`).
+#
+# Irréversibles l'un comme l'autre, et c'est le but : ces tests vérifient
+# les deux moitiés de chaque promesse, ce qui part ET ce qui reste. Le
+# script Painless de la suppression n'a d'ailleurs pas d'autre juge que
+# le moteur — une relecture ne dit pas si `removeIf` sur une liste
+# imbriquée fait ce qu'on croit.
+#
+# La dissymétrie a un prix, testé ici aussi : anonymiser une recherche
+# détache les clics qu'elle porte, donc vide la partie antérieure des
+# documents consultés. L'inverse n'est pas vrai — effacer ses
+# consultations ne coûte aucune recherche — et ce n'en est pas une
+# inconséquence : le dommage ne doit pas dépasser la demande.
+#
+# Redis et Elasticsearch sont les VRAIS, comme partout ailleurs
+# (principe 1 de conftest.py) : ce qui est vérifié tient à la réécriture
+# exécutée par l'un, au marqueur écrit dans l'autre, et au filtrage — dont
+# la borne sur la date du CLIC, imbriquée, qu'aucune relecture ne
+# garantit. La clé Redis du compte de sonde est effacée avant ET après
+# (principe 2).
+
+PURGEUR = "sonde.purgeur"
+
+MAINTENANT = datetime.now(timezone.utc)
+AVANT = (MAINTENANT - timedelta(hours=1)).isoformat()
+# Une entrée de journal DATÉE DU FUTUR est artificielle, mais c'est le
+# seul moyen d'encadrer une purge dont la date est « maintenant » sans
+# faire dépendre le test du calendrier : un horodatage écrit en dur
+# cesserait d'être « après » au bout de quelques jours.
+APRES = (MAINTENANT + timedelta(hours=1)).isoformat()
+
+
+@pytest.fixture
+def purgeur():
+    """Efface les marqueurs du compte de sonde autour du test."""
+    def _oublier():
+        client = history_purge._get_redis_client()
+        if client is not None:
+            client.delete(history_purge.KEY_PREFIX + PURGEUR)
+
+    _oublier()
+    yield PURGEUR
+    _oublier()
+
+
+@pytest.fixture
+def journal_du_purgeur(es, journal, purgeur):
+    """Deux recherches et deux clics, de part et d'autre de « maintenant ».
+
+    Indexés directement plutôt que par log_search() : celui-ci horodate à
+    l'instant, et il faut ici choisir les dates. Sous des identifiants
+    FIXES, pour que la fixture puisse resservir sans accumuler des
+    doublons — le journal en compte deux, quel que soit le nombre de
+    tests qui l'ont demandé. Réindexés à chaque test, ils rendent aussi
+    leurs champs nominatifs à celui qui suit une anonymisation.
+
+    Les deux champs que l'anonymisation ôte sont présents — sans l'IP, un
+    test vert ne prouverait rien de plus que la disparition du nom — et
+    les groupes aussi, qui, eux, doivent SURVIVRE.
+
+    La recherche ANTÉRIEURE porte DEUX clics, un de chaque côté de la
+    borne : c'est le cas que la suppression doit trancher à l'intérieur
+    d'une même liste imbriquée (un document ouvert ce matin depuis une
+    vieille recherche reste), et il n'y a pas d'autre façon de vérifier
+    que le script Painless coupe au bon endroit plutôt que de vider le
+    tableau.
+    """
+    es.index(index=INDEX_JOURNAL, id="purge-avant", document={
+        "username": PURGEUR, "ip": "10.1.2.3", "groups": ["sonde-service"],
+        "query": "avant l'effacement", "timestamp": AVANT, "total_results": 3,
+        "clicks": [
+            {"doc_id": "doc-avant", "position": 0, "timestamp": AVANT},
+            {"doc_id": "doc-tardif", "position": 1, "timestamp": APRES},
+        ],
+    })
+    es.index(index=INDEX_JOURNAL, id="purge-apres", document={
+        "username": PURGEUR, "ip": "10.1.2.3", "groups": ["sonde-service"],
+        "query": "après l'effacement", "timestamp": APRES, "total_results": 3,
+        "clicks": [{"doc_id": "doc-apres", "position": 0, "timestamp": APRES}],
+    })
+    es.indices.refresh(index=INDEX_JOURNAL)
+    return es
+
+
+def _document(es, identifiant: str) -> dict:
+    """Le document de journal tel qu'il est RÉELLEMENT stocké — c'est lui
+    qui dit ce que l'installation garde, pas la vue rendue à
+    l'utilisateur."""
+    return es.get(index=INDEX_JOURNAL, id=identifiant)["_source"]
+
+
+@requiert_es
+@requiert_redis
+def test_sans_effacement_tout_l_historique_remonte(journal_du_purgeur):
+    """Le témoin : sans effacement, les deux recherches et les trois
+    documents sont là. Sans lui, les tests suivants passeraient au vert
+    même si la fixture n'avait rien indexé."""
+    textes = [e["query"] for e in user_history.recent_queries(journal_du_purgeur, PURGEUR, 20)]
+    assert set(textes) == {"avant l'effacement", "après l'effacement"}
+    assert set(user_history.recent_documents(journal_du_purgeur, PURGEUR, 20)) == {
+        "doc-avant", "doc-tardif", "doc-apres",
+    }
+
+
+@requiert_es
+@requiert_redis
+def test_effacer_les_recherches_les_retire_de_l_historique(journal_du_purgeur):
+    history_purge.purger_recherches(journal_du_purgeur, PURGEUR)
+    textes = [e["query"] for e in user_history.recent_queries(journal_du_purgeur, PURGEUR, 20)]
+    assert textes == ["après l'effacement"]
+
+
+@requiert_es
+@requiert_redis
+def test_effacer_les_recherches_anonymise_le_journal(journal_du_purgeur):
+    """Le test qui porte tout le changement : la recherche effacée est
+    TOUJOURS au journal — c'est ce que l'installation garde — mais plus
+    rien n'y dit qui l'a lancée."""
+    history_purge.purger_recherches(journal_du_purgeur, PURGEUR)
+
+    efface = _document(journal_du_purgeur, "purge-avant")
+    for champ in history_purge.CHAMPS_NOMINATIFS:
+        assert champ not in efface, f"« {champ} » nomme encore son auteur"
+    # ... et ce qui fait la valeur du journal une fois anonymisé.
+    assert efface["query"] == "avant l'effacement"
+    assert efface["total_results"] == 3
+
+
+@requiert_es
+@requiert_redis
+def test_l_anonymisation_garde_les_groupes(journal_du_purgeur):
+    """Arbitré le 2026-08-14 : un groupe désigne un service, pas
+    quelqu'un, et les répartitions par service sont une lecture
+    réellement utilisée — les vider de toutes les recherches effacées
+    coûterait plus qu'elle ne protège.
+
+    Test à part, et non une ligne de plus dans le précédent : c'est une
+    décision, pas un détail d'implémentation. Si elle change un jour,
+    c'est ce test-là qu'on viendra supprimer, en sachant ce qu'on
+    supprime.
+    """
+    history_purge.purger_recherches(journal_du_purgeur, PURGEUR)
+    assert _document(journal_du_purgeur, "purge-avant")["groups"] == ["sonde-service"]
+
+
+@requiert_es
+@requiert_redis
+def test_l_anonymisation_ne_touche_pas_les_recherches_posterieures(journal_du_purgeur):
+    """L'effacement porte sur le passé : une recherche lancée APRÈS
+    appartient à l'historique neuf, et doit rester lisible par son
+    auteur, nom compris."""
+    history_purge.purger_recherches(journal_du_purgeur, PURGEUR)
+    assert _document(journal_du_purgeur, "purge-apres")["username"] == PURGEUR
+
+
+@requiert_es
+@requiert_redis
+def test_rien_n_est_supprime_du_journal(journal_du_purgeur):
+    """Anonymiser n'est pas supprimer : les deux lignes restent, avec
+    leurs clics — l'effacement des RECHERCHES ne touche pas au détail des
+    consultations, qui a son propre bouton. La suppression pour de bon
+    relève de la durée de conservation (log_retention.py), pas d'un
+    bouton d'écran."""
+    history_purge.purger_recherches(journal_du_purgeur, PURGEUR)
+    restants = journal_du_purgeur.search(
+        index=INDEX_JOURNAL,
+        query={"terms": {"query.keyword": ["avant l'effacement", "après l'effacement"]}},
+    )
+    assert restants["hits"]["total"]["value"] == 2
+    assert len(_document(journal_du_purgeur, "purge-avant")["clicks"]) == 2
+
+
+@requiert_es
+@requiert_redis
+def test_l_effacement_vaut_aussi_pour_l_autocompletion(journal_du_purgeur):
+    """La suggestion de saisie lit le même historique : sans ce filtrage,
+    une recherche effacée reparaîtrait sous les doigts de l'utilisateur à
+    la frappe suivante."""
+    history_purge.purger_recherches(journal_du_purgeur, PURGEUR)
+    propositions = user_history.matching_queries(journal_du_purgeur, PURGEUR, "avant", 5)
+    assert propositions == []
+
+
+@requiert_es
+@requiert_redis
+def test_le_marqueur_suit_la_borne_de_l_anonymisation(journal_du_purgeur):
+    """Le marqueur n'est plus que le second rideau, mais il doit porter
+    EXACTEMENT la borne de l'anonymisation : une date postérieure
+    masquerait sans l'anonymiser une recherche lancée entre les deux."""
+    instant = history_purge.purger_recherches(journal_du_purgeur, PURGEUR)
+    assert history_purge.purge_le(PURGEUR, history_purge.RECHERCHES) == instant
+
+
+@requiert_es
+@requiert_redis
+def test_l_anonymisation_faite_le_marqueur_est_en_meilleur_effort(journal_du_purgeur, monkeypatch):
+    """Redis muet ne doit pas faire échouer un effacement DÉJÀ écrit dans
+    le journal : annoncer l'échec à quelqu'un dont les recherches sont
+    parties pour de bon l'inviterait à recommencer une opération
+    irréversible et réussie."""
+    monkeypatch.setattr(history_purge, "_get_redis_client", lambda: None)
+
+    history_purge.purger_recherches(journal_du_purgeur, PURGEUR)
+
+    assert "username" not in _document(journal_du_purgeur, "purge-avant")
+    # Sans marqueur, c'est bien l'anonymisation seule qui vide la liste.
+    textes = [e["query"] for e in user_history.recent_queries(journal_du_purgeur, PURGEUR, 20)]
+    assert textes == ["après l'effacement"]
+
+
+@requiert_es
+@requiert_redis
+def test_effacer_les_documents_retire_les_consultations_anterieures(journal_du_purgeur):
+    """La borne porte sur la date du CLIC : c'est ce que cette liste
+    raconte, pas la date de la recherche qui a mené au document. D'où
+    « doc-tardif », ouvert après l'effacement depuis une recherche
+    d'avant — il reste."""
+    history_purge.purger_documents(journal_du_purgeur, PURGEUR)
+    assert set(user_history.recent_documents(journal_du_purgeur, PURGEUR, 20)) == {
+        "doc-tardif", "doc-apres",
+    }
+
+
+@requiert_es
+@requiert_redis
+def test_effacer_les_documents_supprime_le_detail_des_clics(journal_du_purgeur):
+    """Le pendant du test d'anonymisation, pour l'autre liste : le clic
+    antérieur ne se cache pas, il n'existe plus — ni le document ouvert,
+    ni l'heure, ni la position. Et il ne part pas seul de son tableau :
+    celui de la même recherche, postérieur à la borne, doit y rester.
+    """
+    history_purge.purger_documents(journal_du_purgeur, PURGEUR)
+
+    clics_restants = _document(journal_du_purgeur, "purge-avant")["clicks"]
+    assert [clic["doc_id"] for clic in clics_restants] == ["doc-tardif"]
+    # Le clic effacé l'est ENTIÈREMENT : ni le document, ni l'heure, ni la
+    # position ne subsistent quelque part dans le tableau.
+    assert all(clic["timestamp"] != AVANT for clic in clics_restants)
+
+
+@requiert_es
+@requiert_redis
+def test_le_nombre_de_clics_effaces_reste_au_journal(journal_du_purgeur):
+    """Ce qui reste, et pourquoi : « cette recherche a mené à deux
+    consultations » est le signal d'engagement que l'administration lit
+    (colonne « Clics », export). Tomber à un ferait passer la recherche
+    pour moins utile qu'elle ne l'a été — un journal qui ment par
+    omission ne vaut pas mieux qu'un écran qui ment."""
+    history_purge.purger_documents(journal_du_purgeur, PURGEUR)
+    assert _document(journal_du_purgeur, "purge-avant")["clicks_erased"] == 1
+
+
+@requiert_es
+@requiert_redis
+def test_effacer_les_documents_ne_coute_aucune_recherche(journal_du_purgeur):
+    """Le dommage ne doit pas dépasser la demande : effacer ce qu'on a
+    ouvert ne touche ni au texte cherché, ni au nom qui le porte. C'est
+    pour cela que cette liste-ci est SUPPRIMÉE et non anonymisée —
+    anonymiser aurait emporté l'historique de recherche."""
+    history_purge.purger_documents(journal_du_purgeur, PURGEUR)
+    textes = [e["query"] for e in user_history.recent_queries(journal_du_purgeur, PURGEUR, 20)]
+    assert set(textes) == {"avant l'effacement", "après l'effacement"}
+    assert _document(journal_du_purgeur, "purge-avant")["username"] == PURGEUR
+
+
+@requiert_es
+@requiert_redis
+def test_effacer_les_documents_ne_vaut_que_pour_son_auteur(journal_du_purgeur, clics):
+    """Une borne mal filtrée effacerait les consultations de tout le
+    monde : celles des autres comptes doivent être intactes."""
+    history_purge.purger_documents(journal_du_purgeur, PURGEUR)
+    assert user_history.recent_documents(clics, MOI, 10) == ["doc-recent", "doc-ancien"]
+
+
+@requiert_es
+@requiert_redis
+def test_effacer_les_recherches_emporte_les_documents_anterieurs(journal_du_purgeur):
+    """L'autre sens, lui, a un prix — c'est LA contrepartie de
+    l'anonymisation, et l'interface l'annonce avant de confirmer : le
+    clic vit dans le document de sa recherche, une recherche anonyme ne
+    porte plus le nom sur lequel la liste des documents se filtre.
+
+    Test de la conséquence assumée : s'il rougit, c'est ou bien que
+    l'anonymisation a cessé d'être complète, ou bien qu'un mécanisme
+    rattache de nouveau ces clics à leur auteur — et il faudrait alors
+    savoir lequel, car ce serait le nom réintroduit par une autre porte.
+
+    « doc-tardif » part avec : il a beau avoir été ouvert APRÈS
+    l'effacement, la recherche qui le porte, elle, est antérieure. Le
+    prix est donc plus lourd qu'il n'y paraît, et l'écran doit le dire.
+    """
+    history_purge.purger_recherches(journal_du_purgeur, PURGEUR)
+    assert user_history.recent_documents(journal_du_purgeur, PURGEUR, 20) == ["doc-apres"]
+
+
+@requiert_es
+@requiert_redis
+def test_l_effacement_ne_vaut_que_pour_son_auteur(journal_du_purgeur):
+    """L'anonymisation est nominative, et elle écrit : celle de l'un ne
+    doit ni vider la liste de l'autre, ni toucher ses lignes de journal.
+    Une borne de temps mal filtrée effacerait le nom de tout le monde."""
+    history_purge.purger_recherches(journal_du_purgeur, PURGEUR)
+    assert user_history.recent_queries(journal_du_purgeur, MOI, 20) != []
+    anonymes = journal_du_purgeur.search(
+        index=INDEX_JOURNAL,
+        query={"bool": {"must_not": [{"exists": {"field": "username"}}]}},
+    )
+    assert [hit["_id"] for hit in anonymes["hits"]["hits"]] == ["purge-avant"]

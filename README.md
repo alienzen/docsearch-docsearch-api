@@ -35,7 +35,9 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | GET  | `/alerts` | Notifications in-app de l'utilisateur (nouveaux résultats détectés par `alert_worker.py`) |
 | POST | `/alerts/{id}/seen`, `/alerts/mark-all-seen` | Marque une/toutes les notifications comme lues |
 | GET  | `/me/searches` | Historique de recherche de l'utilisateur courant (le sien, et rien d'autre) |
+| DELETE | `/me/searches` | Efface cet historique : ses recherches passées sont **anonymisées** dans le journal |
 | GET  | `/me/recent-documents` | Derniers documents qu'il a ouverts, relus à travers l'ACL |
+| DELETE | `/me/recent-documents` | Efface cette liste : le détail des clics est **supprimé** du journal, seul leur nombre reste |
 | POST | `/collections/{id}/share`, `.../duplicate` | Partage d'une collection avec ses groupes, et copie |
 | GET  | `/search/suggest` | Suggestions de saisie : ses recherches passées, puis auteurs et mots-clés visibles |
 | GET  | `/searchable-sources` | Sources cherchables, pour la présélection avant recherche |
@@ -267,6 +269,90 @@ l'historique : elle s'y afficherait comme une ligne vide, et le format
 n'en porte pas de quoi la rejouer — `search_logs` enregistre les critères
 à titre informatif, mais pas les facettes personnalisées des sources SQL.
 
+### Effacement par l'utilisateur (2026-08-14)
+
+`DELETE /me/searches` et `DELETE /me/recent-documents` vident les deux
+listes personnelles. Chacune de son côté : effacer ce qu'on a cherché et
+effacer ce qu'on a ouvert sont deux gestes distincts.
+
+Les deux **réécrivent le journal** et aucune ne se contente de masquer.
+Mais elles ne le réécrivent pas de la même façon — l'une anonymise,
+l'autre supprime — et cet écart suit l'imbrication des données : le clic
+vit DANS la recherche, la recherche ne vit dans rien (voir
+`history_purge.py`).
+
+**`DELETE /me/searches` anonymise le journal.** La route ôte des
+recherches antérieures à l'appel ce qui **nomme** leur auteur —
+`username` et `ip` — par un `_update_by_query` sur `search_logs`. Tout
+le reste demeure : texte cherché, résultats, temps, avis pouce, clics.
+La recherche continue de compter dans les statistiques de
+l'installation ; elle ne nomme plus personne. **C'est irréversible.**
+Anonymiser plutôt que supprimer, pour deux raisons :
+
+1. Le même document porte les statistiques d'administration, l'avis
+   pouce et la trace d'exploitation. Ranger son écran n'est pas décider
+   de la comptabilité de l'installation.
+2. La suppression pour de bon existe déjà, décidée et écrite ailleurs :
+   la **conservation des journaux** (voir plus bas). Une seconde voie de
+   suppression, à la main de chacun, brouillerait ce qui est un délai.
+
+⚠️ **`groups` n'est PAS ôté** (arbitré le 2026-08-14) : un groupe est un
+service, pas quelqu'un, et les répartitions par service sont une lecture
+réellement utilisée. Réserve, déjà écrite dans l'aide des statistiques :
+aucun effectif minimum n'est appliqué à ces répartitions, donc dans un
+service très restreint, un groupe et une requête singulière peuvent
+suffire à resserrer sur une personne. L'anonymisation ôte le nom, elle ne
+fabrique pas un anonymat statistique — et l'écran ne promet que cela.
+
+⚠️ **Conséquence assumée** : les clics sont `nested` **dans le document
+de la recherche** qui les a produits. Anonymiser ses recherches détache
+donc aussi ses documents consultés, et `/me/recent-documents` perd tout
+ce qui précède l'effacement. On ne peut pas rendre une recherche anonyme
+en gardant nominatif le clic qu'elle porte. L'interface l'annonce avant
+de confirmer.
+
+**`DELETE /me/recent-documents` supprime le détail des clics** antérieurs
+à l'appel — `doc_id`, `timestamp`, `position` — dans les recherches de
+l'appelant, et reporte leur nombre dans `clicks_erased` (voir
+`search_log.py`). La borne porte sur la **date du clic**, pas sur celle
+de la recherche : c'est ce que cette liste-là raconte, et un document
+ouvert ce matin depuis une recherche du mois dernier s'efface donc sans
+que la recherche bouge. **C'est irréversible.**
+
+Supprimer et non anonymiser, cette fois, parce que ce qui rattache un
+clic à quelqu'un n'est pas dans le clic : c'est le `username` de la
+recherche qui le contient. L'anonymiser emporterait un historique de
+recherche que l'utilisateur n'a **pas** demandé d'effacer — entre
+détruire ce qu'il demande d'effacer et détruire ce qu'il ne demande pas,
+le choix est fait. La contrepartie du geste inverse, elle, est
+inévitable : on peut retirer un clic d'une recherche nommée, on ne peut
+pas nommer un clic dans une recherche anonyme.
+
+Le **nombre** subsiste parce que « cette recherche a mené à trois
+consultations » est le signal d'engagement que l'installation lit
+vraiment (colonne « Clics », export XLS). Le faire tomber à zéro ferait
+passer ces recherches pour infructueuses — un journal qui ment par
+omission ne vaut pas mieux qu'un écran qui ment. L'interface affiche donc
+« 3 (dont 2 effacés) », et l'export porte la part effacée en dernière
+colonne.
+
+Les marqueurs continuent d'être posés et lus, mais en **second rideau** :
+ils couvrent les effacements demandés avant cette version et l'événement
+journalisé à la seconde près, encore invisible du moteur au moment de la
+réécriture. Celui des recherches est lu par `/me/searches` **et
+`/search/suggest`**, qui puise au même historique et ressusciterait sinon
+sous les doigts ce qui vient d'être effacé.
+
+Pannes : à la lecture, Redis injoignable retombe sur « jamais effacé »
+(historique complet — la panne d'un cache ne fait pas disparaître ses
+recherches à quelqu'un qui n'a rien demandé), ce qui est sans danger,
+les traces ayant déjà été réécrites. À l'écriture, un journal impossible
+à réécrire répond **503** plutôt que de faire semblant ; le marqueur, lui,
+est en meilleur effort une fois la réécriture faite — échouer là-dessus
+annoncerait un échec à quelqu'un dont les traces sont bel et bien
+parties. Les deux routes suivent les bascules des listes qu'elles
+effacent : désactivées, elles renvoient 403 comme les `GET`.
+
 ## Collections partagées et documents récemment consultés
 
 **`GET /me/recent-documents`** relit les clics déjà journalisés (voir
@@ -275,6 +361,8 @@ l'appelant. Les identifiants viennent du journal, mais les **documents
 sont relus à travers le filtre ACL** : un document dont les droits ont
 changé depuis la consultation, ou supprimé de l'index, n'est pas rendu.
 Un historique de consultation ne rouvre pas une porte qui s'est fermée.
+La liste s'efface par `DELETE /me/recent-documents` — voir « Effacement
+par l'utilisateur » plus haut.
 
 **`POST /collections/{id}/share`** partage une collection avec des
 groupes (liste vide = retour au personnel). Trois règles :

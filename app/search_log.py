@@ -46,6 +46,12 @@ _ENGAGEMENT_PROPERTIES = {
             "timestamp": {"type": "date"},
         },
     },
+    # Clics dont l'utilisateur a effacé le détail (history_purge.py). Le
+    # document ouvert et la date partent ; le NOMBRE reste, sans quoi une
+    # recherche ayant mené à trois consultations se lirait « 0 clic » —
+    # soit, pour l'administration, l'inverse de ce qui s'est passé. Absent
+    # tant que personne n'a rien effacé.
+    "clicks_erased": {"type": "integer"},
 }
 
 # Idem, ajoutés après coup : critères de filtrage actifs au moment de la

@@ -29,6 +29,21 @@ import unicodedata
 # qu'écriture et lecture ne peuvent pas viser deux index différents.
 import search_log
 
+# Date à partir de laquelle l'utilisateur veut revoir son historique (voir
+# history_purge.py). Consultée ICI, dans les deux fonctions de lecture,
+# plutôt que passée par les routes : /me/searches n'est pas le seul chemin
+# vers ses recherches passées — /search/suggest en propose aussi, par
+# matching_queries(), et un effacement que ce chemin-là oublierait
+# ressusciterait sous les doigts ce que l'utilisateur vient d'effacer.
+#
+# ⚠️ Pour les RECHERCHES, cette date n'est plus le mécanisme principal :
+# effacer ses recherches les anonymise dans le journal, et un document
+# qui ne porte plus de nom d'utilisateur ne passe déjà plus le filtre
+# ci-dessous. La borne reste lue pour les effacements antérieurs à cette
+# version et pour la recherche encore invisible du moteur au moment de
+# l'anonymisation.
+import history_purge
+
 logger = logging.getLogger(__name__)
 
 # Nombre de requêtes distinctes relues pour alimenter l'autocomplétion.
@@ -106,18 +121,29 @@ def recent_queries(es, username: str, limit: int = 10) -> list[dict]:
     porte pas de quoi les rejouer — voir la note de `/me/searches` dans
     le README de l'API.
 
+    S'il a effacé son historique, les recherches d'avant ne remontent
+    plus : elles ont été anonymisées, donc ne portent plus le nom sur
+    lequel le filtre ci-dessous s'appuie (history_purge.py) — la borne
+    `depuis` ne fait que doubler ce filtre. Une recherche relancée depuis
+    reparaît, et c'est bien ce qu'on attend : l'oubli porte sur ce qui a
+    été fait avant, pas sur le texte lui-même.
+
     Le tri d'une agrégation `terms` par sous-agrégation est approximatif
     dès qu'un index a plusieurs shards ; `search_logs` en a un seul (créé
     sans réglage explicite, voir search_log.py), donc l'ordre est ici
     exact. Il le resterait « à peu près » sinon, ce qui suffirait à un
     historique mais pas à un décompte.
     """
+    filtres = [{"term": {"username": username}}]
+    depuis = history_purge.purge_le(username, history_purge.RECHERCHES)
+    if depuis:
+        filtres.append({"range": {"timestamp": {"gte": depuis}}})
     res = es.search(
         index=search_log.SEARCH_LOG_INDEX,
         size=0,
         query={
             "bool": {
-                "filter": [{"term": {"username": username}}],
+                "filter": filtres,
                 "must_not": [{"term": {"query.keyword": ""}}],
             }
         },
@@ -154,7 +180,27 @@ def recent_documents(es, username: str, limit: int = 10) -> list[str]:
     documents à travers le filtre ACL : un document dont les droits ont
     changé depuis le clic, ou qui a été supprimé, ne doit pas
     réapparaître ici sous prétexte qu'il a été consulté un jour.
+
+    S'il a effacé cette liste, les clics d'avant n'existent plus : leur
+    détail a été supprimé du journal, seul leur nombre y subsiste
+    (history_purge.py) — la borne `depuis` ne fait que doubler cette
+    suppression. Elle porte sur la date du CLIC et non sur celle de la
+    recherche : un document ouvert après l'effacement compte, quand bien
+    même la recherche qui l'a trouvé serait antérieure — le clic est ce
+    que la liste raconte.
+
+    ⚠️ Effacer ses RECHERCHES vide aussi cette liste de tout ce qui
+    précède : les recherches anonymisées ne portent plus de nom
+    d'utilisateur, et les clics qu'elles contiennent sortent donc du
+    filtre ci-dessous. C'est la contrepartie de l'anonymisation, dite à
+    l'utilisateur avant qu'il ne confirme — on ne peut pas anonymiser une
+    recherche en gardant nominatif le clic qu'elle porte.
     """
+    depuis = history_purge.purge_le(username, history_purge.DOCUMENTS)
+    # Filtre systématique, `match_all` en l'absence de purge : deux formes
+    # d'agrégation selon le cas donneraient deux chemins de lecture de la
+    # réponse, dont un rarement emprunté.
+    borne = {"range": {"clicks.timestamp": {"gte": depuis}}} if depuis else {"match_all": {}}
     res = es.search(
         index=search_log.SEARCH_LOG_INDEX,
         size=0,
@@ -163,19 +209,24 @@ def recent_documents(es, username: str, limit: int = 10) -> list[str]:
             "clics": {
                 "nested": {"path": "clicks"},
                 "aggs": {
-                    "documents": {
-                        "terms": {
-                            "field": "clicks.doc_id",
-                            "size": limit,
-                            "order": {"dernier": "desc"},
+                    "retenus": {
+                        "filter": borne,
+                        "aggs": {
+                            "documents": {
+                                "terms": {
+                                    "field": "clicks.doc_id",
+                                    "size": limit,
+                                    "order": {"dernier": "desc"},
+                                },
+                                "aggs": {"dernier": {"max": {"field": "clicks.timestamp"}}},
+                            }
                         },
-                        "aggs": {"dernier": {"max": {"field": "clicks.timestamp"}}},
                     }
                 },
             }
         },
     )
-    buckets = res["aggregations"]["clics"]["documents"]["buckets"]
+    buckets = res["aggregations"]["clics"]["retenus"]["documents"]["buckets"]
     return [bucket["key"] for bucket in buckets]
 
 

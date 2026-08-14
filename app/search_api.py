@@ -33,6 +33,7 @@ import search_query
 import path_filter
 import search_log
 import user_history
+import history_purge
 import log_retention
 import duplicates
 import synonyms
@@ -1667,6 +1668,30 @@ def get_my_searches(limit: int = 10, user: str = Depends(current_user)):
         raise HTTPException(status_code=503, detail=f"Historique indisponible : {e}") from e
 
 
+@app.delete("/me/searches")
+def purge_my_searches(user: str = Depends(current_user)):
+    """Efface l'historique de recherche de l'utilisateur courant, en
+    ANONYMISANT ses recherches dans le journal.
+
+    ⚠️ La route écrit dans `search_logs` et l'écriture est irréversible :
+    nom d'utilisateur et adresse IP sont ôtés des recherches antérieures
+    à l'appel. Le reste — texte cherché, résultats, temps, avis, clics,
+    et les groupes, qui décrivent un service et non quelqu'un — demeure
+    et continue de compter dans les statistiques de l'installation : les
+    recherches ne nomment simplement plus personne (voir
+    history_purge.py).
+
+    ⚠️ Les clics étant imbriqués dans le document de leur recherche, le
+    même geste vide la partie antérieure de « Vos derniers documents
+    consultés ». L'interface l'annonce avant de confirmer.
+    """
+    _require_search_history_enabled()
+    try:
+        return {"purged_at": history_purge.purger_recherches(es, user)}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
 def _require_recent_documents_enabled() -> None:
     if not ui_config.get_config().get("recent_documents_enabled", False):
         raise HTTPException(status_code=403, detail="Les documents récemment consultés sont désactivés.")
@@ -1712,6 +1737,37 @@ def get_my_recent_documents(limit: int = 10, user: str = Depends(current_user)):
         for identifiant in identifiants
         if identifiant in trouves
     ]}
+
+
+@app.delete("/me/recent-documents")
+def purge_my_recent_documents(user: str = Depends(current_user)):
+    """Efface la liste « Vos derniers documents consultés » de
+    l'utilisateur courant.
+
+    Effacement distinct de celui des recherches, bien que les deux listes
+    sortent des mêmes documents de journal : effacer ce qu'on a ouvert et
+    effacer ce qu'on a cherché sont deux gestes différents, et rien
+    n'oblige à vouloir les deux. La borne porte ici sur la date du clic
+    (voir user_history.recent_documents).
+
+    ⚠️ La route écrit dans `search_logs` et l'écriture est irréversible :
+    le détail des clics antérieurs — quel document, quand, à quelle
+    position — est SUPPRIMÉ du journal. Seul leur nombre reste, reporté
+    dans `clicks_erased` : « cette recherche a mené à trois
+    consultations » est le signal que l'administration lit, et le faire
+    tomber à zéro ferait passer la recherche pour infructueuse.
+
+    Suppression et non anonymisation, contrairement à /me/searches : ce
+    qui rattache un clic à quelqu'un est le `username` de la recherche
+    qui le contient, et l'anonymiser emporterait un historique de
+    recherche que l'utilisateur n'a pas demandé d'effacer (voir
+    history_purge.py).
+    """
+    _require_recent_documents_enabled()
+    try:
+        return {"purged_at": history_purge.purger_documents(es, user)}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.get("/search/suggest")
@@ -3802,6 +3858,11 @@ def admin_export_search_logs(
         # export précédent. Vides pour les recherches antérieures à la
         # mesure.
         "Durée (ms)", "Moteur ES (ms)",
+        # Même raison, même place : « Clics » garde son sens — le nombre
+        # de documents ouverts depuis cette recherche — et cette colonne
+        # dit combien, parmi eux, ne sont plus détaillés parce que leur
+        # auteur a effacé ses consultations (voir history_purge.py).
+        "dont clics effacés",
     ])
 
     try:
@@ -3817,7 +3878,12 @@ def admin_export_search_logs(
             s = hit["_source"]
             ws.append([
                 s.get("timestamp", ""),
-                s.get("username", ""),
+                # Une recherche anonymisée à la demande de son auteur
+                # (voir history_purge.py) n'a plus de compte. Le dire,
+                # plutôt que laisser une cellule vide qui se lit comme
+                # une donnée perdue — la colonne « Groupes » d'à côté,
+                # elle, reste remplie.
+                s.get("username") or "(anonymisée)",
                 _join(s.get("groups")),
                 s.get("query", ""),
                 s.get("search_in", ""),
@@ -3830,9 +3896,13 @@ def admin_export_search_logs(
                 s.get("total_results", 0),
                 _join(s.get("result_files")),
                 s.get("feedback", ""),
-                len(s.get("clicks") or []),
+                # Les clics effacés comptent ici : la colonne dit combien
+                # de documents ont été ouverts, et ce nombre-là ne change
+                # pas quand leur détail disparaît.
+                len(s.get("clicks") or []) + (s.get("clicks_erased") or 0),
                 s.get("duration_ms", ""),
                 s.get("took_ms", ""),
+                s.get("clicks_erased") or "",
             ])
     except Exception as e:
         if "index_not_found" not in str(e).lower():
@@ -3840,7 +3910,9 @@ def admin_export_search_logs(
 
     # Une largeur par colonne d'en-tête, dans le même ordre : les deux
     # listes doivent rester de même longueur.
-    for col_idx, width in enumerate([19, 14, 28, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8, 12, 14], start=1):
+    for col_idx, width in enumerate(
+        [19, 14, 28, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8, 12, 14, 16], start=1
+    ):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
 
     buffer = io.BytesIO()
