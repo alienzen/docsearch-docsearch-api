@@ -52,6 +52,10 @@ from file_sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
 import sql_sources_config
 import sql_dsn_registry
 import web_sources_config
+# Vue générique des trois registres — la règle « quelles sources cet
+# utilisateur peut-il atteindre » vit dans le contrat partagé
+# (docsearch_contract/), pas ici. Voir app/source_registries.py.
+import source_registries
 
 # Sans cet appel, le logger racine n'a AUCUN handler : uvicorn ne
 # configure que ses propres loggers ("uvicorn.*", propagate=False), et
@@ -366,22 +370,21 @@ def _ensure_index_exists():
 
 def _get_any_source(name: str):
     """Cherche `name` dans les trois registres (fichiers, SQL, web),
-    dans cet ordre, et retourne le premier trouvé — None si absent des
-    trois. Utile là où on a juste besoin de l'objet Source/SqlSource/
-    WebSource sans savoir a priori son type (routes d'administration
+    dans cet ordre, et retourne la première trouvée — None si absente
+    des trois. Utile là où on a juste besoin de l'index ES ou du libellé
+    d'une source sans savoir a priori son type (routes d'administration
     ciblant une source par son nom).
+
+    Rend une `SourceEntry` (contrat partagé) et non l'objet du registre :
+    les attributs communs y sont, et `.native` reste le chemin vers ce
+    qui est propre au type.
 
     ⚠️ À ne pas employer pour décider d'un ACCÈS : un nom absent des
     registres y rend None, ce qui se lit trop facilement comme « aucune
     restriction » alors que ça veut dire « source inconnue » (voir
     _check_doc_access, qui est passé à _searchable_source_names pour
     cette raison)."""
-    for registry in (file_sources_config, sql_sources_config, web_sources_config):
-        try:
-            return registry.get_source(name)
-        except KeyError:
-            continue
-    return None
+    return source_registries.trouver(name)
 
 
 def _requested_source_names(
@@ -419,8 +422,14 @@ def _requested_source_names(
 def _visible_to(s, user_groups: list[str]) -> bool:
     """Une source dont allowed_groups est vide est visible par tout le
     monde (comportement historique, avant l'ajout de cette restriction) ;
-    sinon il faut être membre d'au moins un des groupes listés."""
-    return not s.allowed_groups or any(g in s.allowed_groups for g in user_groups)
+    sinon il faut être membre d'au moins un des groupes listés.
+
+    La règle elle-même vit dans le contrat partagé : elle était écrite
+    deux fois dans ce dépôt (ici et dans search_query.py, avec le
+    commentaire « Identique à… »), et une divergence entre les deux
+    aurait fait notifier une alerte sur une source que l'écran n'affiche
+    plus. Cet alias reste pour les appelants locaux."""
+    return source_registries.visible_par(s, user_groups)
 
 
 def _searchable_source_names(username: str) -> list[str]:
@@ -447,18 +456,7 @@ def _searchable_source_names(username: str) -> list[str]:
     Les deux doivent le rester : une restriction que seule la recherche
     applique n'est pas une restriction, juste un tri par défaut.
     """
-    user_groups = get_effective_groups(username)
-    names = []
-    for name, s in file_sources_config.get_sources().items():
-        if s.searchable and _visible_to(s, user_groups):
-            names.append(name)
-    for name, s in sql_sources_config.get_sources().items():
-        if s.searchable and _visible_to(s, user_groups):
-            names.append(name)
-    for name, s in web_sources_config.get_sources().items():
-        if s.searchable and _visible_to(s, user_groups):
-            names.append(name)
-    return names
+    return source_registries.noms_cherchables(get_effective_groups(username))
 
 
 def _active_custom_facets(source_names: list[str], username: str | None = None) -> dict[str, str]:
@@ -564,17 +562,7 @@ def _collectable_source_names() -> set[str]:
     add_collection_document() ; un set (pas une liste) car seul le test
     d'appartenance importe ici, pas l'ordre.
     """
-    names = set()
-    for name, s in file_sources_config.get_sources().items():
-        if s.collectable:
-            names.add(name)
-    for name, s in sql_sources_config.get_sources().items():
-        if s.collectable:
-            names.add(name)
-    for name, s in web_sources_config.get_sources().items():
-        if s.collectable:
-            names.add(name)
-    return names
+    return source_registries.noms_collectables()
 
 
 @app.get("/searchable-sources")
@@ -597,31 +585,27 @@ def get_searchable_sources(user: str = Depends(current_user)):
     n'apparaît pas ici, cohérent avec le fait qu'elle ne renverra de
     toute façon jamais de résultat pour lui dans /search.
     """
-    username = user
-    user_groups = get_effective_groups(username)
+    user_groups = get_effective_groups(user)
     result = []
-    for name, s in file_sources_config.get_sources().items():
-        if s.searchable and _visible_to(s, user_groups):
-            result.append({"name": name, "label": s.label or name, "type": "file", "collectable": s.collectable})
-    for name, s in sql_sources_config.get_sources().items():
-        if s.searchable and _visible_to(s, user_groups):
+    for e in source_registries.entrees_cherchables(user_groups):
+        entree = {"name": e.name, "label": e.label or e.name, "type": e.type,
+                  "collectable": e.collectable}
+        if e.type == "sql":
             # card_fields : {champ ES: libellé} pour la carte de résultat.
             # Valeur None = « libellé à dériver du nom », "" = « masquer »,
             # texte = ce libellé. À défaut de card_label, on retombe sur
             # facet_label, déjà saisi pour les colonnes en facette : sans
             # cela, une source configurée avant cette évolution perdrait
             # ses beaux libellés dans la carte.
-            card_fields = {
+            #
+            # Seul endroit de cette route qui descend dans `native` : le
+            # mapping de colonnes est propre aux sources SQL, il n'a rien
+            # à faire dans la vue générique.
+            entree["card_fields"] = {
                 f.es_field: (f.card_label if f.card_label is not None else f.facet_label)
-                for f in s.fields
+                for f in e.native.fields
             }
-            result.append({
-                "name": name, "label": s.label or name, "type": "sql",
-                "collectable": s.collectable, "card_fields": card_fields,
-            })
-    for name, s in web_sources_config.get_sources().items():
-        if s.searchable and _visible_to(s, user_groups):
-            result.append({"name": name, "label": s.label or name, "type": "web", "collectable": s.collectable})
+        result.append(entree)
     return sorted(result, key=lambda s: s["label"].lower())
 
 
@@ -2508,7 +2492,7 @@ def admin_set_source_ocr(name: str, body: OcrUpdate, user: str = Depends(require
     fichier — n'a de sens que pour les sources fichiers (PDF scannés,
     images), contrairement aux bascules génériques searchable/
     collectable : volontairement absente de
-    _SOURCE_REGISTRIES//admin/all-sources/{name}/... (sql/web n'ont pas
+    source_registries.REGISTRES//admin/all-sources/{name}/... (sql/web n'ont pas
     de notion d'OCR)."""
     try:
         return file_sources_config.set_ocr_enabled(name, body.ocr_enabled)
@@ -2844,45 +2828,37 @@ class GroupsUpdate(BaseModel):
     allowed_groups: list[str]
 
 
-_SOURCE_REGISTRIES = {
-    "file": file_sources_config,
-    "sql":  sql_sources_config,
-    "web":  web_sources_config,
-}
-
-
 def _all_sources_status() -> dict:
     """Fusionne les trois registres de sources en une seule liste, avec
     le nombre de documents et la taille sur disque de chaque index — un
     index manquant (source enregistrée mais jamais indexée, ou vidée)
     compte pour 0 plutôt que de faire échouer tout l'appel."""
     result = {}
-    for type_, registry in _SOURCE_REGISTRIES.items():
-        for name, s in registry.get_sources().items():
-            try:
-                indexed = es.count(index=s.es_index)["count"]
-            except Exception:
-                indexed = 0
-            try:
-                # size_in_bytes de l'index PRIMAIRE (pas x nombre de
-                # replicas) — c'est l'espace occupé par les données elles-
-                # mêmes, l'unité pertinente ici plutôt que l'empreinte
-                # disque totale du cluster (voir /metrics pour celle-ci,
-                # calculée sur l'alias fédéré ES_SEARCH_ALIAS en entier).
-                size_bytes = es.indices.stats(index=s.es_index)["_all"]["primaries"]["store"]["size_in_bytes"]
-            except Exception:
-                size_bytes = 0
-            result[name] = {
-                "type":       type_,
-                "es_index":   s.es_index,
-                "label":       getattr(s, "label", None) or name,
-                "description": getattr(s, "description", None) or "",
-                "searchable":     s.searchable,
-                "collectable":    s.collectable,
-                "allowed_groups": list(s.allowed_groups),
-                "indexed":        indexed,
-                "size_bytes":     size_bytes,
-            }
+    for e in source_registries.toutes_les_entrees():
+        try:
+            indexed = es.count(index=e.es_index)["count"]
+        except Exception:
+            indexed = 0
+        try:
+            # size_in_bytes de l'index PRIMAIRE (pas x nombre de
+            # replicas) — c'est l'espace occupé par les données elles-
+            # mêmes, l'unité pertinente ici plutôt que l'empreinte
+            # disque totale du cluster (voir /metrics pour celle-ci,
+            # calculée sur l'alias fédéré ES_SEARCH_ALIAS en entier).
+            size_bytes = es.indices.stats(index=e.es_index)["_all"]["primaries"]["store"]["size_in_bytes"]
+        except Exception:
+            size_bytes = 0
+        result[e.name] = {
+            "type":       e.type,
+            "es_index":   e.es_index,
+            "label":       e.label or e.name,
+            "description": e.description,
+            "searchable":     e.searchable,
+            "collectable":    e.collectable,
+            "allowed_groups": list(e.allowed_groups),
+            "indexed":        indexed,
+            "size_bytes":     size_bytes,
+        }
     return result
 
 
@@ -2900,7 +2876,7 @@ def admin_set_source_searchable(
     """Active/désactive la RECHERCHE pour une source, quel que soit son
     type — n'affecte jamais l'ingestion (watcher/sql-worker/web-worker
     continuent normalement), seulement la visibilité dans /search."""
-    registry = _SOURCE_REGISTRIES.get(type)
+    registry = source_registries.REGISTRES.get(type)
     if registry is None:
         raise HTTPException(status_code=400, detail=f"Type de source invalide : '{type}' (attendu file, sql ou web)")
     try:
@@ -2920,7 +2896,7 @@ def admin_set_source_collectable(
     d'une source, quel que soit son type — n'affecte ni l'ingestion ni
     la recherche (voir add_collection_document() et
     set_collectable() dans chaque registre)."""
-    registry = _SOURCE_REGISTRIES.get(type)
+    registry = source_registries.REGISTRES.get(type)
     if registry is None:
         raise HTTPException(status_code=400, detail=f"Type de source invalide : '{type}' (attendu file, sql ou web)")
     try:
@@ -2946,7 +2922,7 @@ def admin_set_source_groups(
     voir auth/deps.py) : une faute de frappe rend
     silencieusement la source invisible à tout le monde plutôt que de
     lever une erreur, à l'admin de vérifier l'orthographe exacte du CN AD."""
-    registry = _SOURCE_REGISTRIES.get(type)
+    registry = source_registries.REGISTRES.get(type)
     if registry is None:
         raise HTTPException(status_code=400, detail=f"Type de source invalide : '{type}' (attendu file, sql ou web)")
     try:
@@ -3273,6 +3249,7 @@ class UiConfigUpdate(BaseModel):
     acl_visible_enabled: bool | None = None
     shortcuts_link_enabled: bool | None = None
     empty_state_animation_enabled: bool | None = None
+    header_shrink_enabled: bool | None = None
     show_current_user_enabled: bool | None = None
     show_current_user_groups_enabled: bool | None = None
     show_current_user_enabled_admin: bool | None = None
@@ -3385,6 +3362,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("shortcuts_link_enabled", body.shortcuts_link_enabled)
         if body.empty_state_animation_enabled is not None:
             config = ui_config.set_param("empty_state_animation_enabled", body.empty_state_animation_enabled)
+        if body.header_shrink_enabled is not None:
+            config = ui_config.set_param("header_shrink_enabled", body.header_shrink_enabled)
         if body.show_current_user_enabled is not None:
             config = ui_config.set_param("show_current_user_enabled", body.show_current_user_enabled)
         if body.show_current_user_groups_enabled is not None:

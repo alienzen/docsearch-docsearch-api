@@ -652,6 +652,25 @@ acl_filter = {
 }
 ```
 
+### Quelles sources un utilisateur peut atteindre
+
+Orthogonal à l'ACL par document ci-dessus : celle-là filtre les documents
+d'une source visible, celle-ci masque une source **en bloc** (bascule
+`searchable`, ou restriction `allowed_groups` à des groupes AD/LDAP).
+
+La règle est **unique** et vit dans `app/docsearch_contract/sources.py`,
+appelée via `app/source_registries.py` — par `search_api.py` comme par
+`search_query.py` (le worker d'alertes). Elle était auparavant écrite six
+fois, dont deux avec le commentaire « Identique à… » : une divergence
+entre la copie que lit `/search` et celle que lit le worker faisait
+notifier une alerte sur une source que l'écran n'affiche plus.
+
+⚠️ `app/docsearch_contract/` est une **copie générée** de
+`docsearch-infra/contract/` — jamais modifiée sur place. Y porter une
+modification, puis `./manage.sh sync-contract` depuis `docsearch-infra`,
+qui la recopie ici ; `./manage.sh build` refuse de construire tant qu'une
+copie diverge, et `tests/test_contrat_vendorise.py` le vérifie aussi.
+
 ## Panneau d'administration (/admin)
 
 Routes protégées par appartenance à un groupe LDAP/AD (`ADMIN_GROUP`,

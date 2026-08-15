@@ -22,10 +22,13 @@
 # search_api.py pour le schéma des critères stockés.
 
 from auth.directory import get_effective_groups
-import file_sources_config
 import sql_sources_config
-import web_sources_config
 import runtime_config
+# Vue générique des trois registres, partagée avec search_api.py — les
+# registres fichiers et web ne sont plus importés ici : seule la lecture
+# du mapping de colonnes des sources SQL (facettes personnalisées) reste
+# spécifique à un type.
+import source_registries
 
 
 def field_sets(exact: bool = False) -> dict:
@@ -226,26 +229,21 @@ def build_acl_filter(username: str) -> dict:
 
 
 def _visible_to(s, user_groups: list[str]) -> bool:
-    """Identique à _visible_to() dans search_api.py — voir l'avertissement
-    de cohérence en tête de fichier."""
-    return not s.allowed_groups or any(g in s.allowed_groups for g in user_groups)
+    """Restriction par groupe AD/LDAP d'une source.
+
+    N'est plus une copie de search_api.py : la règle vit dans le contrat
+    partagé (docsearch_contract/sources.py), que les deux fichiers
+    appellent via source_registries. C'était l'une des divergences que
+    l'avertissement en tête de fichier annonçait — celle-là ne peut plus
+    se produire."""
+    return source_registries.visible_par(s, user_groups)
 
 
 def _searchable_source_names(username: str) -> list[str]:
-    """Identique à _searchable_source_names() dans search_api.py — voir
-    l'avertissement de cohérence en tête de fichier."""
-    user_groups = get_effective_groups(username)
-    names = []
-    for name, s in file_sources_config.get_sources().items():
-        if s.searchable and _visible_to(s, user_groups):
-            names.append(name)
-    for name, s in sql_sources_config.get_sources().items():
-        if s.searchable and _visible_to(s, user_groups):
-            names.append(name)
-    for name, s in web_sources_config.get_sources().items():
-        if s.searchable and _visible_to(s, user_groups):
-            names.append(name)
-    return names
+    """Sources atteignables par cet utilisateur — même définition, au
+    sens propre, que dans search_api.py : les deux appellent la même
+    fonction du contrat partagé."""
+    return source_registries.noms_cherchables(get_effective_groups(username))
 
 
 def _requested_source_names(
