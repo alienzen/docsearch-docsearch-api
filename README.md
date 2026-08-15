@@ -53,9 +53,9 @@ un « assistant conversationnel (RAG) » — elle n'a jamais existé dans le cod
 La page `chat.html` de l'interface est une **maquette** qui joue des réponses
 écrites à l'avance (`docsearch-ui-vue/src/pages/chat/cannedResponses.ts`) :
 aucun document indexé n'est interrogé, aucun modèle de langage n'est branché.
-Le lien « Assistant IA » de l'en-tête étant affiché par défaut
-(`chat_enabled` vaut `true`), le masquer depuis le panneau d'administration
-est recommandé partout où cette maquette pourrait passer pour une
+Le lien « Assistant IA » de l'en-tête est masqué par défaut depuis le
+2026-08-15 (`chat_enabled` vaut `false`) : l'afficher depuis le panneau
+d'administration expose cette maquette, qui peut passer pour une
 fonctionnalité réelle. Voir `docsearch-infra/FEATURES.md` et
 `docsearch-infra/PLAN-EVOLUTIONS.md` (§5, en attente d'arbitrage).
 

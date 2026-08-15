@@ -24,16 +24,16 @@ UI_CONFIG_KEY = "docsearch:config:ui"
 UI_CONFIG_CACHE_TTL = int(os.getenv("UI_CONFIG_CACHE_TTL", "10"))
 
 DEFAULT_UI_CONFIG = {
-    "chat_enabled":        True,   # lien "Assistant IA" dans l'en-tête de recherche
+    "chat_enabled":        False,  # lien "Assistant IA" dans l'en-tête de recherche
     "footer_enabled":      True,   # pied de page des pages "recherche" (index.html, help.html)
     "footer_enabled_admin": True,   # pied de page des pages "administration" (admin.html,
                                     # stats.html, admin-help.html) — bascule séparée de
                                     # footer_enabled, même principe que les paires
                                     # show_current_user_enabled/_admin ci-dessous.
-    "admin_links_enabled": True,   # liens "Administration"/"Statistiques" (en-tête + pied de page) —
+    "admin_links_enabled": False,  # liens "Administration"/"Statistiques" (en-tête + pied de page) —
                                     # combiné en ET logique avec /is-admin côté index.html : un
                                     # utilisateur admin ne les voit QUE si ce flag est aussi actif.
-    "export_enabled":      True,   # boutons "Exporter en XLSX/DOCX" des résultats de recherche —
+    "export_enabled":      False,  # boutons "Exporter en XLSX/DOCX" des résultats de recherche —
                                     # ne bloque que l'affichage côté index.html ; POST /search/export
                                     # reste refusé côté API si ce flag est désactivé (voir search_api.py).
     "help_enabled":        True,   # lien "❓ Aide" dans l'en-tête de recherche + raccourci clavier "?" —
@@ -51,7 +51,7 @@ DEFAULT_UI_CONFIG = {
                                         # pipeline d'ingestion (docsearch-ingestion ne consulte jamais
                                         # ce flag — seule la création/modification depuis l'UI est
                                         # concernée, pas la réapplication à l'indexation).
-    "alerts_enabled":      True,   # alertes sur recherches sauvegardées ("🔔 Alertes" dans
+    "alerts_enabled":      False,  # alertes sur recherches sauvegardées ("🔔 Alertes" dans
                                     # l'en-tête + bascule par recherche, voir saved_searches.py/
                                     # alert_worker.py) — désactivé, les routes /alerts* et
                                     # PATCH /saved-searches/{id}/alert renvoient 403. Le worker
@@ -83,7 +83,7 @@ DEFAULT_UI_CONFIG = {
                                     # recherches passées de l'utilisateur, puis les auteurs et
                                     # mots-clés du corpus qu'il a le droit de voir. Désactivé, la
                                     # route renvoie 403. False par défaut, même raison.
-    "sort_enabled":        True,   # sélecteur "Trier par" au-dessus des résultats de recherche —
+    "sort_enabled":        False,  # sélecteur "Trier par" au-dessus des résultats de recherche —
                                     # purement une préférence d'affichage, pas de contrôle d'accès
                                     # associé côté API (contrairement à export/collections/alerts) :
                                     # désactivé, la recherche reste triée par pertinence par défaut.
@@ -97,18 +97,24 @@ DEFAULT_UI_CONFIG = {
                                     # l'écran de tous les utilisateurs démarre à False, et
                                     # s'allume à la demande d'un administrateur. Ne le
                                     # "corrigez" pas vers True par souci d'uniformité.
+                                    # La règle vaut toujours pour les flags À VENIR, mais sept
+                                    # bascules existantes y dérogent depuis le 2026-08-15
+                                    # (chat, admin_links, export, alerts, sort, score,
+                                    # acl_visible) : demande explicite d'un défaut fermé, pas
+                                    # une dérive. Voir docsearch-docs/CONFIGURATION.md.
                                     # N'influe que sur l'affichage : la mesure, la ligne de
                                     # journal des recherches lentes et l'enregistrement dans
                                     # l'index search_logs ont lieu quel que soit ce flag.
-    "score_enabled":       True,   # badge de pourcentage de pertinence sur chaque carte de
-                                    # résultat ("87 %", dérivé du score Elasticsearch). True par
-                                    # défaut, suivant la règle énoncée juste au-dessus : ce badge
-                                    # existait avant sa bascule, un flag qui MASQUE une
-                                    # fonctionnalité déjà présente démarre à True.
+    "score_enabled":       False,  # badge de pourcentage de pertinence sur chaque carte de
+                                    # résultat ("87 %", dérivé du score Elasticsearch). Valait True
+                                    # par défaut, suivant la règle énoncée juste au-dessus ; passé à
+                                    # False sur demande explicite le 2026-08-15, comme les six autres
+                                    # bascules basculées le même jour. Exception assumée à la règle,
+                                    # pas un oubli : ne le "corrigez" pas vers True.
                                     # Purement un affichage : le CLASSEMENT par pertinence, lui,
                                     # ne dépend pas de ce flag — désactivé, les résultats restent
                                     # dans le même ordre, seul le pourcentage disparaît.
-    "acl_visible_enabled": True,   # section "Droits d'accès" de la fiche détail (propriétaire,
+    "acl_visible_enabled": False,  # section "Droits d'accès" de la fiche détail (propriétaire,
                                     # groupes autorisés) visible des utilisateurs NON administrateurs.
                                     # Désactivé, elle n'apparaît plus que pour les membres d'ADMIN_GROUP.
                                     # Purement un affichage : le filtrage ACL des résultats ne dépend
