@@ -16,4 +16,13 @@
 # promesse de stabilité tant que les lots 1 et 2 n'ont pas éprouvé la
 # forme du contrat.
 
-CONTRACT_VERSION = "0.1.0"
+CONTRACT_VERSION = "0.2.0"
+
+# 0.2.0 (2026-08-15) — lot 1 : `plugins.py` (modèle et validation d'une
+#   source portée par un module complémentaire) et `documents.py`
+#   (enveloppe des messages, construction du document, politiques
+#   d'ACL). Ajout pur, aucun consommateur de 0.1.0 n'est cassé — mais la
+#   mineure fait foi tant que la majeure est 0, et les modules
+#   complémentaires déclarent donc « 0.2 » (voir
+#   documents.version_compatible()).
+# 0.1.0 (2026-08-15) — lot 0 : `sources.py`, vue générique des registres.

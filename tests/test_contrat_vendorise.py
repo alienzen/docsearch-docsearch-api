@@ -47,11 +47,19 @@ def test_version_du_contrat_lisible():
     assert all(p.isdigit() for p in parties)
 
 
-def test_les_trois_registres_sont_declares():
-    """La liaison locale doit couvrir les trois types natifs — un
-    registre oublié ici rendrait ses sources invisibles PARTOUT, sans
-    aucune erreur."""
-    assert set(source_registries.REGISTRES) == set(contract_sources.TYPES_NATIFS)
+def test_les_trois_registres_natifs_sont_declares():
+    """La liaison locale doit couvrir au moins les trois types natifs —
+    un registre oublié ici rendrait ses sources invisibles PARTOUT, sans
+    aucune erreur. Inclusion et non égalité : le type "plugin" s'y ajoute
+    depuis le lot 1, et d'autres suivront."""
+    assert set(contract_sources.TYPES_NATIFS) <= set(source_registries.REGISTRES)
+
+
+def test_le_registre_plugin_est_branche():
+    """Sans cette ligne, une source de module complémentaire serait
+    indexée par l'ingestion et invisible à la recherche — la panne
+    exacte que le lot 0 rendait impossible à oublier."""
+    assert "plugin" in source_registries.REGISTRES
 
 
 @pytest.mark.skipif(

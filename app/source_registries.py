@@ -20,14 +20,20 @@
 # historique de _get_any_source(), conservé tel quel.
 
 import file_sources_config
+import plugin_sources_config
 import sql_sources_config
 import web_sources_config
 from docsearch_contract import sources as contract_sources
 
 REGISTRES = {
-    "file": file_sources_config,
-    "sql":  sql_sources_config,
-    "web":  web_sources_config,
+    "file":   file_sources_config,
+    "sql":    sql_sources_config,
+    "web":    web_sources_config,
+    # Sources portées par un module complémentaire (lot 1). Le type reste
+    # "plugin" au singulier quel que soit le module : c'est le champ
+    # `plugin` de la source qui dit lequel, et la recherche fédérée n'a
+    # aucune raison de distinguer deux modules l'un de l'autre.
+    "plugin": plugin_sources_config,
 }
 
 

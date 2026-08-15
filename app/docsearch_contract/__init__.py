@@ -11,6 +11,23 @@
 # partout sans rien tirer derrière lui, et de le tester sans lancer un
 # seul service.
 
+from .documents import (
+    TYPES_MESSAGE,
+    construire_document,
+    doc_id_pour,
+    valider_message,
+    verifier_emetteur,
+    version_compatible,
+)
+from .erreurs import ContratInvalide
+from .plugins import (
+    POLITIQUES_ACL,
+    ChampSupplementaire,
+    PluginSource,
+    depuis_dict,
+    nom_valide,
+    valider_declaration,
+)
 from .sources import (
     TYPES_NATIFS,
     SourceEntry,
@@ -26,13 +43,26 @@ from .version import CONTRACT_VERSION
 
 __all__ = [
     "CONTRACT_VERSION",
+    "POLITIQUES_ACL",
+    "TYPES_MESSAGE",
     "TYPES_NATIFS",
+    "ChampSupplementaire",
+    "ContratInvalide",
+    "PluginSource",
     "SourceEntry",
     "collectable_names",
+    "construire_document",
+    "depuis_dict",
+    "doc_id_pour",
     "entry",
     "find",
     "iter_entries",
+    "nom_valide",
     "searchable_entries",
     "searchable_names",
+    "valider_declaration",
+    "valider_message",
+    "verifier_emetteur",
+    "version_compatible",
     "visible_to",
 ]
