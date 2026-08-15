@@ -134,6 +134,16 @@ def _verifier_coherence_cookie(request: Request) -> None:
     )
 
 
+def _set_access_cookie(response: Response, access: str) -> None:
+    """Le cookie d'accès seul — le renouvellement toléré d'un jeton déjà
+    tourné ne pose que celui-là."""
+    response.set_cookie(
+        key=config.ACCESS_COOKIE_NAME, value=access, httponly=True,
+        secure=config.COOKIE_SECURE, samesite=config.COOKIE_SAMESITE, path="/",
+        max_age=config.JWT_ACCESS_TOKEN_TTL_MINUTES * 60,
+    )
+
+
 def _set_session_cookies(response: Response, access: str, refresh: str) -> None:
     """Deux cookies httpOnly, et deux portées différentes.
 
@@ -142,11 +152,7 @@ def _set_session_cookies(response: Response, access: str, refresh: str) -> None:
     rafraîchissement, lui, ne vaut que pour /auth — il n'a aucune raison
     d'accompagner chaque recherche, et une fuite de journal de proxy en
     exposerait d'autant moins."""
-    response.set_cookie(
-        key=config.ACCESS_COOKIE_NAME, value=access, httponly=True,
-        secure=config.COOKIE_SECURE, samesite=config.COOKIE_SAMESITE, path="/",
-        max_age=config.JWT_ACCESS_TOKEN_TTL_MINUTES * 60,
-    )
+    _set_access_cookie(response, access)
     response.set_cookie(
         key=config.REFRESH_COOKIE_NAME, value=refresh, httponly=True,
         secure=config.COOKIE_SECURE, samesite=config.COOKIE_SAMESITE, path="/auth",
@@ -174,13 +180,22 @@ def _open_session(
     auth_method: str,
     request: Request,
     simulated: bool = False,
+    nouvelle_session: bool = True,
 ) -> SessionResponse:
     """Contrôle d'accès, émission des jetons, cookies, journal.
 
     **Le contrôle d'ACCESS_GROUP est fait ici, à la connexion**, et pas
     seulement à chaque requête : quelqu'un qui n'a pas le droit d'utiliser
     DocSearch ne repart pas avec une session valide qu'il verrait échouer
-    sur chaque page sans comprendre pourquoi."""
+    sur chaque page sans comprendre pourquoi.
+
+    `nouvelle_session=False` est le renouvellement TOLÉRÉ d'un jeton déjà
+    tourné (voir /auth/refresh) : un jeton d'accès est réémis, mais aucune
+    session n'est ouverte et le cookie de rafraîchissement n'est PAS
+    réécrit — celui du renouvellement gagnant est déjà dans le navigateur,
+    l'écraser relancerait la course qu'on est en train d'éteindre. Un
+    paramètre plutôt qu'une seconde fonction : c'est ce qui garde le
+    contrôle d'accès et la ligne d'audit sur un point de passage unique."""
     login = identity.login
 
     if not config.ACCESS_AUTH_DISABLED:
@@ -196,31 +211,39 @@ def _open_session(
 
     try:
         access_token, expires_at = tokens.create_access_token(identity, auth_method=auth_method)
-        refresh_token, jti, _ = tokens.create_refresh_token(login)
+        refresh_token, jti, _ = (
+            tokens.create_refresh_token(login) if nouvelle_session else (None, None, None)
+        )
     except tokens.KeyLoadError as exc:
         logger.error("[auth] Émission impossible : %s", exc)
         raise HTTPException(status_code=503, detail=f"Authentification indisponible : {exc}") from exc
 
-    try:
-        sessions.store_refresh_token(
-            jti,
-            login=login,
-            ttl_seconds=config.JWT_REFRESH_TOKEN_TTL_DAYS * 24 * 3600,
-            auth_method=auth_method,
-            display_name=identity.display_name,
-            email=identity.email,
-        )
-    except store.StoreUnavailable as exc:
-        # Sans magasin, le jeton de rafraîchissement serait signé mais
-        # jamais révocable : une déconnexion ne déconnecterait rien. Refus
-        # franc plutôt qu'une session dont on ne peut plus reprendre la clé.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if nouvelle_session:
+        try:
+            sessions.store_refresh_token(
+                jti,
+                login=login,
+                ttl_seconds=config.JWT_REFRESH_TOKEN_TTL_DAYS * 24 * 3600,
+                auth_method=auth_method,
+                display_name=identity.display_name,
+                email=identity.email,
+            )
+        except store.StoreUnavailable as exc:
+            # Sans magasin, le jeton de rafraîchissement serait signé mais
+            # jamais révocable : une déconnexion ne déconnecterait rien. Refus
+            # franc plutôt qu'une session dont on ne peut plus reprendre la clé.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     _verifier_coherence_cookie(request)
-    _set_session_cookies(response, access_token, refresh_token)
+    if nouvelle_session:
+        _set_session_cookies(response, access_token, refresh_token)
+    else:
+        _set_access_cookie(response, access_token)
 
     events.record(
-        identifier=login, outcome=events.SUCCESS, method=auth_method,
+        identifier=login,
+        outcome=events.SUCCESS if nouvelle_session else events.RENEWAL_GRACE,
+        method=auth_method,
         ip=_client_ip(request), user_agent=_user_agent(request), simulated=simulated,
     )
     if simulated:
@@ -464,7 +487,24 @@ def refresh(request: Request, response: Response) -> SessionResponse:
     Ne touche PAS à l'annuaire : c'est le chemin le plus fréquent du
     service, et l'instantané d'identité mémorisé à la connexion suffit. Les
     GROUPES, eux, sont relus (via `_open_session` → `require_access`) — une
-    exclusion prend donc effet au plus tard au renouvellement suivant."""
+    exclusion prend donc effet au plus tard au renouvellement suivant.
+
+    ⚠️  **Un refus n'efface JAMAIS les cookies ici**, et les deux appels à
+    `_clear_session_cookies` qui étaient posés sur les branches de refus
+    n'ont été retirés qu'après vérification qu'ils n'avaient **jamais rien
+    émis** : FastAPI ne fusionne les en-têtes de la `Response` injectée que
+    lorsque la fonction RETOURNE. Quand elle lève, la réponse d'erreur est
+    construite ailleurs et ces en-têtes sont perdus. Le code disait donc une
+    intention qui ne s'exécutait pas — c'est /auth/logout, qui retourne, qui
+    efface pour de bon (et lui seul doit le faire).
+
+    Retirés quand même, plutôt que laissés là : s'ils s'étaient mis à
+    fonctionner — un `return JSONResponse(...)` au lieu d'un `raise`, et
+    c'est fait sans y penser — l'onglet perdant d'une course détruirait le
+    cookie neuf que l'onglet gagnant vient de poser, et déconnecterait
+    vraiment tout le navigateur. Un cookie de rafraîchissement périmé porte
+    de toute façon la même échéance que le jeton qu'il transporte : il n'y a
+    rien à nettoyer."""
     raw = request.cookies.get(config.REFRESH_COOKIE_NAME)
     if not raw:
         raise HTTPException(status_code=401, detail="Session absente.")
@@ -474,7 +514,6 @@ def refresh(request: Request, response: Response) -> SessionResponse:
     except tokens.KeyLoadError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except pyjwt.InvalidTokenError:
-        _clear_session_cookies(response)
         raise HTTPException(status_code=401, detail="Session expirée.") from None
 
     try:
@@ -482,8 +521,11 @@ def refresh(request: Request, response: Response) -> SessionResponse:
     except store.StoreUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    if stored is None:
-        _clear_session_cookies(response)
+    # `login` absent : une clé fantôme, recréée par le marquage de rotation
+    # sur une session qui venait d'expirer (voir
+    # sessions.mark_refresh_rotated). Elle ne porte aucune identité, elle ne
+    # vaut pas une session.
+    if stored is None or not stored.get("login"):
         raise HTTPException(status_code=401, detail="Session révoquée.")
 
     identity = ResolvedIdentity(
@@ -491,21 +533,35 @@ def refresh(request: Request, response: Response) -> SessionResponse:
         display_name=stored.get("display_name") or stored["login"],
         email=stored.get("email") or None,
     )
-    session = _open_session(
-        response, identity,
-        auth_method=stored.get("auth_method", "ldap"), request=request,
-    )
+    auth_method = stored.get("auth_method", "ldap")
 
-    # Révocation de l'ancien jeton APRÈS l'ouverture du nouveau, et pas
+    if sessions.is_superseded(stored):
+        # Jeton déjà tourné, encore dans sa fenêtre de tolérance : deux
+        # onglets ont renouvelé ensemble. On rend un jeton d'accès, sans
+        # rouvrir de session ni réécrire le cookie de rafraîchissement.
+        logger.info(
+            "[auth] Renouvellement concurrent toléré pour %s (jti déjà tourné).",
+            identity.login,
+        )
+        return _open_session(
+            response, identity, auth_method=auth_method, request=request,
+            nouvelle_session=False,
+        )
+
+    session = _open_session(response, identity, auth_method=auth_method, request=request)
+
+    # Marquage de l'ancien jeton APRÈS l'ouverture du nouveau, et pas
     # avant : `_open_session` peut échouer (annuaire injoignable pendant
-    # une seconde, exclusion de groupe, Redis coupé). Révoquer d'abord
+    # une seconde, exclusion de groupe, Redis coupé). Le consommer d'abord
     # ferait payer une déconnexion définitive à une panne passagère, alors
     # que la session en cours était parfaitement valide.
     #
-    # Le jeton présenté ne vaut donc plus rien une fois consommé — ce qui
-    # borne la fenêtre d'exploitation d'un cookie intercepté — mais la
-    # fenêtre où les deux existent ensemble se compte en microsecondes.
-    sessions.revoke_refresh_token(claims["jti"])
+    # Marqué et non supprimé : il ne porte plus de session, mais il reste
+    # quelques secondes bon pour un jeton d'accès, le temps que les autres
+    # onglets rattrapent la rotation.
+    sessions.mark_refresh_rotated(
+        claims["jti"], grace_seconds=config.REFRESH_ROTATION_GRACE_SECONDS,
+    )
     return session
 
 

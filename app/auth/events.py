@@ -58,6 +58,12 @@ INVALID_CREDENTIALS = "identifiants_refuses"
 RATE_LIMITED = "trop_de_tentatives"
 PROVIDER_UNAVAILABLE = "fournisseur_indisponible"
 ACCESS_DENIED = "acces_refuse"
+# Jeton de rafraîchissement déjà tourné, accepté dans sa fenêtre de
+# tolérance (voir sessions.mark_refresh_rotated). Volontairement distinct de
+# SUCCESS : aucune session n'est ouverte, et confondre les deux rendrait les
+# courses entre onglets invisibles — ce sont précisément elles qu'on est
+# venu compter ici.
+RENEWAL_GRACE = "renouvellement_tolere"
 
 
 def _client() -> Elasticsearch:

@@ -33,6 +33,7 @@ import re
 
 from .documents import version_compatible
 from .erreurs import ContratInvalide
+from .interface import valider_interface
 from .plugins import valider_declaration
 from .version import CONTRACT_VERSION
 
@@ -65,6 +66,7 @@ _MEMOIRE_RE = re.compile(r"^\d+[kmg]$")
 CLES_CONNUES = frozenset({
     "nom", "version", "contract_version", "image", "description",
     "auteur", "capacites", "secrets", "ressources", "sources", "port",
+    "interface",
 })
 
 # Ports que le proxy accepte de servir. Fermé plutôt qu'ouvert : le
@@ -184,8 +186,16 @@ def valider_manifeste(manifeste) -> dict:
     elif port is not None:
         raise ContratInvalide("'port' n'a de sens qu'avec la capacité 'service_web'.")
 
+    interface = valider_interface(manifeste.get("interface") or {}, nom)
+    if interface["nav"] and "service_web" not in capacites:
+        raise ContratInvalide(
+            "Une entrée de menu mène sous /ext/<nom>/, donc elle exige la capacité "
+            "'service_web' : sans elle, le lien du menu rendrait 404."
+        )
+
     return {
         "port": port,
+        "interface": interface,
         "nom": nom,
         "version": version,
         "contract_version": contrat,

@@ -132,6 +132,21 @@ DEFAULT_UI_CONFIG = {
                                     # effet pour les visiteurs ayant demandé la réduction des
                                     # animations à leur système : l'UI respecte
                                     # prefers-reduced-motion quel que soit ce flag.
+    "header_shrink_enabled": False,  # en-tête réduit au défilement (docsearch-ui-vue uniquement) :
+                                    # bloc-marque, logo opérateur et baseline masqués, marges
+                                    # resserrées. Le titre de service — donc le lien d'accueil —, la
+                                    # barre de recherche, les outils et la navigation restent en
+                                    # place, et l'en-tête complet revient dès le retour en haut de
+                                    # page. Sans effet sous 62em, où le DSFR range déjà l'en-tête
+                                    # derrière un burger et un bouton loupe.
+                                    # DÉSACTIVÉ par défaut, suivant la règle énoncée plus haut : ce
+                                    # flag AJOUTE un comportement sur l'écran de tous les
+                                    # utilisateurs, il ne masque pas une fonctionnalité déjà
+                                    # présente. Ne le "corrigez" pas vers True par uniformité.
+                                    # UN SEUL flag pour la recherche, les statistiques et
+                                    # l'administration, sans variante _admin : c'est une commodité
+                                    # de défilement, pas un choix d'affichage de l'identité comme
+                                    # les badges "Connecté : ..." ci-dessous.
     "show_current_user_enabled": True,   # badge "Connecté : <utilisateur> · <groupes>" dans l'en-tête
                                     # de la page de RECHERCHE (voir index.html:current-user) —
                                     # purement un affichage, aucun contrôle d'accès associé : le
@@ -150,14 +165,16 @@ DEFAULT_UI_CONFIG = {
     "show_current_user_groups_enabled_admin": True,   # inclut " · <groupes>" dans le badge d'admin.html —
                                     # indépendant de show_current_user_groups_enabled (recherche) et
                                     # de show_current_user_enabled_admin (qui masque le badge entier).
-    "theme": "default",   # thème visuel des pages "recherche" (index.html, help.html) — voir
-                            # theme-search.css : chaque valeur correspond à un bloc
-                            # ":root[data-theme=...]" qui redéfinit les mêmes variables CSS. Une
-                            # seule valeur pour toute l'installation (pas de préférence par
-                            # utilisateur), indépendante de theme_admin ci-dessous.
-    "theme_admin": "default",   # même principe que theme, mais pour les pages "administration"
-                            # (admin.html, stats.html, admin-help.html) et theme-admin.css —
-                            # permet par exemple un thème sombre en administration sans l'imposer
+    "theme": "system",   # apparence des pages "recherche" — voir THEMES : depuis le passage au
+                            # DSFR, seuls les schemes "system" / "light" / "dark" ont un sens, les
+                            # 7 thèmes de couleur maison ("default", "slate", "red"…) ayant été
+                            # retirés avec leur feuille theme-search.css. Une seule valeur pour
+                            # toute l'installation (pas de préférence par utilisateur),
+                            # indépendante de theme_admin ci-dessous. Les valeurs héritées encore
+                            # stockées dans Redis sont ramenées à "system" côté interface
+                            # (normalizeScheme(), stores/uiConfig.ts).
+    "theme_admin": "system",   # même principe que theme, mais pour les pages "administration" —
+                            # permet par exemple un mode sombre en administration sans l'imposer
                             # aux utilisateurs de la recherche, ou l'inverse.
     "header_logo_url": "",   # URL d'image personnalisée pour .header-logo (bloc "marque" de
                             # l'en-tête, voir index.html) — vide par défaut, retombe alors sur
@@ -227,7 +244,11 @@ DEFAULT_UI_CONFIG = {
                             # réponse de /ui-config par search_api.py (champ "sources_mount").
 }
 
-THEMES = ["default", "dark", "slate", "contrast", "red", "green", "dsfr"]
+# Schemes DSFR acceptés par set_theme(). "system" suit la préférence du poste,
+# comportement par défaut du DSFR. Les 7 thèmes maison d'avant la migration
+# ("default", "slate", "contrast", "red", "green", "dsfr") ne sont plus des
+# valeurs valides : leurs feuilles CSS n'existent plus.
+THEMES = ["system", "light", "dark"]
 
 _cache: dict = {}
 _cache_time: float = 0.0

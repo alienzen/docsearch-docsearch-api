@@ -52,6 +52,7 @@ from file_sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
 import sql_sources_config
 import sql_dsn_registry
 import web_sources_config
+import plugin_ui_config
 # Vue générique des trois registres — la règle « quelles sources cet
 # utilisateur peut-il atteindre » vit dans le contrat partagé
 # (docsearch_contract/), pas ici. Voir app/source_registries.py.
@@ -3290,6 +3291,18 @@ def get_ui_config():
     dans copyPathClick()."""
     config = dict(ui_config.get_config())
     config["sources_mount"] = file_sources_config.SOURCES_MOUNT
+    # Entrées de menu déclarées par les modules complémentaires ACTIFS
+    # (lot 4). Servies ici plutôt que par une route dédiée : une route de
+    # plus, c'est un préfixe de plus à déclarer dans les deux nginx.conf
+    # et dans API_ROUTES — trois endroits qui ne se surveillent pas, pour
+    # une donnée que l'interface charge de toute façon en même temps que
+    # les bascules.
+    #
+    # Publique comme le reste de cette route : un libellé et un chemin de
+    # menu ne disent rien de plus que ce qu'un utilisateur verra à l'écran
+    # une seconde plus tard, et le module derrière vérifie lui-même la
+    # session.
+    config["plugin_nav"] = plugin_ui_config.entrees_de_menu()
     return config
 
 

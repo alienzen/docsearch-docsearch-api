@@ -134,6 +134,18 @@ JWT_ACTIVE_KID = os.getenv("JWT_ACTIVE_KID", "").strip()
 JWT_ACCESS_TOKEN_TTL_MINUTES = _int("JWT_ACCESS_TOKEN_TTL_MINUTES", 15)
 JWT_REFRESH_TOKEN_TTL_DAYS = _int("JWT_REFRESH_TOKEN_TTL_DAYS", 7)
 
+# Fenêtre pendant laquelle un jeton de rafraîchissement DÉJÀ TOURNÉ reste
+# accepté, sans rouvrir de session (voir auth/sessions.py). Elle éteint la
+# course entre onglets : deux clients du même navigateur qui présentent le
+# même jeton à quelques secondes d'écart — cas ordinaire dès que deux
+# onglets se réveillent ensemble — n'en déconnectaient qu'un, et le
+# déconnectaient VRAIMENT.
+#
+# 0 restaure le comportement strict (un jeton, un usage, le second est
+# refusé). Mesuré sur l'installation de dev : une douzaine de rotations
+# concurrentes en huit jours, toutes à moins de 20 secondes d'écart.
+REFRESH_ROTATION_GRACE_SECONDS = _int("REFRESH_ROTATION_GRACE_SECONDS", 30)
+
 
 # ── Cookies de session ───────────────────────────────────────
 ACCESS_COOKIE_NAME = "docsearch_access"
