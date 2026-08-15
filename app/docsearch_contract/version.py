@@ -16,7 +16,11 @@
 # promesse de stabilité tant que les lots 1 et 2 n'ont pas éprouvé la
 # forme du contrat.
 
-CONTRACT_VERSION = "0.2.0"
+CONTRACT_VERSION = "0.3.0"
+
+# 0.3.0 (2026-08-15) — lot 2 : `manifeste.py`, déclaration d'un module
+#   complémentaire installable (image, capacités, secrets, bornes de
+#   ressources, sources déclarées). Ajout pur.
 
 # 0.2.0 (2026-08-15) — lot 1 : `plugins.py` (modèle et validation d'une
 #   source portée par un module complémentaire) et `documents.py`
