@@ -42,12 +42,10 @@ from .version import CONTRACT_VERSION
 # bruit et ne ferait qu'une partie de ce qu'il annonce.
 #
 #   ingestion    pousser des documents sur le topic `documents-ready`
-#
-# `service_web` (exposer des écrans et des routes sous /ext/<nom>/) est
-# prévue par le §2 du plan et n'est PAS encore servie : elle sera ajoutée
-# ici avec le lot 3, pas avant — déclarer aujourd'hui une capacité que le
-# cœur ne sait pas router produirait un module à moitié installé.
-CAPACITES = ("ingestion",)
+#   service_web  exposer des routes sous /ext/<nom>/, servies par le
+#                proxy ; exige `port`, celui que le module écoute dans
+#                son conteneur
+CAPACITES = ("ingestion", "service_web")
 
 _NOM_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
@@ -66,8 +64,13 @@ _MEMOIRE_RE = re.compile(r"^\d+[kmg]$")
 
 CLES_CONNUES = frozenset({
     "nom", "version", "contract_version", "image", "description",
-    "auteur", "capacites", "secrets", "ressources", "sources",
+    "auteur", "capacites", "secrets", "ressources", "sources", "port",
 })
+
+# Ports que le proxy accepte de servir. Fermé plutôt qu'ouvert : le
+# module écoute dans SON conteneur, sur le réseau de la pile, et un port
+# libre est vite un port qui recouvre un service du cœur.
+PORT_MIN, PORT_MAX = 1024, 65535
 
 
 def _exiger(manifeste: dict, clef: str) -> str:
@@ -164,7 +167,25 @@ def valider_manifeste(manifeste) -> dict:
             "source : sans elle, ce qu'il pousserait serait refusé par le worker."
         )
 
+    port = manifeste.get("port")
+    if "service_web" in capacites:
+        if port is None:
+            raise ContratInvalide(
+                "Un module qui demande la capacité 'service_web' doit déclarer le 'port' "
+                "qu'il écoute dans son conteneur : c'est vers lui que le proxy enverra "
+                "/ext/<nom>/."
+            )
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            raise ContratInvalide(f"'port' doit être un entier, reçu {manifeste['port']!r}.") from None
+        if not PORT_MIN <= port <= PORT_MAX:
+            raise ContratInvalide(f"'port' hors bornes : {port} (attendu {PORT_MIN}–{PORT_MAX}).")
+    elif port is not None:
+        raise ContratInvalide("'port' n'a de sens qu'avec la capacité 'service_web'.")
+
     return {
+        "port": port,
         "nom": nom,
         "version": version,
         "contract_version": contrat,

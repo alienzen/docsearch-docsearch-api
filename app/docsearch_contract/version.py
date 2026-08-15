@@ -16,8 +16,11 @@
 # promesse de stabilité tant que les lots 1 et 2 n'ont pas éprouvé la
 # forme du contrat.
 
-CONTRACT_VERSION = "0.3.0"
+CONTRACT_VERSION = "0.4.0"
 
+# 0.4.0 (2026-08-15) — lot 3 : capacité `service_web` et clé `port` du
+#   manifeste (routage /ext/<nom>/), et `jetons.py` — ce qu'un module
+#   doit vérifier d'une session avant de répondre. Ajout pur.
 # 0.3.0 (2026-08-15) — lot 2 : `manifeste.py`, déclaration d'un module
 #   complémentaire installable (image, capacités, secrets, bornes de
 #   ressources, sources déclarées). Ajout pur.

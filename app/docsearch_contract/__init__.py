@@ -20,6 +20,13 @@ from .documents import (
     version_compatible,
 )
 from .erreurs import ContratInvalide
+from .jetons import (
+    ALGORITHME,
+    CHEMIN_JWKS,
+    COOKIE_ACCES,
+    TYPE_JETON_ACCES,
+    verifier_revendications,
+)
 from .manifeste import CAPACITES, RESSOURCES_DEFAUT, valider_manifeste
 from .plugins import (
     POLITIQUES_ACL,
@@ -43,8 +50,12 @@ from .sources import (
 from .version import CONTRACT_VERSION
 
 __all__ = [
+    "ALGORITHME",
     "CAPACITES",
+    "CHEMIN_JWKS",
     "CONTRACT_VERSION",
+    "COOKIE_ACCES",
+    "TYPE_JETON_ACCES",
     "POLITIQUES_ACL",
     "RESSOURCES_DEFAUT",
     "TYPES_MESSAGE",
@@ -67,6 +78,7 @@ __all__ = [
     "valider_manifeste",
     "valider_message",
     "verifier_emetteur",
+    "verifier_revendications",
     "version_compatible",
     "visible_to",
 ]
