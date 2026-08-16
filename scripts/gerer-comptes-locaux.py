@@ -26,7 +26,19 @@ import getpass
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
+# Deux dispositions à servir, et la seconde était cassée :
+#   dépôt  — scripts/ et app/ côte à côte, les modules sont dans app/ ;
+#   image  — `COPY app/ .` met les modules à plat dans /app, et
+#            `COPY scripts/ ./scripts/` place ce fichier dans /app/scripts.
+# Viser « parent.parent / app » ne marchait donc QUE depuis le dépôt, alors
+# que la docstring ci-dessus documente l'invocation par `podman exec`.
+# Symptôme : ModuleNotFoundError: No module named 'auth', au moment précis
+# où l'annuaire est en panne et où ce script est le dernier recours.
+_RACINE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(next(
+    (c for c in (_RACINE / "app", _RACINE) if (c / "auth").is_dir()),
+    _RACINE / "app",
+)))
 
 from auth import accounts
 
