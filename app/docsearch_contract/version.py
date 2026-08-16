@@ -16,8 +16,11 @@
 # promesse de stabilité tant que les lots 1 et 2 n'ont pas éprouvé la
 # forme du contrat.
 
-CONTRACT_VERSION = "0.5.0"
+CONTRACT_VERSION = "0.6.0"
 
+# 0.6.0 (2026-08-16) — accroche `admin_panel` : réglages typés d'un
+#   module, rendus par le cœur et livrés au module en variables
+#   d'environnement (DOCSEARCH_OPT_*). Ajout pur.
 # 0.5.0 (2026-08-15) — lot 4 : `interface.py`, accroches d'interface
 #   déclarées par un module (`nav` seulement pour l'instant). Ajout pur.
 # 0.4.0 (2026-08-15) — lot 3 : capacité `service_web` et clé `port` du

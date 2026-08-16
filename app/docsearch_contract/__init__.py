@@ -27,7 +27,13 @@ from .jetons import (
     TYPE_JETON_ACCES,
     verifier_revendications,
 )
-from .interface import ACCROCHES, valider_interface
+from .interface import (
+    ACCROCHES,
+    TYPES_REGLAGE,
+    normaliser_valeur,
+    valider_interface,
+    variable_de,
+)
 from .manifeste import CAPACITES, RESSOURCES_DEFAUT, valider_manifeste
 from .plugins import (
     POLITIQUES_ACL,
@@ -61,6 +67,7 @@ __all__ = [
     "POLITIQUES_ACL",
     "RESSOURCES_DEFAUT",
     "TYPES_MESSAGE",
+    "TYPES_REGLAGE",
     "TYPES_NATIFS",
     "ChampSupplementaire",
     "ContratInvalide",
@@ -74,10 +81,12 @@ __all__ = [
     "find",
     "iter_entries",
     "nom_valide",
+    "normaliser_valeur",
     "searchable_entries",
     "searchable_names",
     "valider_declaration",
     "valider_interface",
+    "variable_de",
     "valider_manifeste",
     "valider_message",
     "verifier_emetteur",

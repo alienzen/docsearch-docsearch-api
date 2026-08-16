@@ -2933,6 +2933,50 @@ def admin_set_source_groups(
     return _all_sources_status()
 
 
+class PluginReglagesUpdate(BaseModel):
+    reglages: dict
+
+
+@app.get("/admin/plugins")
+def admin_get_plugins(user: str = Depends(require_admin)):
+    """Modules complémentaires installés : ce qu'ils déclarent régler, ce
+    qui est réglé, et s'ils attendent un redémarrage.
+
+    Un module DÉSACTIVÉ y figure aussi — on doit pouvoir le régler avant
+    de l'allumer, pas seulement après."""
+    return plugin_ui_config.panneaux()
+
+
+@app.post("/admin/plugins/{nom}/reglages")
+def admin_set_plugin_reglages(nom: str, body: PluginReglagesUpdate, user: str = Depends(require_admin)):
+    """Enregistre les réglages d'un module.
+
+    Les valeurs sont normalisées par le CONTRAT selon le type déclaré :
+    une valeur qu'un module ne saurait pas relire est refusée ici plutôt
+    qu'écrite dans une unité systemd. Un réglage non déclaré est refusé
+    aussi — le manifeste fait foi.
+
+    ⚠️ Enregistrer ne suffit PAS à appliquer : les variables
+    d'environnement d'un conteneur sont fixées à sa création. La réponse
+    porte `restart_requis`, et l'interface doit le dire — un réglage
+    enregistré sans effet visible est exactement la panne silencieuse
+    qu'on évite partout ailleurs."""
+    try:
+        module = plugin_ui_config.set_reglages(nom, body.reglages)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Module inconnu : '{nom}'") from None
+    except ValueError as e:
+        # ContratInvalide hérite de ValueError : le message dit quoi corriger.
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from None
+    return {
+        "nom": nom,
+        "reglages": module.get("reglages", {}),
+        "restart_requis": module.get("restart_requis", False),
+    }
+
+
 @app.get("/admin/filetypes")
 def admin_get_filetypes(source: str = Query(DEFAULT_SOURCE_NAME), user: str = Depends(require_admin)):
     return filetype_config.get_config(source)

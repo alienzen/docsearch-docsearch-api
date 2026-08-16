@@ -18,7 +18,15 @@
 # Stockage (clé "docsearch:config:plugin_ui") :
 #   {"assistant": {"enabled": true,
 #                  "nav": [{"libelle": "Assistant", "chemin": "/ext/assistant/",
-#                           "icone": "fr-icon-chat-3-line"}]}}
+#                           "icone": "fr-icon-chat-3-line"}],
+#                  "admin_panel": [{"cle": "poll", "type": "texte", ...}],
+#                  "reglages": {"poll": "300"},
+#                  "restart_requis": false}}
+#
+# `admin_panel` est la DÉCLARATION (ce que le module veut régler, figé au
+# manifeste) ; `reglages` sont les VALEURS (ce que l'administrateur a
+# choisi). Les deux sont séparés parce qu'une mise à jour du module
+# remplace la première sans devoir écraser la seconde.
 #
 # `enabled` suit `plugin enable/disable` : un module arrêté ne laisse pas
 # son entrée dans le menu de tout le monde, où elle mènerait à un 502.
@@ -112,7 +120,95 @@ def entrees_de_menu() -> list[dict]:
     return sorted(entrees, key=lambda e: e["libelle"].lower())
 
 
-def enregistrer(nom: str, nav: list[dict], enabled: bool = False) -> dict:
+def panneaux() -> dict:
+    """Déclarations et valeurs de tous les modules, pour l'écran
+    d'administration. Contrairement à entrees_de_menu(), un module
+    DÉSACTIVÉ y figure : on doit pouvoir le régler avant de l'allumer."""
+    resultat = {}
+    for nom, module in _raw().items():
+        resultat[nom] = {
+            "enabled":        bool(module.get("enabled", False)),
+            "admin_panel":    module.get("admin_panel") or [],
+            "reglages":       module.get("reglages") or {},
+            "restart_requis": bool(module.get("restart_requis", False)),
+        }
+    return resultat
+
+
+def variables_env(nom: str) -> dict:
+    """Réglages sous leur forme finale : {DOCSEARCH_OPT_X: "valeur"}.
+
+    Lu par « manage.sh plugin » au moment d'écrire l'unité — c'est le
+    seul chemin par lequel un réglage atteint un module, qui ne voit ni
+    Redis ni Elasticsearch."""
+    module = _raw().get(nom) or {}
+    valeurs = module.get("reglages") or {}
+    return {
+        reglage["variable"]: valeurs.get(reglage["cle"], reglage.get("defaut", ""))
+        for reglage in (module.get("admin_panel") or [])
+    }
+
+
+def set_reglages(nom: str, valeurs: dict) -> dict:
+    """Enregistre les valeurs choisies par l'administrateur.
+
+    Chaque valeur est normalisée par le CONTRAT selon le type déclaré :
+    l'API ne réinvente pas la conversion, et une valeur qu'un module ne
+    saurait pas relire est refusée ici plutôt qu'écrite dans une unité.
+
+    Marque le module « à redémarrer » : les variables d'environnement
+    d'un conteneur sont fixées à sa création, la nouvelle valeur ne
+    prendra effet qu'au prochain démarrage. Le taire donnerait un réglage
+    enregistré et sans effet — la panne silencieuse qu'on évite partout
+    ailleurs dans ce produit."""
+    from docsearch_contract import interface as contract_interface
+
+    client = _get_redis_client()
+    if client is None:
+        raise RuntimeError("Redis injoignable — réglages non enregistrés.")
+    brut = client.get(PLUGIN_UI_KEY)
+    modules = json.loads(brut) if brut else {}
+    module = modules.get(nom)
+    if module is None:
+        raise KeyError(f"Module inconnu : '{nom}'")
+
+    declares = {r["cle"]: r for r in (module.get("admin_panel") or [])}
+    inconnus = sorted(set(valeurs) - set(declares))
+    if inconnus:
+        raise ValueError(
+            f"Réglage(s) non déclaré(s) par « {nom} » : {', '.join(inconnus)}."
+        )
+
+    retenues = dict(module.get("reglages") or {})
+    for cle, valeur in valeurs.items():
+        retenues[cle] = contract_interface.normaliser_valeur(declares[cle]["type"], valeur, cle)
+
+    module["reglages"] = retenues
+    module["restart_requis"] = True
+    modules[nom] = module
+    client.set(PLUGIN_UI_KEY, json.dumps(modules))
+    _invalider()
+    return module
+
+
+def marquer_applique(nom: str) -> dict:
+    """Efface le drapeau « à redémarrer » — appelé par manage.sh une fois
+    l'unité réécrite ET le module relancé, jamais par l'API : c'est
+    l'application réelle qui l'éteint, pas l'intention de l'appliquer."""
+    client = _get_redis_client()
+    if client is None:
+        raise RuntimeError("Redis injoignable.")
+    brut = client.get(PLUGIN_UI_KEY)
+    modules = json.loads(brut) if brut else {}
+    if nom in modules:
+        modules[nom]["restart_requis"] = False
+        client.set(PLUGIN_UI_KEY, json.dumps(modules))
+        _invalider()
+    return modules
+
+
+def enregistrer(nom: str, nav: list[dict], admin_panel: list[dict] | None = None,
+                enabled: bool = False) -> dict:
     """Écrit les accroches d'un module. Appelé par `manage.sh plugin
     install`, jamais par l'API — qui n'a aucune route d'écriture ici."""
     client = _get_redis_client()
@@ -125,7 +221,22 @@ def enregistrer(nom: str, nav: list[dict], enabled: bool = False) -> dict:
     # administrateur avait éteint (même règle que searchable pour les
     # sources).
     ancien = modules.get(nom) or {}
-    modules[nom] = {"enabled": ancien.get("enabled", enabled), "nav": nav}
+    declaration = admin_panel or []
+    # Les VALEURS déjà choisies survivent à une mise à jour du module, et
+    # seules celles dont la clé reste déclarée : un réglage retiré du
+    # manifeste ne doit pas rester dans une unité.
+    cles = {r["cle"] for r in declaration}
+    reglages = {k: v for k, v in (ancien.get("reglages") or {}).items() if k in cles}
+    for reglage in declaration:
+        reglages.setdefault(reglage["cle"], reglage.get("defaut", ""))
+    modules[nom] = {
+        "enabled":        ancien.get("enabled", enabled),
+        "nav":            nav,
+        "admin_panel":    declaration,
+        "reglages":       reglages,
+        # Une déclaration qui change réclame une réécriture d'unité.
+        "restart_requis": ancien.get("admin_panel") != declaration or ancien.get("restart_requis", False),
+    }
     client.set(PLUGIN_UI_KEY, json.dumps(modules))
     _invalider()
     return modules
