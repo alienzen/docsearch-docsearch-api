@@ -16,8 +16,11 @@
 # promesse de stabilité tant que les lots 1 et 2 n'ont pas éprouvé la
 # forme du contrat.
 
-CONTRACT_VERSION = "0.6.0"
+CONTRACT_VERSION = "0.7.0"
 
+# 0.7.0 (2026-08-16) — accroches `result_action` (lien sur chaque carte
+#   de résultat, portant l'identifiant du document) et `page` (écran du
+#   module encadré par l'interface). Le vocabulaire du §3 est complet.
 # 0.6.0 (2026-08-16) — accroche `admin_panel` : réglages typés d'un
 #   module, rendus par le cœur et livrés au module en variables
 #   d'environnement (DOCSEARCH_OPT_*). Ajout pur.

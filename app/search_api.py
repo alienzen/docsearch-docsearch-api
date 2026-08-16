@@ -3347,6 +3347,12 @@ def get_ui_config():
     # une seconde plus tard, et le module derrière vérifie lui-même la
     # session.
     config["plugin_nav"] = plugin_ui_config.entrees_de_menu()
+    # Liens posés sur chaque carte de résultat, et écrans de module. Même
+    # canal que plugin_nav, et pour la même raison : une route de plus,
+    # c'est un préfixe de plus à déclarer aux trois endroits qui doivent
+    # rester miroirs.
+    config["plugin_actions"] = plugin_ui_config.actions_de_resultat()
+    config["plugin_pages"] = plugin_ui_config.pages()
     return config
 
 

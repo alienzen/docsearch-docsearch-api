@@ -18,12 +18,13 @@
 #   admin_panel  des réglages TYPÉS, rendus par le cœur dans l'écran
 #                d'administration — le module n'envoie aucun formulaire,
 #                il décrit ce qu'il veut régler et le cœur dessine
+#   result_action un lien sur chaque carte de résultat, qui porte
+#                l'identifiant du document au module
+#   page         un écran entier du module, encadré par l'interface du
+#                produit
 #
-# Deux autres accroches sont prévues par le plan — `result_action`
-# (bouton sur une carte de résultat) et `page` (écran entier en iframe).
-# Elles ne sont PAS servies : les déclarer ferait s'installer un module
-# qui annonce des éléments que rien n'affiche. Elles suivront le même
-# chemin que les deux premières.
+# Le vocabulaire est désormais complet : les quatre accroches du §3 sont
+# servies.
 #
 # ── Comment un réglage atteint le module ─────────────────────
 #
@@ -45,7 +46,7 @@ import re
 
 from .erreurs import ContratInvalide
 
-ACCROCHES = ("nav", "admin_panel")
+ACCROCHES = ("nav", "admin_panel", "result_action", "page")
 
 # Une entrée de menu ne peut viser QUE le module qui la déclare. Sans ce
 # contrôle, un module poserait dans le menu de tout le monde un lien vers
@@ -68,6 +69,9 @@ PREFIXE_VARIABLE = "DOCSEARCH_OPT_"
 MAX_REGLAGES = 20
 LONGUEUR_MAX_VALEUR = 500
 
+# Actions posées sur chaque carte de résultat — voir _valider_actions().
+MAX_ACTIONS_RESULTAT = 3
+
 
 def variable_de(cle: str) -> str:
     """Nom de la variable d'environnement portant ce réglage."""
@@ -89,6 +93,8 @@ def valider_interface(interface, nom_module: str) -> dict:
         )
 
     resultat_panneau = _valider_panneau(interface.get("admin_panel") or [])
+    resultat_actions = _valider_actions(interface.get("result_action") or [], nom_module)
+    resultat_pages = _valider_pages(interface.get("page") or [], nom_module)
 
     entrees = interface.get("nav") or []
     if not isinstance(entrees, list):
@@ -134,7 +140,90 @@ def valider_interface(interface, nom_module: str) -> dict:
 
         resultat.append({"libelle": libelle, "chemin": chemin, "icone": icone})
 
-    return {"nav": resultat, "admin_panel": resultat_panneau}
+    return {
+        "nav": resultat,
+        "admin_panel": resultat_panneau,
+        "result_action": resultat_actions,
+        "page": resultat_pages,
+    }
+
+
+def _valider_lien(entree: dict, nom_module: str, quoi: str, vus: set) -> dict:
+    """Contrôles communs à une entrée de menu, une action de résultat et
+    une page : un libellé borné, une icône du vocabulaire DSFR, et un
+    chemin qui ne peut viser QUE le module qui le déclare."""
+    libelle = (entree.get("libelle") or entree.get("titre") or "").strip()
+    if not libelle:
+        raise ContratInvalide(f"{quoi} sans libellé.")
+    if len(libelle) > LONGUEUR_MAX_LIBELLE:
+        raise ContratInvalide(
+            f"{quoi} : libellé trop long ({len(libelle)} caractères, maximum "
+            f"{LONGUEUR_MAX_LIBELLE})."
+        )
+    if libelle in vus:
+        raise ContratInvalide(f"{quoi} déclaré deux fois : « {libelle} »")
+    vus.add(libelle)
+
+    chemin = entree.get("chemin") or ""
+    if not _CHEMIN_RE.match(chemin):
+        raise ContratInvalide(
+            f"{quoi} : chemin invalide '{chemin}' — attendu une adresse sous "
+            f"/ext/{nom_module}/."
+        )
+    if not chemin.startswith(f"/ext/{nom_module}/"):
+        raise ContratInvalide(
+            f"{quoi} « {libelle} » vise '{chemin}', hors de /ext/{nom_module}/ : "
+            "un module ne peut pointer que vers lui-même."
+        )
+
+    icone = entree.get("icone")
+    if icone is not None and not _ICONE_RE.match(icone):
+        raise ContratInvalide(f"{quoi} : icône inconnue '{icone}' — attendu une classe DSFR.")
+
+    return {"libelle": libelle, "chemin": chemin, "icone": icone}
+
+
+def _valider_actions(actions, nom_module: str) -> list[dict]:
+    """Actions posées sur CHAQUE carte de résultat.
+
+    Bornées à trois : elles s'ajoutent aux boutons du produit sur une
+    carte déjà dense, et une carte de résultat qui devient une barre
+    d'outils ne sert plus à lire.
+
+    ⚠️  Le cœur ajoute l'identifiant du document en paramètre `doc`. Le
+    module doit RELIRE ce document par l'API, avec le cookie de
+    l'utilisateur : recevoir un identifiant ne prouve pas que celui qui
+    l'envoie a le droit de le lire."""
+    if not isinstance(actions, list):
+        raise ContratInvalide("'result_action' doit être une liste.")
+    if len(actions) > MAX_ACTIONS_RESULTAT:
+        raise ContratInvalide(
+            f"{len(actions)} actions déclarées, maximum {MAX_ACTIONS_RESULTAT} — une "
+            "carte de résultat sert à lire, pas à porter une barre d'outils."
+        )
+    vus: set = set()
+    return [_valider_lien(a, nom_module, "Action de résultat", vus) for a in actions if isinstance(a, dict) or _refuser(a)]
+
+
+def _valider_pages(pages, nom_module: str) -> list[dict]:
+    """Écrans entiers du module, encadrés par l'interface du produit.
+
+    Une seule par module : le cœur n'a qu'une page hôte, et deux écrans
+    se distinguent par leur adresse à l'intérieur du module, pas par deux
+    déclarations."""
+    if not isinstance(pages, list):
+        raise ContratInvalide("'page' doit être une liste.")
+    if len(pages) > 1:
+        raise ContratInvalide(
+            "Une seule page par module : deux écrans se distinguent par leur "
+            "adresse à l'intérieur du module."
+        )
+    vus: set = set()
+    return [_valider_lien(p, nom_module, "Page", vus) for p in pages if isinstance(p, dict) or _refuser(p)]
+
+
+def _refuser(valeur):
+    raise ContratInvalide(f"Déclaration invalide : {valeur!r}")
 
 
 def _valider_panneau(reglages) -> list[dict]:

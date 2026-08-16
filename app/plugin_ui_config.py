@@ -207,7 +207,37 @@ def marquer_applique(nom: str) -> dict:
     return modules
 
 
+def _accroches_actives(cle: str) -> list[dict]:
+    """Accroches d'un type donné, pour les modules ACTIFS seulement.
+
+    Un module arrêté ne laisse ni entrée de menu, ni action sur les
+    cartes, ni page : elles mèneraient toutes à un 502."""
+    resultat = []
+    for nom, module in _raw().items():
+        if not module.get("enabled", False):
+            continue
+        for entree in module.get(cle) or []:
+            resultat.append({
+                "module":  nom,
+                "libelle": entree.get("libelle", ""),
+                "chemin":  entree.get("chemin", ""),
+                "icone":   entree.get("icone"),
+            })
+    return sorted(resultat, key=lambda e: e["libelle"].lower())
+
+
+def actions_de_resultat() -> list[dict]:
+    """Liens posés sur chaque carte de résultat par les modules actifs."""
+    return _accroches_actives("result_action")
+
+
+def pages() -> list[dict]:
+    """Écrans de module, encadrés par l'interface du produit."""
+    return _accroches_actives("page")
+
+
 def enregistrer(nom: str, nav: list[dict], admin_panel: list[dict] | None = None,
+                result_action: list[dict] | None = None, page: list[dict] | None = None,
                 enabled: bool = False) -> dict:
     """Écrit les accroches d'un module. Appelé par `manage.sh plugin
     install`, jamais par l'API — qui n'a aucune route d'écriture ici."""
@@ -232,6 +262,8 @@ def enregistrer(nom: str, nav: list[dict], admin_panel: list[dict] | None = None
     modules[nom] = {
         "enabled":        ancien.get("enabled", enabled),
         "nav":            nav,
+        "result_action":  result_action or [],
+        "page":           page or [],
         "admin_panel":    declaration,
         "reglages":       reglages,
         # Une déclaration qui change réclame une réécriture d'unité.
