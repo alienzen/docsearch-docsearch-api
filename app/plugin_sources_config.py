@@ -183,9 +183,57 @@ def add_source(
     })
 
     def mutate(sources):
+        _verifier_index_libre(name, entree["es_index"], sources)
         sources[name] = entree
 
     return _read_write(mutate)
+
+
+def _verifier_index_libre(name: str, es_index: str, sources: dict) -> None:
+    """Refuse un index Elasticsearch déjà pris par une AUTRE source.
+
+    Ce n'est pas une hygiène de nommage. `plugin_indexer.reconcilier()`
+    supprime, à chaque `run_end`, tout document de `es_index` qui ne porte
+    pas le `run_id` de la passe qui vient de finir — SANS filtrer sur la
+    source. Deux sources partageant un index se supprimeraient donc leurs
+    documents l'une l'autre à chaque passe, jusqu'à ce que le garde-fou
+    des 50 % bloque la réconciliation définitivement : plus rien n'est
+    jamais nettoyé, et le journal ressemble à une panne du module.
+
+    Le contrôle est le même que celui des registres natifs — voir
+    `sql_sources_config.add_source`, qui vérifie déjà contre les sources
+    fichiers — étendu ici aux quatre registres, puisqu'ils partagent tous
+    l'alias de recherche fédérée.
+
+    Imports différés : ces trois modules n'importent jamais celui-ci, et
+    les importer en tête créerait un cycle pour rien.
+    """
+    for autre_nom, autre in sources.items():
+        if autre_nom != name and autre.get("es_index") == es_index:
+            raise ValueError(
+                f"L'index '{es_index}' est déjà utilisé par la source plugin '{autre_nom}'."
+            )
+
+    from file_sources_config import get_sources as get_file_sources
+    from sql_sources_config import get_sources as get_sql_sources
+    from web_sources_config import get_sources as get_web_sources
+
+    for libelle, get in (("fichier", get_file_sources), ("SQL", get_sql_sources)):
+        for autre_nom, autre in get().items():
+            if autre.es_index == es_index:
+                raise ValueError(
+                    f"L'index '{es_index}' est déjà utilisé par la source {libelle} '{autre_nom}'."
+                )
+
+    # Une source web en occupe DEUX : l'index de crawl intermédiaire écrit
+    # par le crawler, et l'index final que web_indexer.py en dérive. Y
+    # écrire depuis un module casserait la transformation de l'un vers
+    # l'autre, il faut donc refuser les deux.
+    for autre_nom, autre in get_web_sources().items():
+        if es_index in (autre.es_index, autre.crawl_index):
+            raise ValueError(
+                f"L'index '{es_index}' est déjà utilisé par la source web '{autre_nom}'."
+            )
 
 
 def remove_source(name: str) -> dict:

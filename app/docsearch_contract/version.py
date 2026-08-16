@@ -16,8 +16,13 @@
 # promesse de stabilité tant que les lots 1 et 2 n'ont pas éprouvé la
 # forme du contrat.
 
-CONTRACT_VERSION = "0.7.0"
+CONTRACT_VERSION = "0.7.1"
 
+# 0.7.1 (2026-08-16) — deux sources d'un même manifeste ne peuvent plus
+#   viser le même `es_index` : la réconciliation de fin de passe supprime
+#   par index sans distinguer la source, les deux se vidaient l'une
+#   l'autre en silence. Correctif — la mineure ne bouge pas, les
+#   manifestes déclarant « 0.7 » restent acceptés.
 # 0.7.0 (2026-08-16) — accroches `result_action` (lien sur chaque carte
 #   de résultat, portant l'identifiant du document) et `page` (écran du
 #   module encadré par l'interface). Le vocabulaire du §3 est complet.

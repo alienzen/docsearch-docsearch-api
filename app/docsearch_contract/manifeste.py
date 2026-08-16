@@ -230,6 +230,7 @@ def _valider_sources(sources, nom_module: str) -> list[dict]:
         raise ContratInvalide("'sources' doit être une liste.")
     resultat = []
     vus = set()
+    index_vus: dict[str, str] = {}
     for source in sources:
         if not isinstance(source, dict):
             raise ContratInvalide(f"Déclaration de source invalide : {source}")
@@ -253,5 +254,23 @@ def _valider_sources(sources, nom_module: str) -> list[dict]:
             **{k: v for k, v in source.items() if k != "nom"},
             "plugin": nom_module,
         })
+
+        # Deux sources ne peuvent pas viser le même index, et ce n'est pas
+        # une hygiène de nommage : `plugin_indexer.reconcilier()` supprime,
+        # à chaque `run_end`, tout document de `es_index` qui ne porte pas
+        # le `run_id` de la passe — SANS filtrer sur la source. Deux
+        # sources partageant un index se supprimeraient donc mutuellement
+        # leurs documents à chaque passe, jusqu'à ce que le garde-fou des
+        # 50 % bloque la réconciliation pour de bon. Le tout en silence.
+        index = declaration["es_index"]
+        if index in index_vus:
+            raise ContratInvalide(
+                f"Les sources '{index_vus[index]}' et '{nom_source}' visent le même index "
+                f"'{index}'. Chaque source a besoin du sien : la réconciliation de fin de "
+                f"passe supprime par index, sans distinguer la source, et les deux se "
+                f"videraient l'une l'autre."
+            )
+        index_vus[index] = nom_source
+
         resultat.append({"nom": nom_source, **declaration})
     return resultat
