@@ -40,6 +40,7 @@ import cluster_status
 import history_purge
 import search_api
 import search_log
+import plugin_sources_config
 import sql_sources_config
 import user_history
 
@@ -563,10 +564,19 @@ def _source_sql(nom: str, *champs, groupes: tuple = ()):
 
 @pytest.fixture
 def sources_sql(monkeypatch):
+    """Pose le registre des sources à facettes pour un test.
+
+    ⚠️ Les DEUX registres capables d'en déclarer sont neutralisés, pas
+    seulement le SQL : depuis que les modules complémentaires peuvent
+    déclarer des facettes, n'en isoler qu'un laissait ces tests lire le
+    Redis de l'installation de dev — donc dépendre des modules qui s'y
+    trouvent installés. Constaté le 2026-08-16, une fois le module
+    d'exemple enregistré."""
     def _poser(*sources, groupes=("docsearch-users",)):
         registre = {s.name: s for s in sources}
         monkeypatch.setattr(sql_sources_config, "get_sources", lambda: registre)
         monkeypatch.setattr(sql_sources_config, "get_source", lambda nom: registre[nom])
+        monkeypatch.setattr(plugin_sources_config, "get_sources", dict)
         monkeypatch.setattr(search_api, "get_effective_groups", lambda username: list(groupes))
     return _poser
 

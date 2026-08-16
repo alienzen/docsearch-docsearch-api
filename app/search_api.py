@@ -52,6 +52,7 @@ from file_sources_config import ES_SEARCH_ALIAS, DEFAULT_SOURCE_NAME
 import sql_sources_config
 import sql_dsn_registry
 import web_sources_config
+import plugin_sources_config
 import plugin_ui_config
 # Vue générique des trois registres — la règle « quelles sources cet
 # utilisateur peut-il atteindre » vit dans le contrat partagé
@@ -460,6 +461,36 @@ def _searchable_source_names(username: str) -> list[str]:
     return source_registries.noms_cherchables(get_effective_groups(username))
 
 
+def _sources_a_facettes() -> dict:
+    """Sources capables de déclarer des facettes personnalisées : SQL et
+    modules complémentaires.
+
+    Les sources fichiers et web en sont exclues, et pour la même raison
+    qu'avant : leur schéma de document est fixe, elles n'ont pas de
+    mapping de colonnes où marquer un champ comme facette.
+
+    ⚠️ Les modules ont été OUBLIÉS ici jusqu'au 2026-08-16 : leur
+    manifeste déclarait `facet: true`, le contrat le validait, l'index le
+    portait en `keyword` — et le volet de gauche n'en montrait rien. Le
+    défaut ne s'est vu qu'à l'écran, en filtrant sur la source d'un
+    module."""
+    return {**sql_sources_config.get_sources(), **plugin_sources_config.get_sources()}
+
+
+def _champs_a_facettes(source):
+    """(champ ES, libellé, type ES) des champs marqués comme facette.
+
+    Les deux registres nomment le champ différemment — `es_field` pour
+    une colonne SQL, `nom` pour un champ de module — d'où cette
+    normalisation plutôt qu'un test de type chez chaque appelant."""
+    for f in getattr(source, "fields", ()) or ():
+        if not getattr(f, "facet", False):
+            continue
+        champ = getattr(f, "es_field", None) or getattr(f, "nom", "")
+        if champ:
+            yield champ, getattr(f, "facet_label", None) or champ, getattr(f, "es_type", "")
+
+
 def _active_custom_facets(source_names: list[str], username: str | None = None) -> dict[str, str]:
     """
     Facettes personnalisées actives pour la recherche en cours —
@@ -488,20 +519,18 @@ def _active_custom_facets(source_names: list[str], username: str | None = None) 
     /search/export la construisent.
     """
     user_groups = get_effective_groups(username) if username else None
-    fallback_sources = sql_sources_config.get_sources().items()
+    declarants = _sources_a_facettes()
     names = source_names or [
-        name for name, s in fallback_sources
+        name for name, s in declarants.items()
         if s.searchable and (user_groups is None or _visible_to(s, user_groups))
     ]
     result: dict[str, str] = {}
     for name in names:
-        try:
-            source = sql_sources_config.get_source(name)
-        except KeyError:
+        source = declarants.get(name)
+        if source is None:
             continue   # source fichier/web, ou nom déjà écarté par _requested_source_names
-        for f in source.fields:
-            if f.facet:
-                result[f.es_field] = f.facet_label or f.es_field
+        for champ, libelle, _type in _champs_a_facettes(source):
+            result[champ] = libelle
     return result
 
 
@@ -542,9 +571,16 @@ def _suggestable_custom_facets(username: str) -> dict[str, str]:
     # dépend pas de qui regarde. D'où l'ensemble, et l'exigence qu'il ne
     # contienne que `keyword`.
     types: dict[str, set[str]] = {}
-    for source in sql_sources_config.get_sources().values():
-        for f in source.fields:
-            types.setdefault(f.es_field, set()).add(f.es_type)
+    for source in _sources_a_facettes().values():
+        for f in getattr(source, "fields", ()) or ():
+            # TOUS les champs, pas seulement ceux marqués comme facette :
+            # c'est le conflit de type entre deux sources qui est traqué
+            # ici, et il se produit aussi bien avec un champ non facetté.
+            # `es_field` côté SQL, `nom` côté module — voir
+            # _champs_a_facettes().
+            champ = getattr(f, "es_field", None) or getattr(f, "nom", "")
+            if champ:
+                types.setdefault(champ, set()).add(getattr(f, "es_type", ""))
     fixes = {champ for champ, _ in user_history.CHAMPS_CORPUS}
     return {
         es_field: label

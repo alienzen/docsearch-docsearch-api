@@ -218,7 +218,13 @@ def construire_document(source: PluginSource, charge: dict, run_id: str,
         # tri de la recherche fédérée traitent ce document comme les
         # autres, sans cas particulier côté interface.
         "filename":      charge.get("filename") or charge.get("title") or identifiant,
-        "filepath":      charge.get("url") or f"{source.name}::{identifiant}",
+        # Repli quand le module ne donne pas d'URL. Le séparateur n'est
+        # PAS « :: » : c'est la convention des membres d'archive
+        # (« archive.zip::membre »), et l'interface s'en sert pour poser
+        # « Extrait d'une archive » sur la carte de résultat — mention
+        # fausse et déroutante sur un document poussé par un module.
+        # Constaté à l'écran le 2026-08-16, sur le module d'exemple.
+        "filepath":      charge.get("url") or f"plugin:{source.name}/{identifiant}",
         "extension":     charge.get("extension") or "",
         "type":          "plugin",
         "source":        source.name,
