@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Depends, Request, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, NotFoundError
 from elasticsearch.helpers import scan as es_scan
 from auth.deps import current_user, optional_user, require_admin, is_admin
 from auth.directory import get_effective_groups
@@ -321,13 +321,43 @@ def _keywords_filter(keywords: str | list[str] | None) -> dict | None:
     folder/source et les facettes SQL ne portent qu'une valeur par
     document — un ET n'y matcherait jamais rien, d'où le OU conservé.
 
+    `case_insensitive` : le champ `keywords` est un `keyword` ES, donc
+    indexé tel quel — « Budget », « budget » et « BUDGET » y sont trois
+    termes distincts, alors qu'ils viennent de la propriété "Mots-clés"
+    saisie à la main dans Word ou Acrobat, où la casse ne veut rien dire.
+    Sans ce drapeau, `mots-cles:budget` tapé dans la barre de recherche
+    ne ramenait rien sur un corpus qui n'écrit que « Budget ».
+
+    Ne couvre QUE la casse, pas les accents : « Congés » et « conges »
+    restent deux termes. Les rapprocher demanderait un `normalizer` sur
+    le mapping, donc une réindexation de tous les index (voir
+    migrer_exact() dans docsearch-ingestion/app/indexer.py pour ce que ça
+    représente) — écarté à ce stade.
+
+    ⚠️ Et la casse elle-même n'est repliée que sur l'ASCII : c'est un
+    automate Lucene, pas un `toLowerCase()` Unicode. Vérifié sur l'index
+    de la VM de dev, contre le mot-clé « Vélo » : « vélo » et « VéLO »
+    le trouvent, « VÉLO » ne le trouve PAS — le « É » de la requête ne se
+    replie pas sur le « é » indexé. En pratique le cas visé (une valeur
+    capitalisée dans les métadonnées, tapée en minuscules dans la barre)
+    est couvert ; une saisie en CAPITALES ACCENTUÉES ne l'est pas, et
+    seul le `normalizer` ci-dessus y changerait quelque chose.
+
+    Conséquence à connaître : la facette continue d'AFFICHER une ligne
+    par casse rencontrée (son agrégation `terms` porte sur le champ brut),
+    et cliquer l'une d'elles ramène désormais les documents des deux. Le
+    compte annoncé par la facette peut donc être inférieur au nombre de
+    résultats — jamais supérieur, aucun document n'est perdu.
+
     Toute évolution ici est à répercuter dans search_query.py, qui en
     tient une copie pour le worker d'alertes (voir son en-tête).
     """
     if not keywords:
         return None
     kws = keywords if isinstance(keywords, list) else [keywords]
-    return {"bool": {"filter": [{"term": {"keywords": k}} for k in kws]}}
+    return {"bool": {"filter": [
+        {"term": {"keywords": {"value": k, "case_insensitive": True}}} for k in kws
+    ]}}
 
 
 
@@ -1345,6 +1375,13 @@ def search(
         date_to=req.date_to,
         took_ms=took_ms,
         duration_ms=duration_ms,
+        # Numéro de page plutôt que l'offset brut — voir
+        # _NAVIGATION_PROPERTIES dans search_log.py. `size` est garanti
+        # non nul par le modèle (défaut 10), mais un client qui enverrait
+        # 0 ne doit pas faire échouer la recherche pour une ligne de
+        # journal : on retombe alors sur la page 1.
+        page=(req.from_ // req.size) + 1 if req.size else 1,
+        exact=req.exact,
     )
 
     # Uniquement quand la recherche n'a rien donné : le chemin nominal ne
@@ -2279,7 +2316,43 @@ def preview_document(
         return _convert_to_pdf(filepath)
     if ext == ".txt":
         return FileResponse(filepath, media_type="text/plain; charset=utf-8")
+    if ext in _IMAGES_NATIVES:
+        return FileResponse(filepath, media_type=_IMAGES_NATIVES[ext])
+    if ext in _IMAGES_A_CONVERTIR:
+        # TIFF : voir _IMAGES_A_CONVERTIR.
+        return _convert_to_pdf(filepath)
     raise HTTPException(status_code=415, detail="Format non prévisualisable")
+
+
+# ── Images océrisées ──────────────────────────────────────────
+# Un document image n'entre dans l'index que si son extension a été
+# activée pour la source ET que l'OCR y est activé (voir
+# filetype_config.py, où jpg/png/tiff sont livrés désactivés, et
+# indexer.py::_ocr_headers) : un .jpg trouvé ici est donc, par
+# construction, un document océrisé. Son texte est cherchable depuis
+# toujours, mais l'aperçu répondait 415 — le lien « Voir l'aperçu »
+# s'affichait pourtant sur sa carte de résultat (ResultCard.vue ne
+# regarde que le type de la SOURCE), et menait à une erreur.
+#
+# Servi tel quel, sans passer par la conversion : le navigateur affiche
+# ces formats nativement, et une image d'origine reste toujours plus
+# lisible que la même image réencapsulée.
+_IMAGES_NATIVES = {
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png":  "image/png",
+    ".gif":  "image/gif",
+    ".webp": "image/webp",
+    ".bmp":  "image/bmp",
+}
+
+# TIFF : format de sortie courant des scanners — donc précisément ce
+# qu'on océrise — mais qu'AUCUN navigateur n'affiche. Renvoyé en
+# image/tiff, il serait téléchargé au lieu d'être affiché, ce qui n'est
+# pas un aperçu. Il passe donc par LibreOffice, comme les fichiers
+# Office : il l'importe dans Draw et en sort un PDF d'une page
+# (vérifié sur cette VM), affichable dans l'onglet comme les autres.
+_IMAGES_A_CONVERTIR = {".tif", ".tiff"}
 
 
 def _convert_to_pdf(filepath: str) -> StreamingResponse:
@@ -3349,6 +3422,8 @@ class UiConfigUpdate(BaseModel):
     login_inscription_url: str | None = None
     login_mot_de_passe_oublie_url: str | None = None
     login_proconnect_enabled: bool | None = None
+    # Un exemple par ligne — voir ui_config.py.
+    search_examples: str | None = None
     sources_mount_display: str | None = None
 
 
@@ -3495,6 +3570,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_text("login_mot_de_passe_oublie_url", body.login_mot_de_passe_oublie_url)
         if body.login_proconnect_enabled is not None:
             config = ui_config.set_param("login_proconnect_enabled", body.login_proconnect_enabled)
+        if body.search_examples is not None:
+            config = ui_config.set_text("search_examples", body.search_examples)
         if body.sources_mount_display is not None:
             config = ui_config.set_text("sources_mount_display", body.sources_mount_display)
         return config
@@ -3664,6 +3741,26 @@ def admin_set_suggestion_status(suggestion_id: str, body: SuggestionStatusUpdate
     return {"status": "ok"}
 
 
+@app.delete("/admin/suggestions/{suggestion_id}")
+def admin_delete_suggestion(suggestion_id: str, user: str = Depends(require_admin)):
+    """Efface définitivement une suggestion — doublon, dépôt accidentel,
+    contenu nominatif qu'on ne veut pas garder. Voir
+    suggestion_log.delete_suggestion() : c'est une suppression, pas un
+    quatrième statut.
+
+    404 sur un identifiant inconnu, 503 si Elasticsearch ne répond pas :
+    les deux cas sont distincts pour l'utilisateur de la page de
+    statistiques — le premier veut dire « quelqu'un l'a déjà supprimée »
+    (l'écran est simplement à recharger), le second « réessayez »."""
+    try:
+        suggestion_log.delete_suggestion(es, suggestion_id=suggestion_id)
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="Suggestion introuvable.") from None
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Suppression impossible : {e}") from e
+    return {"status": "ok"}
+
+
 # ── Statistiques de recherche ───────────────────────────────────
 # Reprend les clés de la section "timing" du résumé pour le cas où
 # l'index n'existe pas encore (première installation) — la page de stats
@@ -3682,28 +3779,78 @@ def _round_ms(value: float | None) -> float | None:
     return None if value is None else round(value, 1)
 
 
+# Ce qui n'est pas un tour de page — voir _search_logs_query(), dont
+# c'est exactement le `must_not`, et _NAVIGATION_PROPERTIES dans
+# search_log.py pour le pourquoi. Les lignes sans `page` (antérieures à
+# sa capture) sont GARDÉES : on ignore ce qu'elles étaient, et les
+# écarter ferait chuter les compteurs de tout l'historique d'avant.
+_SANS_TOUR_DE_PAGE = {"bool": {"must_not": [{"range": {"page": {"gt": 1}}}]}}
+
+
 @app.get("/admin/search-logs/summary")
 def admin_search_logs_summary(user: str = Depends(require_admin)):
     """Compteurs agrégés + répartition par jour (14 derniers jours) +
-    temps de recherche pour les cartes de résumé de la page /stats.html."""
+    temps de recherche pour les cartes de résumé de la page /stats.html.
+
+    ── Ce qui compte les tours de page, et ce qui ne les compte pas ──
+
+    Les compteurs de VOLUME (total, utilisateurs et IP distincts,
+    recherches par jour, recherches par groupe) les écartent : un clic
+    sur « Suivant » relance /search et écrit une ligne de plus, si bien
+    qu'une requête consultée sur cinq pages pesait cinq recherches.
+
+    DEUX FAMILLES Y ÉCHAPPENT DÉLIBÉRÉMENT :
+
+    1. **Les avis.** Le pouce est rattaché à la DERNIÈRE recherche
+       affichée (voir `store.searchId` dans l'interface) : celui qui
+       juge les résultats depuis la page 3 laisse son avis sur une ligne
+       « page 3 ». L'écarter jetterait un avis réel — et fausserait la
+       part positive, qui est un rapport entre avis, pas entre
+       recherches. Aucun cas sur cette installation à ce jour, mais c'est
+       structurel, pas statistique.
+
+    2. **Les temps de recherche.** Un tour de page est une requête
+       pleine et entière, réellement exécutée par le moteur. Pire :
+       c'est en pagination profonde (`from` élevé) qu'Elasticsearch est
+       le plus lent. Les écarter reviendrait à masquer précisément les
+       requêtes lentes que ce panneau existe pour montrer.
+    """
     try:
         res = es.search(
             index=search_log.SEARCH_LOG_INDEX,
             size=0,
             aggs={
-                "unique_users": {"cardinality": {"field": "username"}},
-                "unique_ips":   {"cardinality": {"field": "ip"}},
-                "by_day": {
-                    "date_histogram": {"field": "timestamp", "calendar_interval": "day"},
+                # Tout ce qui répond à « combien de recherches » vit sous
+                # ce filtre. Un filtre d'agrégation plutôt qu'une `query`
+                # globale : celle-ci restreindrait AUSSI les avis et les
+                # temps, qui doivent voir toutes les lignes (voir la
+                # docstring).
+                "recherches": {
+                    "filter": _SANS_TOUR_DE_PAGE,
+                    "aggs": {
+                        "unique_users": {"cardinality": {"field": "username"}},
+                        "unique_ips":   {"cardinality": {"field": "ip"}},
+                        "by_day": {
+                            "date_histogram": {"field": "timestamp", "calendar_interval": "day"},
+                        },
+                        # Volume par groupe. `missing` donne un lot
+                        # explicite aux documents sans groupe —
+                        # historique d'avant la capture, ou utilisateur
+                        # sans appartenance : sans lui, la somme des lots
+                        # ne retomberait pas sur le total et ferait
+                        # douter de tout le tableau.
+                        "by_group": {
+                            "terms": {"field": "groups", "size": 50, "missing": "__sans_groupe__"},
+                        },
+                    },
                 },
                 "feedback_up":   {"filter": {"term": {"feedback": "up"}}},
                 "feedback_down": {"filter": {"term": {"feedback": "down"}}},
-                # Avis par groupe. `missing` donne un lot explicite aux
-                # documents sans groupe — historique d'avant la capture,
-                # ou utilisateur sans appartenance : sans lui, la somme
-                # des lots ne retomberait pas sur le total global et
-                # ferait douter de tout le tableau.
-                "by_group": {
+                # Avis par groupe, HORS filtre — voir la docstring. C'est
+                # la seconde agrégation par groupe : elle ne partage plus
+                # ses seaux avec le volume, puisque les deux ne portent
+                # pas sur le même ensemble de lignes.
+                "avis_by_group": {
                     "terms": {"field": "groups", "size": 50, "missing": "__sans_groupe__"},
                     "aggs": {
                         "feedback_up":   {"filter": {"term": {"feedback": "up"}}},
@@ -3727,32 +3874,49 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
         )
     except Exception as e:
         if "index_not_found" in str(e).lower():
-            return {"total_searches": 0, "unique_users": 0, "unique_ips": 0, "by_day": [],
+            return {"total_searches": 0, "total_logged": 0, "unique_users": 0,
+                     "unique_ips": 0, "by_day": [],
                      "feedback_up": 0, "feedback_down": 0,
                      "by_group": [], "searches_by_group": [],
                      "timing": _EMPTY_TIMING_SUMMARY}
         raise HTTPException(status_code=500, detail=str(e)) from e
 
     percentiles = res["aggregations"]["duration_percentiles"]["values"]
+    recherches = res["aggregations"]["recherches"]
+
+    # Volume par groupe, indexé par nom : le tableau des avis ci-dessous
+    # y puise ses comptes de recherches, qu'il ne peut plus lire dans ses
+    # propres seaux — les deux agrégations ne portent pas sur le même
+    # ensemble de lignes depuis que le volume écarte les tours de page.
+    volume_par_groupe = {
+        b["key"]: b["doc_count"] for b in recherches["by_group"]["buckets"]
+    }
 
     return {
-        "total_searches": res["hits"]["total"]["value"],
-        "unique_users":    res["aggregations"]["unique_users"]["value"],
-        "unique_ips":      res["aggregations"]["unique_ips"]["value"],
+        "total_searches": recherches["doc_count"],
+        # Lignes du journal, TOURS DE PAGE COMPRIS. Distinct de
+        # total_searches depuis que celui-ci les écarte, et nécessaire
+        # pour rester honnête sur les temps : `timing.measured` compte
+        # des lignes, pas des recherches (voir la docstring), et
+        # l'annoncer « sur N recherches » comparerait deux ensembles
+        # différents — au point que `measured` pourrait un jour dépasser
+        # total_searches sans que rien ne soit cassé.
+        "total_logged":    res["hits"]["total"]["value"],
+        "unique_users":    recherches["unique_users"]["value"],
+        "unique_ips":      recherches["unique_ips"]["value"],
         "by_day": [
             {"date": b["key_as_string"][:10], "count": b["doc_count"]}
-            for b in res["aggregations"]["by_day"]["buckets"][-14:]
+            for b in recherches["by_day"]["buckets"][-14:]
         ],
         "feedback_up":   res["aggregations"]["feedback_up"]["doc_count"],
         "feedback_down": res["aggregations"]["feedback_down"]["doc_count"],
-        # Volume de recherches par groupe. Même agrégation que ci-dessous
-        # — inutile d'en lancer une seconde — mais TOUS les lots sont
-        # gardés : un groupe qui cherche beaucoup sans jamais donner son
-        # avis a précisément sa place ici, alors qu'il n'aurait rien à
-        # dire dans un tableau d'avis.
+        # Volume de recherches par groupe : TOUS les lots sont gardés, un
+        # groupe qui cherche beaucoup sans jamais donner son avis ayant
+        # précisément sa place ici, alors qu'il n'aurait rien à dire dans
+        # un tableau d'avis.
         "searches_by_group": [
-            {"group": b["key"], "count": b["doc_count"]}
-            for b in res["aggregations"]["by_group"]["buckets"]
+            {"group": groupe, "count": compte}
+            for groupe, compte in volume_par_groupe.items()
         ],
         # Un utilisateur de deux groupes compte dans les deux : la somme
         # des lots dépasse donc le total global. C'est le propre d'une
@@ -3760,11 +3924,17 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
         "by_group": [
             {
                 "group":         b["key"],
-                "searches":      b["doc_count"],
+                # `0` par défaut plutôt qu'une erreur : un groupe peut
+                # avoir des avis sans recherche comptée, si toutes les
+                # siennes étaient des tours de page. Improbable — un tour
+                # de page suppose une page 1 — mais pas impossible avec
+                # un permalien profond, et un KeyError effacerait alors
+                # tout le tableau pour ce seul cas.
+                "searches":      volume_par_groupe.get(b["key"], 0),
                 "feedback_up":   b["feedback_up"]["doc_count"],
                 "feedback_down": b["feedback_down"]["doc_count"],
             }
-            for b in res["aggregations"]["by_group"]["buckets"]
+            for b in res["aggregations"]["avis_by_group"]["buckets"]
             # Les groupes sans le moindre avis n'apprennent rien sur la
             # satisfaction : ils encombreraient un tableau qui ne parle
             # que de ça.
@@ -3784,12 +3954,93 @@ def admin_search_logs_summary(user: str = Depends(require_admin)):
     }
 
 
+# Critères de filtrage remontés à côté de chaque requête infructueuse
+# (voir admin_zero_result_searches). Tous déjà écrits par search_log.py :
+# aucune capture supplémentaire, seulement une agrégation de plus.
+#
+# `search_in` est traité à part plus bas — il est TOUJOURS écrit, "all"
+# compris, et remonter « Rechercher dans : Tout » sur chaque ligne
+# noierait les critères qui, eux, disent quelque chose.
+_ZERO_RESULT_CRITERIA = ("extension", "author", "folder", "keywords", "source")
+
+# Au-delà, la cellule devient illisible. Les valeurs écartées sont les
+# moins fréquentes de la requête concernée (tri par défaut d'un `terms`).
+_ZERO_RESULT_CRITERIA_SIZE = 5
+
+
+def _zero_result_criteria_aggs() -> dict:
+    """Sous-agrégations posées sous chaque requête infructueuse."""
+    aggs = {
+        f"by_{champ}": {"terms": {"field": champ, "size": _ZERO_RESULT_CRITERIA_SIZE}}
+        for champ in _ZERO_RESULT_CRITERIA
+    }
+    aggs["by_search_in"] = {"terms": {"field": "search_in", "size": _ZERO_RESULT_CRITERIA_SIZE}}
+    # Une seule ligne « Période » plutôt que deux agrégations sur des
+    # dates saisies libres : ce qui compte pour diagnostiquer un écran
+    # vide est QU'UNE période était posée, pas laquelle — et un `terms`
+    # sur date_from produirait une valeur distincte par jour choisi.
+    aggs["avec_periode"] = {"filter": {"bool": {
+        "should": [{"exists": {"field": "date_from"}}, {"exists": {"field": "date_to"}}],
+        "minimum_should_match": 1,
+    }}}
+    # Les recherches de ce lot qui n'avaient AUCUN filtre. C'est le
+    # compte qui donne son sens aux autres : une requête sans résultat
+    # dont toutes les occurrences étaient filtrées appelle une correction
+    # de filtre, la même requête sans aucun filtre appelle du contenu.
+    aggs["sans_critere"] = {"filter": {"bool": {
+        "must_not": [
+            {"exists": {"field": champ}}
+            for champ in (*_ZERO_RESULT_CRITERIA, "date_from", "date_to")
+        ],
+        # `search_in` absent = enregistrement antérieur à sa capture ;
+        # "all" = tous les champs, donc pas une restriction.
+        "should": [
+            {"term": {"search_in": "all"}},
+            {"bool": {"must_not": {"exists": {"field": "search_in"}}}},
+        ],
+        "minimum_should_match": 1,
+    }}}
+    return aggs
+
+
+def _zero_result_criteria(bucket: dict) -> list[dict]:
+    """Aplatit les sous-agrégations en une liste lisible d'un coup d'œil,
+    la plus fréquente d'abord.
+
+    ⚠️ Les comptes ne s'additionnent PAS jusqu'au total de la ligne : une
+    même recherche portant un type ET un auteur compte dans les deux, et
+    une recherche sans filtre ne compte nulle part (elle est dans
+    `sans_critere`). C'est un aperçu des filtres rencontrés, pas une
+    ventilation. La page le dit."""
+    criteres = [
+        {"champ": champ, "valeur": seau["key"], "count": seau["doc_count"]}
+        for champ in _ZERO_RESULT_CRITERIA
+        for seau in bucket[f"by_{champ}"]["buckets"]
+    ]
+    criteres += [
+        {"champ": "search_in", "valeur": seau["key"], "count": seau["doc_count"]}
+        for seau in bucket["by_search_in"]["buckets"]
+        # Voir _ZERO_RESULT_CRITERIA : "all" n'est pas une restriction.
+        if seau["key"] != "all"
+    ]
+    if bucket["avec_periode"]["doc_count"]:
+        criteres.append({
+            "champ": "periode", "valeur": "", "count": bucket["avec_periode"]["doc_count"],
+        })
+    return sorted(criteres, key=lambda c: -c["count"])
+
+
 @app.get("/admin/search-logs/zero-results")
 def admin_zero_result_searches(user: str = Depends(require_admin), size: int = 50):
     """Requêtes ayant retourné 0 résultat, groupées et comptées (les plus
     fréquentes en premier) — à partir des logs déjà collectés par chaque
     recherche (voir search_log.py), aucun nouveau tracking nécessaire.
-    Aide à repérer du contenu manquant ou des requêtes mal formulées."""
+    Aide à repérer du contenu manquant ou des requêtes mal formulées.
+
+    Chaque ligne porte les CRITÈRES rencontrés avec cette requête (voir
+    _zero_result_criteria) : sans eux, un écran vide dû à un filtre trop
+    serré ressemble trait pour trait à un écran vide dû à du contenu
+    manquant, et les deux n'appellent pas la même correction."""
     try:
         res = es.search(
             index=search_log.SEARCH_LOG_INDEX,
@@ -3800,6 +4051,7 @@ def admin_zero_result_searches(user: str = Depends(require_admin), size: int = 5
                     "terms": {"field": "query.keyword", "size": size, "order": {"_count": "desc"}},
                     "aggs": {
                         "last_seen": {"max": {"field": "timestamp", "format": "strict_date_optional_time"}},
+                        **_zero_result_criteria_aggs(),
                     },
                 },
                 # Aucune capture supplémentaire n'est nécessaire : le champ
@@ -3818,9 +4070,11 @@ def admin_zero_result_searches(user: str = Depends(require_admin), size: int = 5
         "total_zero_result_searches": res["hits"]["total"]["value"],
         "results": [
             {
-                "query":     b["key"],
-                "count":     b["doc_count"],
-                "last_seen": b["last_seen"]["value_as_string"],
+                "query":        b["key"],
+                "count":        b["doc_count"],
+                "last_seen":    b["last_seen"]["value_as_string"],
+                "criteres":     _zero_result_criteria(b),
+                "sans_critere": b["sans_critere"]["doc_count"],
             }
             for b in res["aggregations"]["by_query"]["buckets"]
         ],
@@ -3843,15 +4097,34 @@ def admin_get_audit_log(
     return audit_log.list_actions(es, size=size, from_=from_)
 
 
-def _search_logs_query(q: str | None, username: str | None) -> dict:
+def _search_logs_query(
+    q: str | None, username: str | None, exclude_pagination: bool = False,
+) -> dict:
     """Filtre partagé entre /admin/search-logs (paginé) et
-    /admin/search-logs/export (export complet) — mêmes critères."""
+    /admin/search-logs/export (export complet) — mêmes critères.
+
+    `exclude_pagination` écarte les tours de page (page ≥ 2, voir
+    _NAVIGATION_PROPERTIES dans search_log.py) : sans lui, une requête
+    consultée sur cinq pages occupe cinq lignes identiques, et
+    l'historique se lit comme si elle avait été lancée cinq fois.
+
+    Un `must_not` sur `page > 1`, et NON un `term page = 1` : les lignes
+    antérieures à ce champ n'ont pas de `page` du tout, et un filtre
+    positif les ferait toutes disparaître — soit, sur cette installation,
+    la quasi-totalité de l'historique. Elles restent donc affichées, ce
+    qui est la seule réponse honnête : on ne sait pas ce qu'elles
+    étaient."""
     must = []
+    must_not = []
     if q:
         must.append({"match": {"query": q}})
     if username:
         must.append({"term": {"username": username.lower()}})
-    return {"bool": {"must": must}} if must else {"match_all": {}}
+    if exclude_pagination:
+        must_not.append({"range": {"page": {"gt": 1}}})
+    if not must and not must_not:
+        return {"match_all": {}}
+    return {"bool": {"must": must, "must_not": must_not}}
 
 
 @app.get("/admin/search-logs")
@@ -3861,10 +4134,14 @@ def admin_search_logs(
     username: str | None = None,
     size:     int = 50,
     from_:    int = Query(0, alias="from"),
+    exclude_pagination: bool = False,
 ):
     """Liste paginée des recherches effectuées, plus récentes d'abord —
-    qui, quand, depuis quelle IP, quelle requête, combien de résultats."""
-    query = _search_logs_query(q, username)
+    qui, quand, depuis quelle IP, quelle requête, combien de résultats.
+
+    `exclude_pagination=true` ne garde que les recherches véritables,
+    tours de page écartés — voir _search_logs_query()."""
+    query = _search_logs_query(q, username, exclude_pagination)
 
     try:
         res = es.search(
@@ -3909,16 +4186,21 @@ def admin_export_search_logs(
     user:     str = Depends(require_admin),
     q:        str | None = None,
     username: str | None = None,
+    exclude_pagination: bool = False,
 ):
     """
     Export XLSX de l'historique des recherches — mêmes filtres que
-    GET /admin/search-logs (q, username), mais TOUTES les lignes
-    correspondantes (jusqu'à SEARCH_LOGS_EXPORT_MAX_ROWS) plutôt qu'une
-    seule page, pour analyse hors-ligne dans un tableur.
+    GET /admin/search-logs (q, username, exclude_pagination), mais TOUTES
+    les lignes correspondantes (jusqu'à SEARCH_LOGS_EXPORT_MAX_ROWS)
+    plutôt qu'une seule page, pour analyse hors-ligne dans un tableur.
+
+    Le filtre est repris À L'IDENTIQUE de l'écran : un export qui ne
+    contiendrait pas ce que l'écran montre — ou l'inverse — serait pire
+    qu'une absence d'export.
     """
     from openpyxl import Workbook
 
-    query = _search_logs_query(q, username)
+    query = _search_logs_query(q, username, exclude_pagination)
 
     wb = Workbook()
     ws = wb.active
@@ -3944,6 +4226,11 @@ def admin_export_search_logs(
         # dit combien, parmi eux, ne sont plus détaillés parce que leur
         # auteur a effacé ses consultations (voir history_purge.py).
         "dont clics effacés",
+        # Même principe d'ajout en fin de ligne. Vides — et non « 1 » ou
+        # « non » — pour les recherches antérieures à ces champs : elles
+        # sont INCONNUES, pas ordinaires (voir _NAVIGATION_PROPERTIES
+        # dans search_log.py).
+        "Page", "Recherche exacte",
     ])
 
     try:
@@ -3984,6 +4271,10 @@ def admin_export_search_logs(
                 s.get("duration_ms", ""),
                 s.get("took_ms", ""),
                 s.get("clicks_erased") or "",
+                s.get("page", ""),
+                # `is None` et non `or ""` : False est une valeur pleine,
+                # et « non » doit s'écrire dans la cellule.
+                "" if s.get("exact") is None else ("oui" if s["exact"] else "non"),
             ])
     except Exception as e:
         if "index_not_found" not in str(e).lower():
@@ -3992,7 +4283,7 @@ def admin_export_search_logs(
     # Une largeur par colonne d'en-tête, dans le même ordre : les deux
     # listes doivent rester de même longueur.
     for col_idx, width in enumerate(
-        [19, 14, 28, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8, 12, 14, 16], start=1
+        [19, 14, 28, 30, 14, 14, 14, 16, 20, 14, 14, 10, 40, 8, 8, 12, 14, 16, 6, 16], start=1
     ):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
 

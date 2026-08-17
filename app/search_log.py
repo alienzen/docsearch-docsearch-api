@@ -93,6 +93,30 @@ _TIMING_PROPERTIES = {
     "duration_ms": {"type": "float"},
 }
 
+# Idem, ajoutés après coup : de quoi distinguer une recherche VÉRITABLE
+# d'un simple tour de page, et savoir si elle était exacte.
+#
+# `page` (1 à N) manquait, et son absence rendait le journal trompeur :
+# chaque clic sur « Suivant » relance /search et écrit une ligne de plus,
+# rigoureusement identique à la précédente. Une requête consultée sur
+# cinq pages laissait donc CINQ lignes, sans rien pour dire que quatre
+# n'étaient qu'une navigation. Dérivée de `from`/`size` plutôt que
+# stockée telle quelle : c'est le numéro de page qui se lit et se
+# filtre, l'offset ne parle qu'à qui connaît la taille de page.
+#
+# ⚠️ Un permalien ouvert directement sur la page 3 laisse donc une ligne
+# « page 3 » sans page 1 qui la précède. C'est exact — c'est bien une
+# consultation de la page 3, pas une nouvelle requête — mais il ne faut
+# pas s'attendre à ce que les pages se suivent toujours.
+#
+# `exact` : la recherche exacte change ce qui matche (ni racinisation, ni
+# synonymes, ni tolérance aux fautes). Deux lignes de même requête et de
+# comptes différents s'expliquent souvent par elle seule.
+_NAVIGATION_PROPERTIES = {
+    "page":  {"type": "integer"},
+    "exact": {"type": "boolean"},
+}
+
 
 def _ensure_index(es: Elasticsearch) -> None:
     global _index_ready
@@ -114,6 +138,7 @@ def _ensure_index(es: Elasticsearch) -> None:
                     **_CRITERIA_PROPERTIES,
                     **_GROUP_PROPERTIES,
                     **_TIMING_PROPERTIES,
+                    **_NAVIGATION_PROPERTIES,
                 }
             }
         })
@@ -129,6 +154,7 @@ def _ensure_index(es: Elasticsearch) -> None:
                 **_CRITERIA_PROPERTIES,
                 **_GROUP_PROPERTIES,
                 **_TIMING_PROPERTIES,
+                **_NAVIGATION_PROPERTIES,
             },
         )
     _index_ready = True
@@ -262,6 +288,8 @@ def log_search(
     date_to: str | None = None,
     took_ms: int | None = None,
     duration_ms: float | None = None,
+    page: int | None = None,
+    exact: bool | None = None,
 ) -> str | None:
     """
     Enregistre un événement de recherche. Ne lève jamais d'exception —
@@ -290,6 +318,12 @@ def log_search(
     sur un sous-ensemble de l'index, et doit le dire (voir
     /admin/search-logs/summary, qui remonte le nombre de recherches
     effectivement mesurées).
+
+    page/exact : voir _NAVIGATION_PROPERTIES. `page` vaut 1 pour une
+    recherche véritable, 2 et au-delà pour un tour de page. Absents eux
+    aussi des enregistrements antérieurs, où l'un et l'autre sont
+    INCONNUS — à ne pas confondre avec « page 1 » et « non exacte », ce
+    que l'interface se garde bien de faire.
     """
     try:
         _ensure_index(es)
@@ -328,6 +362,15 @@ def log_search(
             doc["took_ms"] = took_ms
         if duration_ms is not None:
             doc["duration_ms"] = duration_ms
+        # `is not None` là encore, et pour `exact` c'est CRUCIAL : False
+        # est une valeur pleine (« recherche ordinaire »), qu'un `if
+        # exact:` ferait disparaître du journal. On ne distinguerait alors
+        # plus une recherche ordinaire d'une ligne antérieure à ce champ,
+        # et la colonne mentirait sur tout l'historique.
+        if page is not None:
+            doc["page"] = page
+        if exact is not None:
+            doc["exact"] = exact
         res = es.index(index=SEARCH_LOG_INDEX, document=doc)
         _record_health(True)
         return res.get("_id")

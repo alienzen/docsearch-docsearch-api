@@ -234,6 +234,24 @@ DEFAULT_UI_CONFIG = {
                             # installations qui l'attendent, jamais un bouton qui échoue.
                             # Désactivé par défaut : inutile d'annoncer ce qui n'existe pas
                             # sur une installation qui n'a pas prévu ProConnect.
+    # Exemples de recherche proposés sur l'écran d'accueil, tant qu'aucune
+    # recherche n'a été lancée (docsearch-ui-vue, EmptySearchState.vue).
+    # UN EXEMPLE PAR LIGNE, même convention de saisie que logo_text.
+    #
+    # Le défaut reprend À L'IDENTIQUE les quatre exemples qui étaient
+    # codés en dur : activer ce réglage ne change donc rien tant qu'un
+    # administrateur n'y a pas touché (même principe que
+    # header_logo_text/footer_text).
+    #
+    # Ils ne sont pas décoratifs — ils enseignent les opérateurs de la
+    # syntaxe avancée, qu'on ne découvre autrement que dans l'aide. D'où
+    # l'intérêt de pouvoir les remplacer : les bons exemples d'une
+    # installation sont ceux qui parlent de SON corpus, et « source:RH
+    # congés 2025 » ne veut rien dire là où la source s'appelle
+    # autrement. Vide = aucun exemple affiché (le bloc disparaît), ce qui
+    # est la façon de les retirer sans toucher au code.
+    "search_examples": "auteur:Dupont budget\ntype:pdf marché public\n"
+                       "\"délégation de service\"\nsource:RH congés 2025",
     "sources_mount_display": "",   # remplace, uniquement à l'affichage/copie côté index.html
                             # (copyPathClick), le préfixe SOURCES_MOUNT (ex: "/sources", chemin de
                             # montage interne aux conteneurs) par une valeur utilisable par

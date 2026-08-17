@@ -116,6 +116,26 @@ def set_status(es: Elasticsearch, *, suggestion_id: str, status: str) -> None:
     es.update(index=SUGGESTION_LOG_INDEX, id=suggestion_id, doc={"status": status})
 
 
+def delete_suggestion(es: Elasticsearch, *, suggestion_id: str) -> None:
+    """Supprime définitivement une suggestion. Lève NotFoundError si
+    l'identifiant est inconnu.
+
+    Suppression réelle, pas un quatrième statut : le statut sert au SUIVI
+    (voir SUGGESTION_STATUSES), et une suggestion à effacer — doublon,
+    dépôt accidentel, texte déplacé ou nominatif qu'on ne veut pas
+    conserver — n'a rien à faire dans un flux de traitement. La trace de
+    l'effacement reste dans le journal d'audit, alimenté automatiquement
+    pour toute mutation /admin/* réussie (voir audit_log.py) ; le TEXTE
+    supprimé, lui, n'y figure pas — un DELETE n'a pas de corps.
+
+    refresh=True, comme les écritures de custom_keywords.py : la page de
+    statistiques recharge la liste juste après, et la ligne effacée doit
+    en avoir disparu. Sans ça elle réapparaîtrait jusqu'au prochain
+    rafraîchissement de l'index, ce qui se lit comme un échec."""
+    _ensure_index(es)
+    es.delete(index=SUGGESTION_LOG_INDEX, id=suggestion_id, refresh=True)
+
+
 def list_suggestions(es: Elasticsearch, *, size: int, from_: int) -> dict:
     """Liste paginée, plus récentes d'abord — pour la page /stats.html."""
     try:

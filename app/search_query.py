@@ -297,11 +297,17 @@ def _keywords_filter(keywords) -> dict | None:
     l'avertissement de cohérence en tête de fichier. Combinaison en ET
     (un document doit porter TOUS les mots-clés) et non en OU : une
     alerte doit signaler exactement ce qu'une recherche manuelle avec
-    les mêmes critères afficherait."""
+    les mêmes critères afficherait.
+
+    `case_insensitive` compris : sans lui, une alerte enregistrée sur
+    « budget » cesserait de se déclencher le jour où un document arrive
+    avec « Budget » en propriété — un silence, jamais une erreur."""
     if not keywords:
         return None
     kws = keywords if isinstance(keywords, list) else [keywords]
-    return {"bool": {"filter": [{"term": {"keywords": k}} for k in kws]}}
+    return {"bool": {"filter": [
+        {"term": {"keywords": {"value": k, "case_insensitive": True}}} for k in kws
+    ]}}
 
 
 def _active_custom_facets(source_names: list[str], username: str) -> dict[str, str]:

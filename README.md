@@ -23,7 +23,7 @@ déjà peuplé (par `docsearch-ingestion`). Aucun couplage de code.
 | POST | `/search` | Recherche full-text filtrée par ACL |
 | GET  | `/document/{id}` | Détail d'un document (vérifie l'ACL **et** que la source est cherchable par l'appelant) |
 | GET  | `/document/{id}/similar` | Documents similaires (More Like This) |
-| GET  | `/api/preview/{id}` | Aperçu PDF (conversion LibreOffice si besoin) — mêmes contrôles que `/document/{id}` |
+| GET  | `/api/preview/{id}` | Aperçu PDF, texte ou image océrisée (conversion LibreOffice si besoin) — mêmes contrôles que `/document/{id}` |
 | GET  | `/metrics` | Statistiques d'indexation |
 | GET  | `/admin/retention` | Ce que la purge quotidienne des journaux emporterait, sans rien supprimer |
 | GET  | `/admin/duplicates` | Documents indexés en plusieurs exemplaires, et place occupée |
@@ -144,6 +144,39 @@ l'historique. Les recherches antérieures à la mise en place de la mesure
 n'ont pas ces champs : `/admin/search-logs/summary` remonte donc
 `timing.measured`, le nombre de recherches réellement mesurées, que la
 page affiche à côté des moyennes.
+
+**Recherches véritables et tours de page.** Chaque clic sur « Suivant »
+relance `POST /search` et écrit une ligne de journal de plus, identique à
+la précédente. Le champ `page` (1 pour une recherche, 2+ pour un tour de
+page), dérivé de `from`/`size`, permet de les distinguer ; `exclude_pagination=true`
+les écarte de `GET /admin/search-logs` et de son export. Le champ `exact`
+est enregistré au même endroit et pour la même raison : deux lignes de
+même requête et de comptes différents s'expliquent souvent par lui seul.
+
+⚠️ **Les deux champs sont ABSENTS des lignes antérieures**, où ils valent
+« inconnu » et non « page 1 » / « non exacte ». Le filtre est donc un
+`must_not page > 1` et non un `term page = 1` : les lignes anciennes
+restent affichées, faute de savoir ce qu'elles étaient.
+
+**Les agrégats appliquent le même filtre**, avec deux exceptions
+délibérées. `/admin/search-logs/summary` écarte les tours de page de
+tout ce qui répond à « combien de recherches » : `total_searches`,
+`unique_users`, `unique_ips`, `by_day`, `searches_by_group`. Il expose en
+plus `total_logged`, le nombre de LIGNES du journal (tours de page
+compris).
+
+Échappent au filtre, et il ne faut pas « corriger » cela :
+
+| Ce qui n'est pas filtré | Pourquoi |
+|---|---|
+| `feedback_up` / `feedback_down`, et les avis de `by_group` | Le pouce est rattaché à la dernière recherche affichée : un avis donné depuis la page 3 porte sur une ligne « page 3 ». L'écarter jetterait un avis réel, et la part positive est un rapport entre AVIS, pas entre recherches. |
+| `timing` (`avg`, `p50`, `p95`, `took_avg`, `slow_count`, `measured`) | Un tour de page est une requête pleine et entière, et c'est en pagination profonde (`from` élevé) que le moteur est le plus lent : filtrer masquerait les requêtes lentes que ce panneau existe pour montrer. C'est pourquoi `measured` se rapporte à `total_logged` et non à `total_searches`. |
+
+`/admin/search-logs/zero-results` n'est pas filtré non plus : une
+recherche sans résultat n'a pas de page suivante à atteindre (le bouton
+est désactivé), et une ligne « page N » à zéro résultat — un permalien
+profond vers un jeu de résultats devenu vide — est un événement réel que
+le panneau doit montrer.
 
 **Journal du service.** Une recherche dont `duration_ms` atteint
 `SLOW_SEARCH_MS` (2000 par défaut, `0` désactive) laisse une ligne
@@ -692,8 +725,8 @@ correspondante : `docsearch-ui-vue/admin.html` (+ `src/pages/admin/`).
 | `POST /admin/purge-path` | Purger l'index existant selon un motif (dry-run par défaut) |
 | `POST /admin/ui-config` | Bascules d'interface (liens Assistant IA/Administration, export, collections...) — voir `GET /ui-config` public |
 | `POST /admin/engagement-config` | Bascules de mesure de satisfaction (pouce, NPS, suggestions) — voir `GET /engagement-config` public |
-| `GET /admin/nps-summary`, `.../suggestions`, `POST .../suggestions/{id}/status` | Résultats NPS et suggestions utilisateurs |
-| `GET /admin/search-logs[...]`, `.../summary`, `.../zero-results`, `.../export`, `GET /admin/audit-log` | Journaux de recherche et d'audit — alimentent `stats.html` |
+| `GET /admin/nps-summary`, `.../suggestions`, `POST .../suggestions/{id}/status`, `DELETE .../suggestions/{id}` | Résultats NPS et suggestions utilisateurs (le `DELETE` efface définitivement — le statut, lui, ne sert qu'au suivi) |
+| `GET /admin/search-logs[...]`, `.../summary`, `.../zero-results`, `.../export`, `GET /admin/audit-log` | Journaux de recherche et d'audit — alimentent `stats.html`. `exclude_pagination=true` écarte les tours de page (voir « Recherches véritables » ci-dessous), sur la liste comme sur l'export |
 | `POST /admin/scan` | Déclencher un scan d'indexation (en arrière-plan) |
 
 **Aucune de ces routes n'a besoin d'accéder au moteur de conteneurs** : l'état est
