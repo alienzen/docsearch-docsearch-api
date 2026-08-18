@@ -155,6 +155,7 @@ def add_source(
     fields: list[dict] | None = None, label: str | None = None,
     description: str | None = None, searchable: bool = True,
     collectable: bool = True, allowed_groups: list[str] | None = None,
+    tri_defaut: str | None = None,
 ) -> dict:
     """
     Enregistre une source plugin (ou remplace celle du même nom).
@@ -180,6 +181,12 @@ def add_source(
         "fields": fields, "label": label, "description": description,
         "searchable": searchable, "collectable": collectable,
         "allowed_groups": allowed_groups,
+        # Déclaration du MODULE, pas réglage d'administrateur : elle vient
+        # du manifeste à chaque installation et n'a donc pas à être
+        # préservée d'une version à l'autre, contrairement à
+        # searchable/collectable/allowed_groups. Omise, le contrat la
+        # ramène à "_score" — et la source cesse d'imposer son ordre.
+        "tri_defaut": tri_defaut,
     })
 
     def mutate(sources):
