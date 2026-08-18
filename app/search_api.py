@@ -1310,6 +1310,30 @@ def search(
                     f"by_custom__{es_field}": facet_agg(es_field, 20, f"custom:{es_field}")
                     for es_field in custom_facet_defs
                 },
+                # « Ces résultats portent-ils seulement une date ? » — le
+                # seul renseignement qui manquait à l'interface pour
+                # décider d'afficher la section « Période de
+                # modification », qui n'a pas de seaux à montrer et ne
+                # pouvait donc pas se retirer d'elle-même comme les
+                # autres (voir seauxAffichables() côté UI).
+                #
+                # Une source SANS date de modification — une source de
+                # module qui n'en pousse pas, docsearch-plugin-annuaire
+                # par exemple — affichait un sélecteur de période qui
+                # vide les résultats dès qu'on s'en sert, en silence :
+                # le filtre est un `range` sur `date_modified`, et un
+                # document sans ce champ n'entre dans aucun intervalle.
+                #
+                # Les filtres de facette actifs sont réappliqués ici,
+                # comme dans facet_agg() : ils vivent dans le
+                # `post_filter`, donc hors de la portée des agrégations.
+                # Le filtre de PÉRIODE, lui, est déjà dans `query` — quand
+                # il est actif, ce compte vaut donc le nombre de
+                # résultats, et l'interface n'a de toute façon pas le
+                # droit de masquer une section dont un critère est coché.
+                "with_date": {"filter": {"bool": {"filter": [
+                    *active_facet_filters, {"exists": {"field": "date_modified"}},
+                ]}}},
             }
         )
     except Exception as e:
@@ -1458,6 +1482,11 @@ def search(
                 }
                 for es_field, label in custom_facet_defs.items()
             },
+            # Nombre de ces résultats qui portent une `date_modified`, et
+            # non une liste de seaux : la facette « Période » n'affiche
+            # pas de valeurs, elle a seulement besoin de savoir s'il y a
+            # quelque chose à filtrer. Zéro = section à masquer.
+            "with_date": res["aggregations"]["with_date"]["doc_count"],
         }
     }
 
