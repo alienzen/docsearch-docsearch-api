@@ -1157,7 +1157,7 @@ def _config_surlignage(exact: bool) -> tuple[str, dict]:
             # Même valeur que fragment_size : les deux extraits doivent
             # occuper la même place à l'écran, sans quoi la liste de
             # résultats respire différemment selon le champ trouvé.
-            "no_match_size":        200,
+            "no_match_size":        1000,
             # max_analyzed_offset : sans lui, dès qu'un document du lot
             # (ex: gros PST/PDF) dépasse index.highlight.max_analyzed_offset
             # (1 000 000 caractères), ES fait échouer TOUS les shards

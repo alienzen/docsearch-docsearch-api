@@ -17,11 +17,16 @@
 #
 # Stockage (clé "docsearch:config:plugin_ui") :
 #   {"assistant": {"enabled": true,
+#                  "version": "1.2.0",
 #                  "nav": [{"libelle": "Assistant", "chemin": "/ext/assistant/",
 #                           "icone": "fr-icon-chat-3-line"}],
 #                  "admin_panel": [{"cle": "poll", "type": "texte", ...}],
 #                  "reglages": {"poll": "300"},
 #                  "restart_requis": false}}
+#
+# `version` est celle du MANIFESTE installé, recopiée ici pour la même
+# raison que le reste : l'écran d'administration tourne sur le frontal et
+# ne voit pas /etc/docsearch/plugins, où « plugin list » va la lire.
 #
 # `admin_panel` est la DÉCLARATION (ce que le module veut régler, figé au
 # manifeste) ; `reglages` sont les VALEURS (ce que l'administrateur a
@@ -128,6 +133,10 @@ def panneaux() -> dict:
     for nom, module in _raw().items():
         resultat[nom] = {
             "enabled":        bool(module.get("enabled", False)),
+            # Vide pour un module installé avant que la version soit
+            # recopiée dans Redis : l'interface le dit au lieu de laisser
+            # une place blanche, une réinstallation la renseigne.
+            "version":        module.get("version") or "",
             "admin_panel":    module.get("admin_panel") or [],
             "reglages":       module.get("reglages") or {},
             "restart_requis": bool(module.get("restart_requis", False)),
@@ -191,6 +200,25 @@ def set_reglages(nom: str, valeurs: dict) -> dict:
     return module
 
 
+def set_version(nom: str, version: str) -> dict:
+    """Recale la version publiée sur celle du manifeste installé.
+
+    Appelé par « manage.sh plugin appliquer », qui lit ce manifeste de
+    toute façon : c'est ce qui permet à un module installé avant que la
+    version soit publiée de la renseigner sans repasser par son archive,
+    qu'on n'a pas toujours sous la main."""
+    client = _get_redis_client()
+    if client is None:
+        raise RuntimeError("Redis injoignable.")
+    brut = client.get(PLUGIN_UI_KEY)
+    modules = json.loads(brut) if brut else {}
+    if nom in modules:
+        modules[nom]["version"] = version
+        client.set(PLUGIN_UI_KEY, json.dumps(modules))
+        _invalider()
+    return modules
+
+
 def marquer_applique(nom: str) -> dict:
     """Efface le drapeau « à redémarrer » — appelé par manage.sh une fois
     l'unité réécrite ET le module relancé, jamais par l'API : c'est
@@ -238,7 +266,7 @@ def pages() -> list[dict]:
 
 def enregistrer(nom: str, nav: list[dict], admin_panel: list[dict] | None = None,
                 result_action: list[dict] | None = None, page: list[dict] | None = None,
-                enabled: bool = False) -> dict:
+                enabled: bool = False, version: str = "") -> dict:
     """Écrit les accroches d'un module. Appelé par `manage.sh plugin
     install`, jamais par l'API — qui n'a aucune route d'écriture ici."""
     client = _get_redis_client()
@@ -261,6 +289,10 @@ def enregistrer(nom: str, nav: list[dict], admin_panel: list[dict] | None = None
         reglages.setdefault(reglage["cle"], reglage.get("defaut", ""))
     modules[nom] = {
         "enabled":        ancien.get("enabled", enabled),
+        # Un appel qui ne passe pas la version ne DOIT pas effacer celle
+        # déjà connue : elle serait perdue jusqu'à la réinstallation
+        # suivante, sans que rien ne le signale.
+        "version":        version or ancien.get("version", ""),
         "nav":            nav,
         "result_action":  result_action or [],
         "page":           page or [],

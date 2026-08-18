@@ -8,6 +8,8 @@ chaque test — jamais de FLUSHDB, ce Redis porte aussi la configuration de
 l'installation.
 """
 
+import time
+
 import pytest
 from auth import accounts, config, events, sessions, store
 
@@ -104,15 +106,130 @@ def test_deconnexion_revoque_reellement(client, secours):
     assert client.post("/auth/refresh").status_code == 401
 
 
+def _cookies_poses(reponse) -> str:
+    """Les en-têtes Set-Cookie de CETTE réponse, concaténés.
+
+    Pas `reponse.cookies` : un cookie effacé est un Set-Cookie à valeur vide
+    et `Max-Age=0`, que le client range comme une suppression et non comme
+    un cookie. Or c'est précisément l'effacement qu'on vient vérifier."""
+    return " ".join(v for k, v in reponse.headers.items() if k.lower() == "set-cookie")
+
+
 @pytest.mark.requires_redis
-def test_un_refresh_ne_sert_qu_une_fois(client, secours):
+def test_un_refresh_tourne_ne_rouvre_pas_de_session(client, secours):
     """La session précédente est remplacée à chaque renouvellement : un
-    cookie intercepté ne vaut que jusqu'au prochain usage légitime."""
+    cookie intercepté ne vaut que jusqu'au prochain usage légitime.
+
+    Depuis la fenêtre de tolérance, le jeton tourné rend encore un jeton
+    d'ACCÈS pendant quelques secondes — c'est ce qui éteint la course entre
+    onglets — mais il ne rouvre pas de session : ni cookie de
+    rafraîchissement, ni seconde entrée dans le magasin."""
     client.post("/auth/login", json={"identifiant": secours, "mot_de_passe": MOT_DE_PASSE})
     premier = client.cookies.get(config.REFRESH_COOKIE_NAME)
     client.post("/auth/refresh")
 
     client.cookies.set(config.REFRESH_COOKIE_NAME, premier)
+    reponse = client.post("/auth/refresh")
+
+    assert reponse.status_code == 200
+    poses = _cookies_poses(reponse)
+    assert config.ACCESS_COOKIE_NAME in poses
+    assert config.REFRESH_COOKIE_NAME not in poses
+    # Une seule session vivante : celle du renouvellement gagnant.
+    assert sessions.count_active_sessions() == 1
+
+
+@pytest.mark.requires_redis
+def test_hors_de_la_fenetre_un_refresh_tourne_est_refuse(client, secours, monkeypatch):
+    """La tolérance se referme d'elle-même. Sans cette borne, un cookie
+    intercepté resterait bon jusqu'à son échéance de sept jours."""
+    monkeypatch.setattr(config, "REFRESH_ROTATION_GRACE_SECONDS", 1)
+    client.post("/auth/login", json={"identifiant": secours, "mot_de_passe": MOT_DE_PASSE})
+    premier = client.cookies.get(config.REFRESH_COOKIE_NAME)
+    client.post("/auth/refresh")
+
+    time.sleep(1.2)
+
+    client.cookies.set(config.REFRESH_COOKIE_NAME, premier)
+    assert client.post("/auth/refresh").status_code == 401
+
+
+@pytest.mark.requires_redis
+def test_une_fenetre_nulle_restaure_le_comportement_strict(client, secours, monkeypatch):
+    """`REFRESH_ROTATION_GRACE_SECONDS=0` : Redis traite un EXPIRE non
+    positif comme un DEL, le jeton tourné disparaît sur-le-champ."""
+    monkeypatch.setattr(config, "REFRESH_ROTATION_GRACE_SECONDS", 0)
+    client.post("/auth/login", json={"identifiant": secours, "mot_de_passe": MOT_DE_PASSE})
+    premier = client.cookies.get(config.REFRESH_COOKIE_NAME)
+    client.post("/auth/refresh")
+
+    client.cookies.set(config.REFRESH_COOKIE_NAME, premier)
+    assert client.post("/auth/refresh").status_code == 401
+
+
+@pytest.mark.requires_redis
+def test_le_renouvellement_tolere_est_journalise_a_part(client, secours, journal_hors_ligne):
+    """Confondre ces deux issues rendrait les courses entre onglets
+    invisibles — ce sont elles qu'on est venu compter."""
+    client.post("/auth/login", json={"identifiant": secours, "mot_de_passe": MOT_DE_PASSE})
+    premier = client.cookies.get(config.REFRESH_COOKIE_NAME)
+    client.post("/auth/refresh")
+
+    client.cookies.set(config.REFRESH_COOKIE_NAME, premier)
+    client.post("/auth/refresh")
+
+    issues = [d["outcome"] for d in journal_hors_ligne.documents]
+    assert issues == [events.SUCCESS, events.SUCCESS, events.RENEWAL_GRACE]
+
+
+@pytest.mark.requires_redis
+@pytest.mark.parametrize("cause", ["revoquee", "illisible"])
+def test_seule_la_deconnexion_efface_les_cookies(client, secours, cause):
+    """Un refus de renouvellement ne doit RIEN effacer.
+
+    Le cookie est partagé par tout le navigateur, mais chaque onglet
+    renouvelle pour son compte : effacer sur 401 ferait détruire, par
+    l'onglet perdant d'une course, le cookie neuf que l'onglet gagnant
+    vient de poser. Et ça ne servirait à rien — un cookie de
+    rafraîchissement périmé porte la même échéance que le jeton qu'il
+    transporte.
+
+    La seconde moitié du test n'est pas décorative : elle vérifie que
+    `_cookies_poses` VOIT une suppression quand il y en a une. Sans elle,
+    l'assertion du haut passerait même si l'effacement était impossible à
+    observer — et c'est exactement le piège qui s'est refermé ici, les
+    `_clear_session_cookies` posés sur les branches de refus n'ayant jamais
+    rien émis (voir auth/router.py::refresh)."""
+    client.post("/auth/login", json={"identifiant": secours, "mot_de_passe": MOT_DE_PASSE})
+    if cause == "revoquee":
+        sessions.revoke_all_for_login(secours)
+    else:
+        client.cookies.set(config.REFRESH_COOKIE_NAME, "pas.un.jeton")
+
+    refus = client.post("/auth/refresh")
+    assert refus.status_code == 401
+    assert _cookies_poses(refus) == ""
+
+    efface = _cookies_poses(client.post("/auth/logout"))
+    assert config.ACCESS_COOKIE_NAME in efface
+    assert config.REFRESH_COOKIE_NAME in efface
+    assert "Max-Age=0" in efface or 'Max-Age="0"' in efface
+
+
+@pytest.mark.requires_redis
+def test_une_cle_sans_identite_ne_vaut_pas_une_session(client, secours):
+    """Le marquage de rotation n'est pas atomique : si la session expirait
+    juste entre le test d'existence et l'écriture, il recréerait une clé ne
+    portant que `superseded_at`. Elle ne doit ouvrir aucun accès."""
+    from auth import tokens
+
+    client.post("/auth/login", json={"identifiant": secours, "mot_de_passe": MOT_DE_PASSE})
+    jeton, jti, _ = tokens.create_refresh_token(secours)
+    store.require_client().hset(
+        f"{store.KEY_PREFIX}refresh:{jti}", "superseded_at", "2026-08-14T00:00:00+00:00",
+    )
+
+    client.cookies.set(config.REFRESH_COOKIE_NAME, jeton)
     assert client.post("/auth/refresh").status_code == 401
 
 
