@@ -16,8 +16,15 @@
 # promesse de stabilité tant que les lots 1 et 2 n'ont pas éprouvé la
 # forme du contrat.
 
-CONTRACT_VERSION = "0.7.1"
+CONTRACT_VERSION = "0.8.0"
 
+# 0.8.0 (2026-08-18) — `tri_defaut` sur une source de module : l'ordre
+#   qu'elle demande quand l'utilisateur n'a rien choisi. Ajout pur — une
+#   source qui ne le déclare pas obtient "_score", c'est-à-dire ce
+#   qu'elle avait. Restreint aux champs du schéma commun (TRIS_POSSIBLES)
+#   et pas aux champs supplémentaires : le consommateur doit connaître le
+#   type ES du champ trié pour poser l'`unmapped_type` sans lequel les
+#   index qui ne portent pas le champ font échouer leur shard.
 # 0.7.1 (2026-08-16) — deux sources d'un même manifeste ne peuvent plus
 #   viser le même `es_index` : la réconciliation de fin de passe supprime
 #   par index sans distinguer la source, les deux se vidaient l'une

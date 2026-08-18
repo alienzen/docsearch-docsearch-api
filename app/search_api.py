@@ -121,6 +121,54 @@ TRIS = {
 TRI_PERTINENCE = "_score"
 
 
+def _tri_effectif(sort: str | None, noms_sources: list[str] | None) -> str:
+    """Le tri à appliquer : celui que l'utilisateur a demandé, sinon
+    celui que les sources interrogées demandent, sinon la pertinence.
+
+    Trois règles, dans cet ordre :
+
+    1. **Un choix explicite prime toujours**, "_score" compris. Le
+       sélecteur de tri n'aurait aucun sens si la source pouvait le
+       contredire, et « Pertinence » doit rester atteignable sur une
+       source qui demande la date.
+    2. **La recherche doit être restreinte.** Une recherche fédérée n'a
+       qu'UNE clause de tri pour tous ses index : appliquer le défaut
+       d'une source à des résultats qui viennent aussi d'ailleurs
+       trierait par date des documents que personne n'a demandé de
+       trier ainsi.
+    3. **Les sources interrogées doivent être d'accord.** Deux sources
+       aux défauts différents ne peuvent pas être satisfaites en même
+       temps ; plutôt que d'en privilégier une au hasard, on retombe sur
+       la pertinence, qui est le seul ordre qu'aucune ne réclame contre
+       les autres.
+
+    `noms_sources` arrive DÉJÀ filtré par les droits
+    (_requested_source_names) : une source que l'utilisateur n'a pas le
+    droit de chercher n'y figure pas, et ne peut donc pas peser sur
+    l'ordre de ses résultats. C'est aussi ce qui permet de lire le
+    registre sans redemander ses groupes.
+    """
+    if sort is not None:
+        return sort
+
+    if not noms_sources:
+        return TRI_PERTINENCE
+
+    entrees = (source_registries.trouver(nom) for nom in noms_sources)
+    tris = {e.tri_defaut for e in entrees if e is not None}
+
+    # `tris` vide = aucun nom connu : la recherche ne rendra rien, et
+    # l'ordre n'a plus d'importance.
+    if len(tris) != 1:
+        return TRI_PERTINENCE
+
+    tri = tris.pop()
+    # Une source ne peut demander qu'un tri du schéma commun (contrat,
+    # TRIS_POSSIBLES) — mais elle a pu être enregistrée par une version
+    # ultérieure du contrat, et la lecture est tolérante par principe.
+    return tri if tri == TRI_PERTINENCE or tri in TRIS else TRI_PERTINENCE
+
+
 def _clause_de_tri(sort: str) -> list[dict]:
     """Clause `sort` d'une recherche fédérée, ou 400 si le tri est inconnu.
 
@@ -253,7 +301,12 @@ class SearchQuery(BaseModel):
     query:           str
     size:            int = 10
     from_:           int = Field(0, alias="from")
-    sort:            str = "_score"
+    # None = l'utilisateur n'a rien choisi, et la source décide (voir
+    # _tri_effectif). "_score" est un CHOIX, celui de la pertinence, et
+    # il prime comme n'importe quel autre. Les confondre — ce que faisait
+    # le défaut "_score" — rendait tout tri par défaut impossible à
+    # distinguer d'un tri demandé.
+    sort:            str | None = None
     extension:       str | list[str] | None = None
     has_attachments: bool | None = None
     date_from:       str | None = None   # filtre sur date_modified (voir build de la requête)
@@ -302,7 +355,12 @@ class SavedSearchCreate(BaseModel):
     custom:    dict[str, list[str]] | None = None
     date_from: str | None = None
     date_to:   str | None = None
-    sort:      str = "_score"
+    # Comme SearchQuery.sort : None = rien n'a été choisi au moment de
+    # l'enregistrement, et la source décidera à chaque relecture. Une
+    # recherche enregistrée sur une source de veille suit ainsi le tri de
+    # la source si celui-ci change, ce qui est le comportement attendu
+    # d'un tri qu'on n'a pas soi-même fixé.
+    sort:      str | None = None
 
 
 class SavedSearchAlertUpdate(BaseModel):
@@ -1337,7 +1395,8 @@ def search(
             }}},
         }
 
-    sort_clause = _clause_de_tri(req.sort)
+    tri_applique = _tri_effectif(req.sort, source_names)
+    sort_clause  = _clause_de_tri(tri_applique)
 
     # Le champ surligné suit les champs interrogés — voir _config_surlignage.
     champ_extrait, options_extrait = _config_surlignage(req.exact)
@@ -1510,6 +1569,13 @@ def search(
         "total":     total,
         "username":  username,
         "search_id": search_id,
+        # L'ordre RÉELLEMENT appliqué, qui n'est pas toujours celui que la
+        # requête portait : sans lui, le sélecteur de tri afficherait
+        # « Pertinence » au-dessus d'une liste rangée par date, dès qu'une
+        # source a imposé le sien. L'API est seule à savoir trancher — le
+        # navigateur devrait sinon relire le registre des sources et
+        # rejouer la même règle, avec deux occasions de diverger.
+        "sort":      tri_applique,
         # Absent tant qu'il y a des résultats, et absent aussi quand on
         # n'a rien à proposer : l'interface n'affiche ce bloc que s'il
         # existe.
@@ -1725,7 +1791,11 @@ def export_search_results(req: SearchExportQuery, user: str = Depends(current_us
     # Le champ surligné suit les champs interrogés — voir _config_surlignage.
     champ_extrait, options_extrait = _config_surlignage(req.exact)
 
-    sort_clause = _clause_de_tri(req.sort)
+    # Même résolution que /search : un export doit sortir les lignes dans
+    # l'ordre que l'écran montrait, défaut de source compris.
+    sort_clause = _clause_de_tri(
+        _tri_effectif(req.sort, _requested_source_names(req.source, username))
+    )
 
     try:
         res = es.search(

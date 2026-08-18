@@ -51,6 +51,11 @@ class SourceEntry:
     searchable: bool
     collectable: bool
     allowed_groups: tuple[str, ...]
+    # Ordre demandé par la source quand l'utilisateur n'a rien choisi
+    # (contrat 0.8.0). Seules les sources de module en déclarent un ; les
+    # trois registres natifs n'ont pas l'attribut et retombent donc sur
+    # la pertinence, c'est-à-dire sur leur comportement d'avant.
+    tri_defaut: str
     # L'objet du registre d'origine, pour les rares usages qui ont besoin
     # d'un attribut propre au type (le mapping de colonnes d'une source
     # SQL, le dossier surveillé d'une source fichier). Hors comparaison et
@@ -86,6 +91,9 @@ def entry(type_: str, name: str, source: object) -> SourceEntry:
         searchable=bool(getattr(source, "searchable", False)),
         collectable=bool(getattr(source, "collectable", True)),
         allowed_groups=tuple(getattr(source, "allowed_groups", ()) or ()),
+        # Repli sur la pertinence, comme les deux autres booléens ci-dessus
+        # : une source qui ne dit rien ne réordonne rien.
+        tri_defaut=getattr(source, "tri_defaut", "") or "_score",
         native=source,
     )
 

@@ -39,6 +39,20 @@ POLITIQUES_ACL = ("public", "groupes", "fournie")
 # fédérée sait quoi faire (filtre, facette, tri).
 TYPES_ES = ("keyword", "text", "long", "double", "date", "boolean")
 
+# Tris qu'une source peut demander par défaut (`tri_defaut`). Ce sont les
+# champs du schéma COMMUN, plus la pertinence — volontairement pas les
+# champs supplémentaires de la source.
+#
+# La raison est côté consommateur : trier sur un champ que tous les index
+# ne mappent pas exige d'en connaître le type ES, pour poser
+# l'`unmapped_type` sans lequel Elasticsearch fait échouer les shards des
+# index qui ne le portent pas (docsearch-api, _clause_de_tri). Ces
+# cinq-là ont un type connu de tous les consommateurs ; un champ déclaré
+# par un module obligerait chacun à résoudre le registre pour le trouver.
+# Refusé explicitement plutôt qu'accepté puis ignoré, tant que ce besoin
+# ne s'est pas présenté.
+TRIS_POSSIBLES = ("_score", "date_modified", "date_created", "filename", "size")
+
 # Nom de source/index/module : alphanumérique + tiret/underscore, jamais
 # vide — même contrainte que les trois registres natifs, pour la même
 # raison (un nom mal formé finirait comme composant d'une clé Redis ou
@@ -89,6 +103,10 @@ class PluginSource:
     collectable: bool = True
     description: str = ""
     allowed_groups: tuple[str, ...] = field(default_factory=tuple)
+    # Ordre souhaité par la source quand l'utilisateur n'a rien choisi.
+    # "_score" (la pertinence) est le défaut de la recherche fédérée : une
+    # source qui ne dit rien ne change donc rien.
+    tri_defaut: str = "_score"
 
 
 def nom_valide(nom: str) -> bool:
@@ -152,6 +170,15 @@ def valider_declaration(entree: dict) -> dict:
 
     champs = _valider_champs(entree.get("fields") or [])
 
+    tri = entree.get("tri_defaut") or "_score"
+    if tri not in TRIS_POSSIBLES:
+        raise ContratInvalide(
+            f"Tri par défaut inconnu : '{tri}' — valeurs possibles : "
+            f"{', '.join(TRIS_POSSIBLES)}. Un champ supplémentaire de la source "
+            "n'est pas accepté ici : le consommateur doit connaître le type ES du "
+            "champ trié pour ne pas casser la recherche fédérée."
+        )
+
     return {
         "plugin":         entree["plugin"],
         "es_index":       entree["es_index"],
@@ -164,6 +191,7 @@ def valider_declaration(entree: dict) -> dict:
         "searchable":     bool(entree.get("searchable", True)),
         "collectable":    bool(entree.get("collectable", True)),
         "allowed_groups": list(entree.get("allowed_groups") or []),
+        "tri_defaut":     tri,
     }
 
 
@@ -237,4 +265,7 @@ def depuis_dict(name: str, entree: dict) -> PluginSource:
         collectable=bool(entree.get("collectable", True)),
         description=entree.get("description", "") or "",
         allowed_groups=tuple(entree.get("allowed_groups") or ()),
+        # Défaut sur une entrée écrite avant le contrat 0.8 : elle n'a pas
+        # la clé, et la pertinence est bien ce qu'elle obtenait.
+        tri_defaut=entree.get("tri_defaut") or "_score",
     )
