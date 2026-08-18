@@ -66,6 +66,10 @@ ANALYSE = {
 DOCUMENTS = [
     {"content": "Délégations de service public et Congrès annuel"},
     {"content": "État de l'art des systèmes documentaires"},
+    # Trouvable par son TITRE seul : sa requête ne figure nulle part dans
+    # son corps. C'est le cas ordinaire d'un article de flux RSS, et le
+    # seul qui éprouve l'extrait de repli (`no_match_size`).
+    {"title": "Zibeline", "content": "Un article sur les oiseaux migrateurs de la vallée."},
 ]
 
 
@@ -147,7 +151,15 @@ def index(es):
                     "type": "text",
                     "analyzer": "french",
                     "fields": {"exact": {"type": "text", "analyzer": "exact"}},
-                }
+                },
+                # Interrogé par `field_sets("all")` au même titre que le
+                # corps, et il fallait qu'il le soit vraiment ici : c'est
+                # un document trouvé PAR SON TITRE qui met à l'épreuve
+                # l'extrait de repli.
+                "title": {
+                    "type": "text",
+                    "fields": {"exact": {"type": "text", "analyzer": "exact"}},
+                },
             }
         },
     )
@@ -340,6 +352,44 @@ def test_une_phrase_exacte_est_marquee_d_un_seul_tenant(index):
 
 
 @requiert_es
+def test_un_document_trouve_par_son_titre_montre_le_debut_de_son_corps(index):
+    # L'extrait de repli (`no_match_size`), et le seul cas où un extrait
+    # ne porte aucune marque : la requête a été trouvée dans le titre,
+    # il n'y a rien à surligner dans le corps.
+    #
+    # Sans lui, la carte n'affichait RIEN sous le titre — pas un extrait
+    # sans marques, pas d'extrait du tout. Le cas est la règle sur un
+    # article de flux RSS, qu'on trouve d'abord par son titre.
+    extraits = _extraits(index, "Zibeline", exact=False)
+    assert extraits == ["Un article sur les oiseaux migrateurs de la vallée."]
+    assert "<<" not in extraits[0]
+
+    # La comparaison donne son sens à l'assertion : les mêmes options,
+    # privées du seul `no_match_size`, ne rendent aucun fragment.
+    import search_api
+
+    champ, options = search_api._config_surlignage(False)
+    sans_repli = {clef: valeur for clef, valeur in options.items() if clef != "no_match_size"}
+    ancien = index.search(
+        index=INDEX_SONDE,
+        query=search_query.build_text_clause("Zibeline", "all", exact=False),
+        highlight={"fields": {champ: sans_repli}},
+    )
+    assert ancien["hits"]["total"]["value"] == 1
+    assert ancien["hits"]["hits"][0].get("highlight") is None
+
+
+@requiert_es
+def test_l_extrait_de_repli_ne_prend_pas_la_place_d_un_vrai_extrait(index):
+    # Garde-fou : le repli ne vaut QUE faute de fragment. Un document
+    # trouvé par son corps garde son extrait marqué, à sa position dans
+    # le texte — le début du champ ne doit jamais s'y substituer.
+    assert _extraits(index, "systèmes", exact=False) == [
+        "État de l'art des <<systèmes>> documentaires",
+    ]
+
+
+@requiert_es
 def test_la_recherche_ordinaire_garde_son_extrait(index):
     # Garde-fou de non-régression : le champ surligné suit le mode, donc
     # la recherche ORDINAIRE doit continuer de surligner `content`. Une
@@ -364,6 +414,10 @@ def test_le_champ_surligne_suit_les_champs_interroges():
     assert (exact, ordinaire) == ("content.exact", "content")
     assert options_exact == options_ordinaire
     assert options_exact["max_analyzed_offset"] == 1000000
+    # Idem pour l'extrait de repli : il ne dépend pas davantage du mode.
+    # Même valeur que fragment_size, pour que les deux extraits occupent
+    # la même place à l'écran.
+    assert options_exact["no_match_size"] == options_exact["fragment_size"] == 200
     # `require_field_match` n'a plus à être forcé : il ne servait qu'à
     # tenter de faire surligner `content` par une clause visant
     # `content.exact`. Le laisser à False ferait surligner dans le corps

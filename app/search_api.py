@@ -1000,6 +1000,11 @@ def _config_surlignage(exact: bool) -> tuple[str, dict]:
     surcroît le comportement voulu — un terme trouvé via le titre ou
     l'auteur n'a jamais eu à être surligné dans le corps.
 
+    `no_match_size` fait qu'un document trouvé par son titre montre
+    malgré tout le début de son corps, là où il n'affichait rien. Voir
+    l'option plus bas — c'est le seul cas où un « extrait » ne contient
+    aucune marque, et c'est voulu : il n'y a rien à surligner.
+
     Un index qui n'a pas reçu la migration (`./manage.sh migrer-exact
     --apply`) n'a pas de sous-champ `content.exact` : ES ignore
     silencieusement un champ de surlignage absent du mapping, sans
@@ -1012,6 +1017,27 @@ def _config_surlignage(exact: bool) -> tuple[str, dict]:
         {
             "fragment_size":        200,
             "number_of_fragments":  2,
+            # no_match_size : l'extrait de repli, quand la requête a été
+            # trouvée AILLEURS que dans le corps — par le titre, le nom
+            # de fichier, l'auteur ou les mots-clés. `require_field_match`
+            # étant à son défaut, ES ne produit alors aucun fragment, et
+            # la carte de résultat n'affiche rien sous le titre. ES rend
+            # ici le DÉBUT du champ, sans marque : un extrait de
+            # présentation, pas un extrait de pertinence.
+            #
+            # Le cas est la RÈGLE et non l'exception sur un document
+            # poussé par un module : un article de flux RSS se trouve
+            # d'abord par son titre, et sa carte restait alors muette sur
+            # le contenu de l'article — que le module indexe pourtant
+            # (résumé ou `content:encoded`). Le repli vaut pour toutes
+            # les sources, et pour la colonne « Extrait » de l'export :
+            # le début d'un gros PDF est parfois du bruit d'en-tête, ce
+            # qui reste préférable à une carte vide.
+            #
+            # Même valeur que fragment_size : les deux extraits doivent
+            # occuper la même place à l'écran, sans quoi la liste de
+            # résultats respire différemment selon le champ trouvé.
+            "no_match_size":        200,
             # max_analyzed_offset : sans lui, dès qu'un document du lot
             # (ex: gros PST/PDF) dépasse index.highlight.max_analyzed_offset
             # (1 000 000 caractères), ES fait échouer TOUS les shards
