@@ -90,6 +90,68 @@ es = Elasticsearch(ES_HOST, retry_on_timeout=True, max_retries=3, request_timeou
 # défaut d'Elasticsearch fausse les comptes affichés.
 FACET_SHARD_SIZE = 500
 
+# Tris proposés, et le TYPE ES de chacun. Le type n'est pas décoratif :
+# il devient `unmapped_type` dans la clause de tri, et c'est lui qui
+# empêche la recherche fédérée de se briser.
+#
+# Le mapping d'une source SQL ne contient que ses colonnes déclarées,
+# plus `source` et `indexed_at` (sql_indexer._build_mapping) ; celui
+# d'une source de module n'a pas de `size` (plugin_indexer), pas plus que
+# les emails d'un PST, que pst_extractor.py n'indexe pas. Trier sur un
+# champ ABSENT du mapping d'un index fait échouer son shard —
+# « No mapping found for [date_modified] in order to sort on » — et
+# _verifier_shards() refuse alors, à juste titre, un résultat amputé.
+# L'utilisateur voyait « Résultat incomplet : 1 shard(s) sur 18 en
+# échec » dès qu'il triait autrement que par pertinence, sur un corpus
+# parfaitement sain. Constaté le 2026-08-18 sur agents_sql.
+#
+# `unmapped_type` dit à Elasticsearch de traiter le champ comme absent
+# plutôt que de renoncer : combiné à `missing: "_last"`, les documents
+# des index qui ne portent pas le champ se rangent en fin de liste, ce
+# qui est exactement ce qu'on veut dire par « ce document n'a pas de
+# date ». Le type doit correspondre à celui des index qui MAPPENT le
+# champ, sans quoi ES refuse à nouveau, pour incompatibilité cette fois.
+TRIS = {
+    "date_modified": "date",
+    "date_created":  "date",
+    "filename":      "keyword",
+    "size":          "long",
+}
+
+TRI_PERTINENCE = "_score"
+
+
+def _clause_de_tri(sort: str) -> list[dict]:
+    """Clause `sort` d'une recherche fédérée, ou 400 si le tri est inconnu.
+
+    Le refus est explicite plutôt que silencieux : un champ inconnu part
+    sinon tel quel vers Elasticsearch, qui fait échouer les shards un à
+    un et produit un « Résultat incomplet » qui ne dit rien de la cause.
+    L'interface ne peut pas en envoyer d'autre (SORT_OPTIONS côté UI, et
+    permalien.ts retombe déjà sur la pertinence pour une URL bricolée) :
+    ce cas signale donc un appel direct à l'API, à qui une erreur claire
+    rend plus service qu'un résultat amputé.
+    """
+    if sort == TRI_PERTINENCE:
+        return [{"_score": "desc"}]
+
+    if sort not in TRIS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Tri inconnu : '{sort}' — valeurs possibles : "
+                f"{TRI_PERTINENCE}, {', '.join(sorted(TRIS))}."
+            ),
+        )
+
+    # Le score en second critère : à dates égales — deux articles publiés
+    # le même jour, cas courant sur un flux RSS — c'est la pertinence qui
+    # départage, et non l'ordre d'insertion dans l'index.
+    return [
+        {sort: {"order": "desc", "missing": "_last", "unmapped_type": TRIS[sort]}},
+        {"_score": "desc"},
+    ]
+
 # Au-delà de cette durée totale, une recherche laisse une ligne WARNING
 # dans le journal (journalctl -u docsearch-api). Une ligne par recherche
 # noierait le journal sans rien apprendre : seules les lentes méritent
@@ -1275,15 +1337,7 @@ def search(
             }}},
         }
 
-    sort_clause = (
-        [{"_score": "desc"}]
-        if req.sort == "_score"
-        # "missing": "_last" explicite plutôt que de compter sur le
-        # comportement par défaut d'ES — utile ici car les emails PST
-        # n'ont pas de champ "size" (pst_extractor.py ne l'indexe pas),
-        # donc un tri par taille doit gérer ces valeurs absentes.
-        else [{req.sort: {"order": "desc", "missing": "_last"}}, {"_score": "desc"}]
-    )
+    sort_clause = _clause_de_tri(req.sort)
 
     # Le champ surligné suit les champs interrogés — voir _config_surlignage.
     champ_extrait, options_extrait = _config_surlignage(req.exact)
@@ -1671,11 +1725,7 @@ def export_search_results(req: SearchExportQuery, user: str = Depends(current_us
     # Le champ surligné suit les champs interrogés — voir _config_surlignage.
     champ_extrait, options_extrait = _config_surlignage(req.exact)
 
-    sort_clause = (
-        [{"_score": "desc"}]
-        if req.sort == "_score"
-        else [{req.sort: {"order": "desc", "missing": "_last"}}, {"_score": "desc"}]
-    )
+    sort_clause = _clause_de_tri(req.sort)
 
     try:
         res = es.search(
