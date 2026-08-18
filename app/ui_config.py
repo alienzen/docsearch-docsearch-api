@@ -252,6 +252,24 @@ DEFAULT_UI_CONFIG = {
     # est la façon de les retirer sans toucher au code.
     "search_examples": "auteur:Dupont budget\ntype:pdf marché public\n"
                        "\"délégation de service\"\nsource:RH congés 2025",
+    # Recherche jouée d'office à l'ouverture de la page de recherche
+    # (docsearch-ui-vue), quand l'URL n'en porte aucune. Vide par défaut =
+    # écran d'accueil habituel, donc rien ne change tant qu'un
+    # administrateur n'y a pas touché.
+    #
+    # MÊME SYNTAXE QUE LA BARRE DE RECHERCHE, opérateurs compris
+    # ("source:RH type:pdf note de service") : c'est l'interface qui
+    # l'analyse, avec le parseur qu'elle applique déjà à une saisie
+    # d'utilisateur et à un exemple cliqué (parseAdvancedQuery). Pas un
+    # second format à apprendre, et surtout pas une requête Elasticsearch
+    # — cette valeur ne contourne RIEN : la recherche part authentifiée
+    # depuis le navigateur du visiteur et reste filtrée par SES droits,
+    # exactement comme s'il l'avait tapée.
+    #
+    # Ne remplace pas l'écran d'accueil quand le visiteur arrive par un
+    # permalien, un signet ou un retour arrière : ses critères à lui
+    # priment toujours (voir useRechercheParDefaut.ts).
+    "default_search": "",
     "sources_mount_display": "",   # remplace, uniquement à l'affichage/copie côté index.html
                             # (copyPathClick), le préfixe SOURCES_MOUNT (ex: "/sources", chemin de
                             # montage interne aux conteneurs) par une valeur utilisable par

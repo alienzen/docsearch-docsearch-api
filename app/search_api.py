@@ -3453,6 +3453,9 @@ class UiConfigUpdate(BaseModel):
     login_proconnect_enabled: bool | None = None
     # Un exemple par ligne — voir ui_config.py.
     search_examples: str | None = None
+    # Recherche jouée à l'ouverture, dans la syntaxe de la barre de
+    # recherche — voir ui_config.py.
+    default_search: str | None = None
     sources_mount_display: str | None = None
 
 
@@ -3601,6 +3604,8 @@ def admin_set_ui_config(body: UiConfigUpdate, user: str = Depends(require_admin)
             config = ui_config.set_param("login_proconnect_enabled", body.login_proconnect_enabled)
         if body.search_examples is not None:
             config = ui_config.set_text("search_examples", body.search_examples)
+        if body.default_search is not None:
+            config = ui_config.set_text("default_search", body.default_search)
         if body.sources_mount_display is not None:
             config = ui_config.set_text("sources_mount_display", body.sources_mount_display)
         return config
